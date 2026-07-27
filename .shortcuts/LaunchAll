@@ -1,0 +1,7 @@
+#!/data/data/com.termux/files/usr/bin/bash
+# Termux Widget Shortcut: Launch All Scanning Services
+# This widget launches all background scanning tasks
+
+echo "[*] Launching all services..."
+bash "$HOME/launch_all.sh"
+echo "[+] Done! Check your terminal window for details."

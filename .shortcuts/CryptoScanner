@@ -1,0 +1,10 @@
+#!/data/data/com.termux/files/usr/bin/bash
+set -e
+cd "$HOME"
+if [ -f "$HOME/crypto_scanner.pid" ] && ps -p $(cat "$HOME/crypto_scanner.pid") > /dev/null 2>&1; then
+    echo "[*] CryptoScanner is already running (PID $(cat $HOME/crypto_scanner.pid))"
+else
+    rm -f "$HOME/crypto_scanner.pid"
+    nohup python3 "$HOME/crypto_scanner.py" "$HOME/.trufflehog_results.jsonl" >> "$HOME/crypto_scanner_scanner.log" 2>&1 &
+    echo "[+] CryptoScanner started"
+fi

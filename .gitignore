@@ -1,0 +1,41 @@
+# TruffleHog output - user can regen
+.trufflehog_results.jsonl
+.trufflehog_mass_results.jsonl
+crypto_findings.jsonl
+
+# Runtime/generated files
+crypto_scanner.pid
+crypto_scanner_memory.jsonl
+crypto_scanner_status.txt
+crypto_scanner_scanner.log
+launch_all.log
+trufflehog_throttled.log
+scan_out.txt
+scan_test_out.txt
+
+# Test files
+test_crypto.jsonl
+test_sample.jsonl
+paste.txt
+paste.txt.bak
+
+# System / IDE / cache
+.bash_history
+.bashrc
+.bun/
+.cache/
+.cline/
+.lesshst
+.local/
+.npm/
+.ssh/
+.termux/
+.tmp_scan/
+__pycache__/
+core/
+storage/
+test_clone_ok/
+
+# Build artifacts / binaries
+-a
+cb_snippet.txt
