@@ -29,7 +29,17 @@ else
     log "[!] WARNING: run_throttled.py not found, skipping mass scan"
 fi
 
-# 2. (Optional) You can add more services here
+# 2. Launch crypto scanner
+if [ -f "$HOME/crypto_scanner.py" ]; then
+    log "[*] Launching crypto scanner..."
+    nohup python3 "$HOME/crypto_scanner.py" "$HOME/.trufflehog_results.jsonl" >> "$HOME/crypto_scanner_scanner.log" 2>&1 &
+    SCANNER_PID=$!
+    log "[+] Crypto scanner started (PID: $SCANNER_PID)"
+else
+    log "[!] WARNING: crypto_scanner.py not found, skipping crypto scanner"
+fi
+
+# 3. (Optional) You can add more services here
 #    Example: start a web server, monitoring daemon, etc.
 #
 # if [ -f "$HOME/my_service.py" ]; then
@@ -38,12 +48,13 @@ fi
 #     log "[+] my_service started (PID: $!)"
 # fi
 
-# 3. Show running background jobs
+# 4. Show running background jobs
 log "[*] Background jobs:"
 jobs -l | tee -a "$LOGFILE"
 
 log "[*] All services launched"
-log "[*] Log file: $LOGFILE"
+log "[*] Main log: $LOGFILE"
+log "[*] Crypto scanner log: $HOME/crypto_scanner_scanner.log"
 log "[*] To see live output: tail -f $LOGFILE"
 log "[*] To stop all: kill %1 %2 ... or use 'killall python3'"
 
@@ -53,10 +64,15 @@ echo "SUMMARY"
 echo "========================================"
 echo "Status: All services running in background"
 echo "Logs:   $LOGFILE"
+echo "        $HOME/crypto_scanner_scanner.log"
 echo ""
 echo "Useful commands:"
-echo "  tail -f $LOGFILE   # Watch live logs"
-echo "  jobs -l            # List background jobs"
-echo "  kill %1            # Stop job number 1"
-echo "  pkill -f run_throttled.py  # Stop scan"
+echo "  tail -f $LOGFILE               # Watch live main logs"
+echo "  tail -f ~/crypto_scanner_scanner.log  # Watch crypto scanner"
+echo "  jobs -l                        # List background jobs"
+echo "  kill %1                        # Stop job number 1"
+echo "  pkill -f run_throttled.py      # Stop truffle scan"
+echo "  pkill -f crypto_scanner.py     # Stop crypto scanner"
+echo "  scanmem                        # Tail latest findings"
+echo "  scanstatus                     # Show scanner status"
 echo "========================================"
