@@ -4,6 +4,11 @@
 *.key
 *.pem
 
+# TruffleHog output
+.trufflehog_results.jsonl
+.trufflehog_mass_results.jsonl
+crypto_findings.jsonl
+
 # Runtime/generated files
 *.log
 *.pid
