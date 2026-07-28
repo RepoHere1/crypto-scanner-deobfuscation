@@ -3,6 +3,7 @@
 set -e
 
 export ALCHEMY_API_KEY="${ALCHEMY_API_KEY:-mi8wM6xm7rRBMYTCjHfM5}"
+export ANKR_API_KEY="${ANKR_API_KEY:-686c37d4360af4d79afda6313ea426fef99f5c4320b380589ccb2c93d830112e}"
 
 SCAN_RESULTS="$HOME/.trufflehog_results.jsonl"
 : > "$SCAN_RESULTS"

@@ -23,6 +23,7 @@ import functools
 import threading
 import queue as queue_module
 import logging
+import shutil
 from urllib.error import URLError, HTTPError
 from datetime import datetime, timezone
 from typing import Dict, List, Tuple, Optional, Any
@@ -120,6 +121,13 @@ STATUS_FILE = os.path.join(APP_DIR, "crypto_scanner_status.txt")
 BALANCE_CACHE_FILE = os.path.join(APP_DIR, "balance_cache.jsonl")
 HIGH_CONFIDENCE_FILE = os.path.join(APP_DIR, "high_confidence_hits.jsonl")
 BALANCE_HIT_FILE = os.path.join(APP_DIR, "balances_hit.jsonl")
+
+# ---------------------------------------------------------------------------
+# Disk space safety
+# ---------------------------------------------------------------------------
+SAFE_SHUTDOWN_THRESHOLD_MB = 100  # MB free below this → controlled shutdown
+CONTROLLED_SHUTDOWN_FLAG = os.path.join(APP_DIR, ".controlled_shutdown")
+CHECKPOINT_FILE = os.path.join(APP_DIR, ".scanner_checkpoint")
 
 # Optional API keys read from env
 ETHERSCAN_KEY = os.environ.get("ETHERSCAN_API_KEY", "")
@@ -527,6 +535,49 @@ def throttle_cpu_ram(sleep_base: float = 0.05):
         time.sleep(sleep_base * 4)
     elif mem >= 256:
         logger.debug("Memory OK: %.1f MB available", mem)
+
+
+# ---------------------------------------------------------------------------
+# Disk space safety
+# ---------------------------------------------------------------------------
+def check_disk_space(threshold_mb: float = SAFE_SHUTDOWN_THRESHOLD_MB) -> Optional[str]:
+    """Return None if free space > *threshold_mb*, otherwise a human-readable
+    warning string.  Uses the APP_DIR filesystem (where all scan files live)."""
+    try:
+        usage = shutil.disk_usage(APP_DIR)
+        free_mb = usage.free / (1024 * 1024)
+        if free_mb < threshold_mb:
+            return f"Only {free_mb:.1f} MB free (threshold {threshold_mb} MB)"
+    except Exception as exc:
+        logger.debug("check_disk_space: %s", exc)
+    return None
+
+
+def save_checkpoint(processed: int, findings_total: int) -> None:
+    """Persist scanner state so it can resume after a controlled shutdown."""
+    data = {
+        "processed": processed,
+        "findings_total": findings_total,
+        "timestamp": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+    }
+    try:
+        with open(CHECKPOINT_FILE, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2)
+        logger.info("Checkpoint saved to %s", CHECKPOINT_FILE)
+    except Exception as exc:
+        logger.warning("Failed to save checkpoint: %s", exc)
+
+
+def controlled_shutdown(processed: int, findings_total: int, reason: str) -> None:
+    """Graceful exit that saves state so the scanner can resume later."""
+    logger.warning("CONTROLLED SHUTDOWN triggered: %s", reason)
+    save_checkpoint(processed, findings_total)
+    try:
+        with open(CONTROLLED_SHUTDOWN_FLAG, "w", encoding="utf-8") as f:
+            f.write(f"reason={reason}\ntimestamp={datetime.now(timezone.utc).isoformat()}\n")
+    except Exception:
+        pass
+    logger.info("Controlled shutdown complete. Restart %s to resume.", __file__)
 
 
 # ---------------------------------------------------------------------------
@@ -1132,6 +1183,19 @@ def main():
     logger.info("Interval: %ds", CHECK_INTERVAL)
     logger.info("Press Ctrl+C to stop")
 
+    # If a previous controlled shutdown flag exists, report it and remove it.
+    if os.path.exists(CONTROLLED_SHUTDOWN_FLAG):
+        try:
+            with open(CONTROLLED_SHUTDOWN_FLAG, "r") as _f:
+                _flag_line = _f.read().strip()
+            logger.warning("Previous controlled shutdown: %s", _flag_line)
+        except Exception:
+            pass
+        try:
+            os.remove(CONTROLLED_SHUTDOWN_FLAG)
+        except OSError:
+            pass
+
     os.makedirs(os.path.dirname(PID_FILE), exist_ok=True)
     with open(PID_FILE, "w") as f:
         f.write(str(os.getpid()))
@@ -1159,7 +1223,15 @@ def main():
                 balance_queue.put((chain, a))
 
     try:
+        _line_count = 0
         for line in tail_file(scan_path):
+            _line_count += 1
+            # Check disk space every 50 lines to protect against filling the disk.
+            if _line_count % 50 == 0:
+                low = check_disk_space()
+                if low:
+                    controlled_shutdown(processed, BALANCE_HITS_COUNT, low)
+                    break
             if not line.strip():
                 continue
             h = hashlib.md5(line.encode()).hexdigest()

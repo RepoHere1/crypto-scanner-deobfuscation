@@ -38,7 +38,8 @@ pkill -f run_throttled.py 2>/dev/null || true
 pkill -f crypto_scanner.py 2>/dev/null || true
 
 if command -v termux-notification >/dev/null 2>&1; then
-    termux-notification --title "Crypto Scanner" --content "All scanning services stopped" 2>/dev/null || true
+    # Fire-and-forget; don't let a missing/unresponsive Termux:API hang the script
+    (termux-notification --title "Crypto Scanner" --content "All scanning services stopped" >/dev/null 2>&1 &) >/dev/null 2>&1 || true
 fi
 
 log "[+] All services stopped"

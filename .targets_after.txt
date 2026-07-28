@@ -1,0 +1,12 @@
+   400 /data/data/com.termux/files/home/targets/targets_circleci.txt
+   157 /data/data/com.termux/files/home/targets/targets_docker.txt
+   300 /data/data/com.termux/files/home/targets/targets_elasticsearch.txt
+   700 /data/data/com.termux/files/home/targets/targets_gcs.txt
+  2411 /data/data/com.termux/files/home/targets/targets_github.txt
+   800 /data/data/com.termux/files/home/targets/targets_gitlab.txt
+   600 /data/data/com.termux/files/home/targets/targets_hf.txt
+   400 /data/data/com.termux/files/home/targets/targets_jenkins.txt
+   400 /data/data/com.termux/files/home/targets/targets_postman.txt
+   700 /data/data/com.termux/files/home/targets/targets_s3.txt
+   200 /data/data/com.termux/files/home/targets/targets_syslog.txt
+  7068 total

@@ -1,0 +1,106 @@
+# Provider metadata for the target generator pipeline.
+# No credentials or secrets are stored in this file.
+providers:
+  github:
+    name: GitHub
+    public_api_base: https://api.github.com
+    auth_type: token
+    docs_url: https://docs.github.com/en/rest
+    rate_limit_note: 5000 requests/hour authenticated; 60/hour unauthenticated
+    example_env_vars:
+      - GITHUB_TOKEN
+
+  gitlab:
+    name: GitLab
+    public_api_base: https://gitlab.com/api/v4
+    auth_type: token
+    docs_url: https://docs.gitlab.com/ee/api/
+    rate_limit_note: Varies by endpoint; personal/group access tokens recommended
+    example_env_vars:
+      - GITLAB_TOKEN
+
+  huggingface:
+    name: Hugging Face
+    public_api_base: https://huggingface.co/api
+    auth_type: token
+    docs_url: https://huggingface.co/docs/hub/api
+    rate_limit_note: Rate limits apply; user access tokens available
+    example_env_vars:
+      - HF_TOKEN
+
+  docker:
+    name: Docker Hub
+    public_api_base: https://hub.docker.com/v2
+    auth_type: none
+    docs_url: https://docs.docker.com/docker-hub/api/latest/
+    rate_limit_note: Generally unauthenticated for public image metadata
+    example_env_vars: []
+
+  circleci:
+    name: CircleCI
+    public_api_base: https://circleci.com/api/v2
+    auth_type: token
+    docs_url: https://circleci.com/docs/api/v2/
+    rate_limit_note: 100 requests/minute for most endpoints
+    example_env_vars:
+      - CIRCLECI_TOKEN
+      - CIRCLE_TOKEN
+
+  postman:
+    name: Postman API
+    public_api_base: https://api.getpostman.com
+    auth_type: token
+    docs_url: https://learning.postman.com/docs/developer/intro-api/
+    rate_limit_note: 1000 requests/hour on free tier; varies by plan
+    example_env_vars:
+      - POSTMAN_API_KEY
+
+  aws_s3:
+    name: AWS S3
+    public_api_base: https://s3.amazonaws.com
+    auth_type: key
+    docs_url: https://docs.aws.amazon.com/AmazonS3/latest/API/Type_API_Reference.html
+    rate_limit_note: Public buckets may allow unauthenticated GETs; IAM keys otherwise
+    example_env_vars:
+      - AWS_ACCESS_KEY_ID
+      - AWS_SECRET_ACCESS_KEY
+      - AWS_SESSION_TOKEN
+
+  gcs:
+    name: Google Cloud Storage
+    public_api_base: https://storage.googleapis.com
+    auth_type: key
+    docs_url: https://cloud.google.com/storage/docs/json_api
+    rate_limit_note: Public buckets may allow unauthenticated access; service-account keys otherwise
+    example_env_vars:
+      - GOOGLE_APPLICATION_CREDENTIALS
+      - GOOGLE_CLOUD_PROJECT
+
+  jenkins:
+    name: Jenkins
+    public_api_base: private deployment
+    auth_type: token
+    docs_url: https://www.jenkins.io/doc/book/using/remote-access-api/
+    rate_limit_note: Private by default; no public endpoint
+    example_env_vars:
+      - JENKINS_USER
+      - JENKINS_TOKEN
+
+  elasticsearch:
+    name: Elasticsearch
+    public_api_base: private deployment
+    auth_type: token
+    docs_url: https://www.elastic.co/guide/en/elasticsearch/reference/current/rest-apis.html
+    rate_limit_note: Private by default; API keys or basic auth typical
+    example_env_vars:
+      - ELASTICSEARCH_API_KEY
+      - ELASTICSEARCH_USERNAME
+      - ELASTICSEARCH_PASSWORD
+
+  syslog:
+    name: Syslog
+    public_api_base: private deployment
+    auth_type: none
+    docs_url: https://datatracker.ietf.org/doc/html/rfc5424
+    rate_limit_note: Private by default; UDP/TCP endpoints, usually no auth
+    example_env_vars: []

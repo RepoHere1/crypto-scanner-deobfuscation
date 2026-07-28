@@ -1,0 +1,46 @@
+{
+  "github": {
+    "success_rate": 0.05500000000000001,
+    "last_checked": "2026-07-28T03:13:39.870866"
+  },
+  "gitlab": {
+    "success_rate": 0.028499999999999998,
+    "last_checked": null
+  },
+  "huggingface": {
+    "success_rate": 0.02,
+    "last_checked": null
+  },
+  "docker": {
+    "success_rate": 0.01,
+    "last_checked": null
+  },
+  "circleci": {
+    "success_rate": 0.04,
+    "last_checked": null
+  },
+  "postman": {
+    "success_rate": 0.03,
+    "last_checked": null
+  },
+  "aws_s3": {
+    "success_rate": 0.07,
+    "last_checked": null
+  },
+  "gcs": {
+    "success_rate": 0.06,
+    "last_checked": null
+  },
+  "jenkins": {
+    "success_rate": 0.02,
+    "last_checked": null
+  },
+  "elasticsearch": {
+    "success_rate": 0.01,
+    "last_checked": null
+  },
+  "syslog": {
+    "success_rate": 0.01,
+    "last_checked": null
+  }
+}

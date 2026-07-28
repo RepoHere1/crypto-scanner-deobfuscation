@@ -1,0 +1,59 @@
+# GitHub
+https://github.com/trufflesecurity/trufflehog
+https://github.com/solana-labs/solana.git
+solana-labs
+ethereum/go-ethereum
+
+# GitLab
+https://gitlab.com/gitlab-org/gitlab-runner
+gitlab-org/omnibus-gitlab
+
+# HuggingFace
+https://huggingface.co/tiiuae/falcon-7b
+huggingface.co/google/bert
+
+# Docker
+hub.docker.com/r/library/nginx
+ghcr.io/github/super-linter
+myuser/myimage:latest
+docker pull bitnami/redis
+
+# CircleCI
+https://circleci.com/gh/facebook/react
+CircleCI-Public/cimg-node
+
+# Postman
+https://postman.com/workspace/my-workspace
+https://www.postman.com/collection/12345
+postman.com/team/my-team
+
+# S3
+s3://my-bucket/path/to/object
+https://my-bucket.s3.amazonaws.com/key
+
+# GCS
+gs://my-bucket/path
+https://storage.googleapis.com/my-bucket/key
+
+# Jenkins
+https://jenkins.example.com/job/my-job
+jenkins://my-jenkins/job/other
+
+# Elasticsearch
+https://es.example.com:9200/index
+es://localhost:9200
+
+# Syslog
+syslog://logs.example.com:514
+tcp+tls://logs.example.com:6514
+
+# Crypto (dummy / well-known test values)
+BTC: 1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa
+ETH: 0xdAC17F958D2ee523a2206206994597C13D831ec7
+HEX: 0000000000000000000000000000000000000000000000000000000000000001
+WIF: 5HueCGU8rMjxEXxiPuD5BDku4MkFqeZyd4dZ1jvhTVqvbTLvyTJ
+
+# API / RPC
+https://eth-mainnet.g.alchemy.com/v2/FAKE_ALCHEMY_KEY_12345
+api_key = "DEMO_GENERIC_SECRET_12345678"
+https://rpc.ankr.com/eth

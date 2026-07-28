@@ -30,6 +30,12 @@ RESULTS_FILE = os.path.join(HOME, ".trufflehog_results.jsonl")
 MASS_FILE = os.path.join(HOME, ".trufflehog_mass_results.jsonl")
 LAUNCH_LOG = os.path.join(HOME, "launch_all.log")
 SCANNER_LOG = os.path.join(HOME, "crypto_scanner_scanner.log")
+ENCRYPT_MANIFEST = os.path.join(HOME, ".encrypt_manifest.json")
+ENCRYPTED_FILES = [
+    os.path.join(HOME, "crypto_scanner_memory.jsonl.enc"),
+    os.path.join(HOME, "high_confidence_hits.jsonl.enc"),
+    os.path.join(HOME, "balances_hit.jsonl.enc"),
+]
 
 CHAIN_COLORS = {
     "btc": "\033[93m", "eth": "\033[96m", "ltc": "\033[94m",
@@ -84,6 +90,48 @@ def human_size(n):
             return f"{n:.1f}{unit}"
         n /= 1024
     return f"{n:.1f}TB"
+
+
+def disk_info():
+    """Return (used_human, avail_human, use_pct, filesystem) for home dir."""
+    try:
+        usage = shutil.disk_usage(HOME)
+        total = usage.total / (1024 * 1024)
+        used = (usage.total - usage.free) / (1024 * 1024)
+        avail = usage.free / (1024 * 1024)
+        pct = (used / total * 100) if total > 0 else 0
+        return used, avail, pct
+    except Exception:
+        return 0, 0, 0
+
+
+def encrypt_status():
+    """Return list of status lines about encrypted findings."""
+    lines = []
+    manifest = {}
+    if os.path.exists(ENCRYPT_MANIFEST):
+        try:
+            with open(ENCRYPT_MANIFEST, "r") as f:
+                manifest = json.load(f)
+        except Exception:
+            pass
+
+    if manifest:
+        when = manifest.get("encrypted_at", "?")
+        url = manifest.get("gist_url", "")
+        files = manifest.get("files", [])
+        lines.append(f"  Status : {GREEN}ENCRYPTED{RESET}")
+        lines.append(f"  Gist   : {url}")
+        lines.append(f"  At     : {when}")
+        lines.append(f"  Files  : {len(files)} encrypted")
+    else:
+        any_encrypted = any(os.path.exists(f) for f in ENCRYPTED_FILES)
+        if any_encrypted:
+            lines.append(f"  Status : {RED}PARTIAL{RESET} (some .enc files exist but no manifest)")
+        else:
+            lines.append(f"  Status : {DIM}Not encrypted{RESET}")
+            lines.append(f"  Run    : encrypt_offload.py --encrypt")
+    return lines
 
 
 def parse_status():

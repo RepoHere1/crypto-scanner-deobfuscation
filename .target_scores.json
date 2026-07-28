@@ -1,0 +1,32 @@
+{
+  "7b21ca671ae9b2cb": {
+    "score": 0.35000000000000003,
+    "platform": "github",
+    "last_updated": "2026-07-28T03:13:39.870593",
+    "context_bonus": 0.30000000000000004
+  },
+  "a8ae508e521b70ec": {
+    "score": 0.25,
+    "platform": "github",
+    "last_updated": "2026-07-28T03:13:39.870705",
+    "context_bonus": 0.2
+  },
+  "38e050a07d058c65": {
+    "score": 0.05,
+    "platform": "github",
+    "last_updated": "2026-07-28T03:13:39.870756",
+    "context_bonus": 0
+  },
+  "393423332229dd19": {
+    "score": 0.13,
+    "platform": "gitlab",
+    "last_updated": "2026-07-28T03:13:39.870802",
+    "context_bonus": 0.1
+  },
+  "a383608fecbd5d3f": {
+    "score": 0.12000000000000001,
+    "platform": "huggingface",
+    "last_updated": "2026-07-28T03:13:39.870847",
+    "context_bonus": 0.1
+  }
+}

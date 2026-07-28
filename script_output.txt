@@ -1,0 +1,89 @@
+Starting API sweep for 7000 repos...
+
+[Topic] Searching: 'machine-learning'
+   Page 1 saved. Total progress: 100 / 7000
+   Page 2 saved. Total progress: 200 / 7000
+   Page 3 saved. Total progress: 300 / 7000
+   Page 4 saved. Total progress: 400 / 7000
+   Page 5 saved. Total progress: 500 / 7000
+   Page 6 saved. Total progress: 600 / 7000
+   Page 7 saved. Total progress: 700 / 7000
+   Page 8 saved. Total progress: 800 / 7000
+   Page 9 saved. Total progress: 900 / 7000
+   Page 10 saved. Total progress: 1000 / 7000
+
+[Topic] Searching: 'deep-learning'
+   Page 1 saved. Total progress: 1100 / 7000
+   Page 2 saved. Total progress: 1200 / 7000
+   Page 3 saved. Total progress: 1300 / 7000
+   Page 4 saved. Total progress: 1400 / 7000
+   Page 5 saved. Total progress: 1500 / 7000
+   Page 6 saved. Total progress: 1600 / 7000
+   Page 7 saved. Total progress: 1700 / 7000
+   Page 8 saved. Total progress: 1800 / 7000
+   Page 9 saved. Total progress: 1900 / 7000
+   Page 10 saved. Total progress: 2000 / 7000
+
+[Topic] Searching: 'llm'
+   Page 1 saved. Total progress: 2100 / 7000
+   Page 2 saved. Total progress: 2200 / 7000
+   Page 3 saved. Total progress: 2300 / 7000
+   Page 4 saved. Total progress: 2400 / 7000
+   Page 5 saved. Total progress: 2500 / 7000
+   Page 6 saved. Total progress: 2600 / 7000
+   Page 7 saved. Total progress: 2700 / 7000
+   Page 8 saved. Total progress: 2800 / 7000
+   Page 9 saved. Total progress: 2900 / 7000
+   Page 10 saved. Total progress: 3000 / 7000
+
+[Topic] Searching: 'large-language-models'
+   Page 1 saved. Total progress: 3100 / 7000
+   Page 2 saved. Total progress: 3200 / 7000
+   Page 3 saved. Total progress: 3300 / 7000
+   Page 4 saved. Total progress: 3400 / 7000
+   Page 5 saved. Total progress: 3500 / 7000
+   Page 6 saved. Total progress: 3600 / 7000
+   Page 7 saved. Total progress: 3700 / 7000
+   Page 8 saved. Total progress: 3800 / 7000
+   Page 9 saved. Total progress: 3900 / 7000
+   Page 10 saved. Total progress: 4000 / 7000
+
+[Topic] Searching: 'artificial-intelligence'
+   Page 1 saved. Total progress: 4100 / 7000
+   Page 2 saved. Total progress: 4200 / 7000
+   Page 3 saved. Total progress: 4300 / 7000
+   Page 4 saved. Total progress: 4400 / 7000
+   Page 5 saved. Total progress: 4500 / 7000
+   Page 6 saved. Total progress: 4600 / 7000
+   Page 7 saved. Total progress: 4700 / 7000
+   Page 8 saved. Total progress: 4800 / 7000
+   Page 9 saved. Total progress: 4900 / 7000
+   Page 10 saved. Total progress: 5000 / 7000
+
+[Topic] Searching: 'transformers'
+   Page 1 saved. Total progress: 5100 / 7000
+   Page 2 saved. Total progress: 5200 / 7000
+   Page 3 saved. Total progress: 5300 / 7000
+   Page 4 saved. Total progress: 5400 / 7000
+   Page 5 saved. Total progress: 5500 / 7000
+   Page 6 saved. Total progress: 5600 / 7000
+   Page 7 saved. Total progress: 5700 / 7000
+   Page 8 saved. Total progress: 5800 / 7000
+   Page 9 saved. Total progress: 5900 / 7000
+   Page 10 saved. Total progress: 6000 / 7000
+
+[Topic] Searching: 'pytorch'
+   Page 1 saved. Total progress: 6100 / 7000
+   Page 2 saved. Total progress: 6200 / 7000
+   Page 3 saved. Total progress: 6300 / 7000
+   Page 4 saved. Total progress: 6400 / 7000
+   Page 5 saved. Total progress: 6500 / 7000
+   Page 6 saved. Total progress: 6600 / 7000
+   Page 7 saved. Total progress: 6700 / 7000
+   Page 8 saved. Total progress: 6800 / 7000
+   Page 9 saved. Total progress: 6900 / 7000
+   Page 10 saved. Total progress: 7000 / 7000
+
+Completed.
+Total repositories exported: 7000
+Output CSV saved to: /data/data/com.termux/files/home/github_repositories.csv

@@ -18,6 +18,9 @@ MEMORY_FILE = os.path.join(HOME, "crypto_scanner_memory.jsonl")
 CACHE_FILE = os.path.join(HOME, "balance_cache.jsonl")
 HITS_FILE = os.path.join(HOME, "balances_hit.jsonl")
 
+sys.path.insert(0, HOME)
+import crypto_scanner as cs
+
 
 def load_records(path):
     records = []
@@ -45,10 +48,30 @@ def load_balances():
 
 def format_balance(bal):
     if bal is None:
-        return "ERROR"
+        return "PENDING"
     if bal == 0:
         return "0.00000000"
     return f"{bal:,.8f}"
+
+
+def derive_for_key(key_type, key_value):
+    """Re-derive the current chain set from a private key/seed."""
+    if key_type == "WIF":
+        priv = cs.wif_to_priv_bytes(key_value)
+        addrs = cs.priv_to_addresses(priv) if priv else {}
+    elif key_type == "HEX":
+        try:
+            addrs = cs.priv_to_addresses(bytes.fromhex(key_value))
+        except Exception:
+            addrs = {}
+    elif key_type == "SEED":
+        addrs = cs.seed_to_addresses(key_value)
+    else:
+        addrs = {}
+    result = {}
+    for chain, addr in addrs.items():
+        result[(chain, addr)] = {"chain": chain, "address": addr, "from": key_type.lower()}
+    return result
 
 
 def gather_wallets():
@@ -80,6 +103,10 @@ def gather_wallets():
         for seed in wallet.get("seed_phrases", []):
             add_wallet("SEED", seed)
 
+    # Ensure every wallet shows the latest supported chains.
+    for (key_type, key_value), w in wallets.items():
+        w["addresses"].update(derive_for_key(key_type, key_value))
+
     return list(wallets.values())
 
 
@@ -92,7 +119,7 @@ def render():
         all_addresses.update(w["addresses"].keys())
 
     nonzero = [k for k, v in balances.items() if v and v > 0]
-    total_balance = sum(balances.get(k, 0) or 0 for k in all_addresses)
+    total_balance = sum(balances.get(k, 0) or 0 for k in nonzero)
 
     os.system("clear")
     print("=" * 76)
