@@ -77,7 +77,12 @@ def derive_for_key(key_type, key_value):
 def gather_wallets():
     """Group records by private key/seed and collect all derived addresses."""
     wallets = {}
-    for rec in load_records(MEMORY_FILE):
+    records = load_records(MEMORY_FILE)  # Load once to enable sorting
+    
+    # Sort records by timestamp if available (newest first)
+    sorted_records = sorted(records, key=lambda x: x.get("timestamp", str(x.get("time", ""))), reverse=True)
+    
+    for rec in sorted_records:
         findings = rec.get("findings", {})
         wallet = findings.get("wallet", {})
         derived = findings.get("derived_addresses", [])
@@ -89,6 +94,7 @@ def gather_wallets():
                 "type": key_type,
                 "key": key_value,
                 "addresses": {},
+                "timestamp": rec.get("timestamp", rec.get("time", "")),  # Store timestamp for sorting
             })
             for d in derived:
                 chain = d.get("chain", "?")
@@ -107,7 +113,9 @@ def gather_wallets():
     for (key_type, key_value), w in wallets.items():
         w["addresses"].update(derive_for_key(key_type, key_value))
 
-    return list(wallets.values())
+    # Return wallets sorted by timestamp (newest first)
+    sorted_wallets = sorted(wallets.values(), key=lambda x: x.get("timestamp", ""), reverse=True)
+    return sorted_wallets
 
 
 def render():
@@ -160,18 +168,22 @@ def render():
 
 def main():
     parser = argparse.ArgumentParser(description="Wallet balance viewer")
-    parser.add_argument("--watch", "-w", action="store_true", help="refresh every 5 seconds")
+    parser.add_argument("--watch", "-w", action="store_true", help="refresh every 30 seconds")
     args = parser.parse_args()
 
-    try:
-        while True:
-            render()
-            if not args.watch:
-                break
-            time.sleep(5)
-    except KeyboardInterrupt:
-        print()
-        sys.exit(0)
+    # Set default to watch mode with 30 second refresh
+    if not args.watch:
+        render()
+    else:
+        try:
+            while True:
+                # Clear screen for better visibility at top
+                print("\033[H\033[J", end="")  # ANSI escape codes to clear screen
+                render()
+                time.sleep(30)
+        except KeyboardInterrupt:
+            print()
+            sys.exit(0)
 
 
 if __name__ == "__main__":
