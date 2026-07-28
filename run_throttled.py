@@ -19,6 +19,53 @@ with open(PID_FILE, "w") as f:
 
 print("[*] Throttler active: nice=%d" % os.nice(0))
 
+# ---------------------------------------------------------------------------
+# WiFi resilience — wait for connectivity before launching, and auto-restart
+# the mass scan if WiFi drops mid-execution so scanning resumes from where
+# it left off rather than crashing.
+# ---------------------------------------------------------------------------
+WIFI_WAIT_INTERVAL = 30  # seconds between connectivity checks
+
+
+def _is_wifi_connected(timeout=5):
+    """Return True if the device has working internet connectivity."""
+    try:
+        import urllib.request
+        urllib.request.urlopen("https://www.google.com", timeout=timeout)
+        return True
+    except Exception:
+        return False
+
+
+def _wait_for_wifi():
+    """Block until WiFi/internet connectivity is restored, then return."""
+    start = time.time()
+    while True:
+        if _is_wifi_connected():
+            elapsed = time.time() - start
+            print("[wifi] Connectivity restored after ~%.0fs — resuming." % elapsed)
+            return
+        elapsed = time.time() - start
+        print(
+            "[wifi] No connectivity for ~%.0fs — retrying in %ds..."
+            % (elapsed, WIFI_WAIT_INTERVAL)
+        )
+        time.sleep(WIFI_WAIT_INTERVAL)
+
+
+def _wait_for_wifi_before_launch():
+    """Block until WiFi is available before starting the mass scan."""
+    if _is_wifi_connected():
+        print("[wifi] Connectivity OK — starting mass scan.")
+        return
+    print("[wifi] No connectivity at launch — waiting for WiFi...")
+    _wait_for_wifi()
+
+
+# Wait for WiFi before starting the mass scan.
+# This prevents the scan from crashing immediately when WiFi is down.
+_wait_for_wifi_before_launch()
+
 cmd = [
     sys.executable,
     os.path.expanduser("~/.local/lib/trufflehog-tools/mass_scan.py"),
@@ -61,10 +108,35 @@ signal.signal(signal.SIGINT, cleanup)
 
 try:
     for line in proc.stdout:
+        # Monitor stdout during execution — if WiFi drops we can't easily
+        # detect it from here, but the child subprocess (trufflehog) will
+        # hit connection errors and either hang or fail.  If the subprocess
+        # exits, we wait for WiFi and restart it.
         sys.stdout.write("[%s] %s" % (time.strftime("%H:%M:%S"), line))
         sys.stdout.flush()
 except KeyboardInterrupt:
     cleanup()
 
+# Process exited — if it was due to a WiFi outage, wait and restart.
 ret = proc.wait()
+if ret != 0 and not _is_wifi_connected():
+    print("[wifi] Mass scan exited with code %d — WiFi looks down, waiting..." % ret)
+    _wait_for_wifi()
+    print("[wifi] Restarting mass scan after connectivity restored.")
+    proc = subprocess.Popen(
+        cmd,
+        cwd=HOME,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        bufsize=1,
+    )
+    try:
+        for line in proc.stdout:
+            sys.stdout.write("[%s] %s" % (time.strftime("%H:%M:%S"), line))
+            sys.stdout.flush()
+    except KeyboardInterrupt:
+        cleanup()
+    ret = proc.wait()
+
 cleanup()

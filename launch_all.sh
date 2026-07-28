@@ -68,6 +68,25 @@ notify() {
 }
 
 # ---------------------------------------------------------------------------
+# WiFi resilience — pause if WiFi is down before starting the pipeline.
+# When WiFi returns the pipeline continues from where it was; the
+# background services (run_throttled.py, crypto_scanner.py) each have
+# their own wait-for-Wifi logic too.
+# ---------------------------------------------------------------------------
+_wait_for_wifi_launch() {
+    local check_count=0
+    while ! curl -sf --connect-timeout 5 https://www.google.com >/dev/null 2>&1; do
+        check_count=$((check_count + 1))
+        echo "[$(date '+%Y-%m-%d %H:%M:%S')] [wifi] No connectivity detected."
+        echo "  Waiting for WiFi to connect… (check #$check_count, retrying every 30s)"
+        sleep 30
+    done
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] [wifi] Connectivity OK — launching pipeline."
+}
+
+_wait_for_wifi_launch
+
+# ---------------------------------------------------------------------------
 # Run the unified pipeline
 # ---------------------------------------------------------------------------
 log "========================================"

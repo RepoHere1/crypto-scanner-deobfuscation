@@ -42,7 +42,18 @@ You tried to run `re` but it doesn't exist. Common alternatives:
 | Read a file line by line | `less filename` or `bat filename` |
 | Search in files | `grep pattern file` or `rg pattern` |
 
-## Recommended Actions
+## WiFi Resilience (added)
+
+When running `dashgo` (or `bash launch_all.sh -d`) while traveling, the pipeline now gracefully handles WiFi outages instead of crashing or silently stopping:
+
+| Component | What happens when WiFi drops |
+|---|---|
+| **launch_all.sh** | Waits for WiFi connectivity before launching the pipeline |
+| **pipeline.py** | Pauses before each step and waits for WiFi if down |
+| **run_throttled.py** | Waits for WiFi before starting; auto-restarts mass scan if it exits due to connectivity loss |
+| **crypto_scanner.py** | Balance checks that hit connectivity errors now wait for WiFi to return and retry instead of silently failing |
+
+All components wait indefinitely (minutes, hours, or days) and resume from exactly where they left off when WiFi comes back.
 
 1. **Install ripgrep for better searching:**
    ```bash
