@@ -213,8 +213,6 @@ GITHUB_PAT2 = re.compile(r"\bgithub_pat_[A-Za-z0-9_]{22,}\b")
 SLACK_TOKEN = re.compile(r"\bxox[baprs]-[0-9]{10,13}-[0-9]{10,13}(-[a-zA-Z0-9]{24})?\b")
 STRIPE_KEY = re.compile(r"\b(sk|pk)_(live|test)_[A-Za-z0-9]{24,}\b")
 
-BIP39_PAT = re.compile(r"\b(" + "|".join(sorted(BIP39_WORDS)) + r")\b", re.IGNORECASE)
-
 # ---------------------------------------------------------------------------
 # Validation helpers
 # ---------------------------------------------------------------------------
@@ -863,15 +861,21 @@ def scan_line(line: str) -> Dict[str, Any]:
     findings["wif"] = WIF_PAT.findall(text)
     findings["hex_key"] = HEX_KEY_PAT.findall(text)
 
-    # Seed phrase detection: sliding window over all words
+    # Seed phrase detection: sliding window over all words.
+    # Pre-filter windows to avoid expensive PBKDF2 checksums on non-BIP39 text.
     words = re.findall(r"[a-zA-Z]+", text.lower())
     if len(words) >= 12:
+        # Cap word count to prevent runaway CPU on huge inputs.
+        if len(words) > 1000:
+            words = words[:1000]
         for length in (12, 15, 18, 21, 24):
             max_start = len(words) - length + 1
             if max_start <= 0:
                 continue
             for start in range(max_start):
                 phrase = words[start:start + length]
+                if any(w not in BIP39_WORDS for w in phrase):
+                    continue
                 if validate_seed_phrase(phrase):
                     findings["seed_phrase"].append(" ".join(phrase))
 

@@ -53,6 +53,7 @@ test_sample.jsonl
 .tmp_scan/
 __pycache__/
 core/
+core
 storage/
 test_clone_ok/
 
