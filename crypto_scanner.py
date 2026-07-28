@@ -719,6 +719,11 @@ PUBLIC_RPCS = {
         "https://base.drpc.org",
         "https://mainnet.base.org",
     ],
+    "monad": [
+        "https://rpc.monad.xyz",
+        "https://rpc1.monad.xyz",
+        "https://rpc-mainnet.monadinfra.com",
+    ],
 }
 
 for chain, urls in PUBLIC_RPCS.items():
@@ -883,18 +888,25 @@ def fetch_balance(chain: str, address: str) -> Optional[float]:
             logger.debug("Provider error %s/%s: %s", chain, address, e)
     return None
 
-def get_balance(chain: str, address: str) -> Dict[str, Any]:
+def get_balance(chain: str, address: str, force: bool = False) -> Dict[str, Any]:
+    """Return balance for address on chain.
+
+    When force=False (scanner default), successful balances are cached for 1h
+    and failed checks for 60s.  When force=True (wallet viewer / refresh),
+    always hit live providers and rewrite the cache entry.
+    """
     key = chain + ":" + address
-    with BALANCE_CACHE_LOCK:
-        cached = BALANCE_CACHE.get(key)
-    if cached:
-        age = time.time() - cached.get("ts", 0)
-        # Successful balances are valid for one hour.
-        if cached.get("balance") is not None and age < 3600:
-            return cached
-        # Failed checks are retried after one minute instead of staying ERROR.
-        if cached.get("balance") is None and age < 60:
-            return cached
+    if not force:
+        with BALANCE_CACHE_LOCK:
+            cached = BALANCE_CACHE.get(key)
+        if cached:
+            age = time.time() - cached.get("ts", 0)
+            # Successful balances are valid for one hour.
+            if cached.get("balance") is not None and age < 3600:
+                return cached
+            # Failed checks are retried after one minute instead of staying ERROR.
+            if cached.get("balance") is None and age < 60:
+                return cached
     balance = fetch_balance(chain, address)
     rec = {
         "chain": chain,
@@ -902,10 +914,16 @@ def get_balance(chain: str, address: str) -> Dict[str, Any]:
         "balance": balance,
         "ts": time.time(),
         "checked_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+        "live": True,
     }
     with BALANCE_CACHE_LOCK:
         BALANCE_CACHE[key] = rec
-    save_balance_cache()
+        try:
+            with open(BALANCE_CACHE_FILE, "w", encoding="utf-8") as f:
+                for row in BALANCE_CACHE.values():
+                    f.write(json.dumps(row) + "\n")
+        except Exception as e:
+            logger.warning("Could not save balance cache: %s", e)
     return rec
 
 
@@ -1003,17 +1021,92 @@ def correlate_findings(findings: Dict[str, Any], source_line: str, context_windo
 # ---------------------------------------------------------------------------
 # Main scan logic
 # ---------------------------------------------------------------------------
+def extract_source_metadata(line: str) -> Dict[str, Any]:
+    """Pull real source URI/platform/repo from a trufflehog or raw line."""
+    meta: Dict[str, Any] = {
+        "source_uri": "",
+        "platform": "unknown",
+        "repo": "",
+        "path": "",
+        "commit": "",
+        "detector": "",
+        "verified": False,
+    }
+    gh_re = re.compile(r"https?://(?:www\.)?github\.com/([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+)")
+    gl_re = re.compile(r"https?://(?:www\.)?gitlab\.com/([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+)")
+    try:
+        obj = json.loads(line)
+    except Exception:
+        m = gh_re.search(line or "")
+        if m:
+            repo = f"{m.group(1)}/{m.group(2).removesuffix('.git')}"
+            meta["source_uri"] = f"https://github.com/{repo}"
+            meta["platform"] = "github"
+            meta["repo"] = repo
+        return meta
+
+    if not isinstance(obj, dict):
+        return meta
+
+    meta["path"] = str(obj.get("path") or obj.get("File") or "")[:500]
+    meta["commit"] = str(obj.get("commit") or obj.get("commitHash") or obj.get("Commit") or "")[:120]
+    meta["detector"] = str(obj.get("reason") or obj.get("DetectorName") or "")[:120]
+    meta["verified"] = bool(obj.get("Verified") or obj.get("verified"))
+
+    candidates = []
+    for k in ("repository", "repo", "url", "link", "SourceName", "source", "Source"):
+        if obj.get(k):
+            candidates.append(str(obj.get(k)))
+    sm = obj.get("SourceMetadata") or {}
+    if isinstance(sm, dict):
+        data = sm.get("Data") or {}
+        if isinstance(data, dict):
+            for key in ("Github", "Git", "Gitlab", "Filesystem"):
+                node = data.get(key) or {}
+                if isinstance(node, dict):
+                    for kk in ("repository", "repo", "link", "file"):
+                        if node.get(kk):
+                            candidates.append(str(node.get(kk)))
+
+    blob = " ".join(candidates + [meta["path"], str(obj.get("commit") or "")[:300]])
+    m = gh_re.search(blob)
+    if m:
+        repo = f"{m.group(1)}/{m.group(2).removesuffix('.git')}"
+        meta["source_uri"] = f"https://github.com/{repo}"
+        meta["platform"] = "github"
+        meta["repo"] = repo
+    else:
+        m2 = gl_re.search(blob)
+        if m2:
+            repo = f"{m2.group(1)}/{m2.group(2).removesuffix('.git')}"
+            meta["source_uri"] = f"https://gitlab.com/{repo}"
+            meta["platform"] = "gitlab"
+            meta["repo"] = repo
+        elif meta["path"]:
+            meta["source_uri"] = f"file://{meta['path']}"
+            meta["platform"] = "filesystem"
+    return meta
+
+
 def normalize_input_line(line: str) -> str:
     """Flatten truffleHog/mass_scan JSONL into a searchable string."""
     try:
         obj = json.loads(line)
         parts = []
         seen = set()
-        for key in ("reason", "string", "path", "commit", "source_line"):
+        for key in (
+            "reason", "string", "path", "commit", "source_line", "diff",
+            "repository", "repo", "url", "Raw", "RawV2", "DetectorName",
+        ):
             val = obj.get(key, "")
-            if val and val not in seen:
-                seen.add(val)
-                parts.append(str(val))
+            if isinstance(val, list):
+                val = " ".join(str(x) for x in val[:20])
+            if val and str(val) not in seen:
+                seen.add(str(val))
+                parts.append(str(val)[:2000])
+        sf = obj.get("stringsFound")
+        if isinstance(sf, list):
+            parts.extend(str(x)[:500] for x in sf[:30])
         return " ".join(parts)
     except json.JSONDecodeError:
         return line
@@ -1145,17 +1238,55 @@ def balance_worker(q: queue_module.Queue, stop_event: threading.Event):
                     BALANCE_HITS_COUNT += 1
                 msg = f"BALANCE FOUND {bal['chain']} {bal['address']} => {bal['balance']}"
                 logger.info("*** %s", msg)
-                with open(BALANCE_HIT_FILE, "a") as f:
-                    f.write(json.dumps(bal) + "\n")
+                try:
+                    src_uri = ""
+                    platform = "unknown"
+                    if os.path.exists(MEMORY_FILE):
+                        with open(MEMORY_FILE, "rb") as mf:
+                            mf.seek(0, 2)
+                            size = mf.tell()
+                            mf.seek(max(0, size - 200_000))
+                            tail = mf.read().decode("utf-8", errors="ignore")
+                        for ln in reversed(tail.splitlines()):
+                            if address not in ln:
+                                continue
+                            try:
+                                rec = json.loads(ln)
+                            except Exception:
+                                continue
+                            src_uri = rec.get("source_uri") or rec.get("source") or ""
+                            platform = rec.get("platform") or "unknown"
+                            if src_uri:
+                                break
+                    bal_out = dict(bal)
+                    if src_uri:
+                        bal_out["source_uri"] = src_uri
+                        bal_out["platform"] = platform
+                        try:
+                            from target_intelligence import TargetIntelligence
+                            TargetIntelligence().record_outcome(
+                                src_uri,
+                                platform=platform,
+                                has_key=True,
+                                has_balance=True,
+                                balance_total=float(bal["balance"] or 0),
+                                finding_types=[f"balance:{chain}"],
+                                meta={"address": address, "chain": chain},
+                            )
+                        except Exception:
+                            pass
+                    with open(BALANCE_HIT_FILE, "a") as f:
+                        f.write(json.dumps(bal_out) + "\n")
+                except Exception:
+                    with open(BALANCE_HIT_FILE, "a") as f:
+                        f.write(json.dumps(bal) + "\n")
                 notify("Crypto Scanner", msg)
         except Exception as e:
             logger.debug("Balance worker error %s/%s: %s", chain, address, e)
         finally:
             q.task_done()
 
-# ---------------------------------------------------------------------------
-# File tailing
-# ---------------------------------------------------------------------------
+
 def tail_file(path: str):
     with open(path, "r", encoding="utf-8", errors="ignore") as f:
         f.seek(0, 0)
@@ -1245,22 +1376,35 @@ def main():
             if material_findings(findings):
                 processed += 1
                 findings = correlate_findings(findings, line, context_window)
+                src_meta = extract_source_metadata(line)
                 record = {
                     "ts": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
                     "findings": findings,
                     "source_line": line[:200],
+                    "source_uri": src_meta.get("source_uri") or "",
+                    "source": src_meta.get("source_uri") or "",
+                    "platform": src_meta.get("platform") or "unknown",
+                    "repo": src_meta.get("repo") or "",
+                    "source_path": src_meta.get("path") or "",
+                    "source_commit": src_meta.get("commit") or "",
+                    "detector": src_meta.get("detector") or "",
+                    "verified": bool(src_meta.get("verified")),
                 }
                 with open(MEMORY_FILE, "a") as f:
                     f.write(json.dumps(record) + "\n")
 
-                logger.info("Findings #%d at %s", processed, record["ts"])
+                logger.info(
+                    "Findings #%d at %s source=%s",
+                    processed,
+                    record["ts"],
+                    record.get("source_uri") or "?",
+                )
                 for k, vs in findings.items():
                     if vs and k not in ("high_entropy", "base58_strings", "base64_strings"):
                         logger.info("  %s: %s", k, vs)
 
-                # Build address map from detected + derived addresses
                 addr_map: Dict[str, List[str]] = {}
-                for chain in ("btc", "eth", "ltc", "sol", "doge", "xrp", "ton", "avax", "matic"):
+                for chain in ("btc", "eth", "ltc", "sol", "doge", "xrp", "ton", "avax", "matic", "bnb", "base", "monad"):
                     for addr in findings.get(chain, []):
                         addr_map.setdefault(chain, []).append(addr)
                 for derived in findings.get("derived_addresses", []):
@@ -1274,6 +1418,36 @@ def main():
                 if findings.get("correlated") or findings.get("wif") or findings.get("hex_key") or findings.get("seed_phrase"):
                     with open(HIGH_CONFIDENCE_FILE, "a") as f:
                         f.write(json.dumps(record) + "\n")
+
+                try:
+                    from target_intelligence import TargetIntelligence
+                    wallet = (findings.get("wallet") or {})
+                    has_key = bool(
+                        wallet.get("wifs")
+                        or wallet.get("hex_keys")
+                        or wallet.get("seed_phrases")
+                        or findings.get("wif")
+                        or findings.get("hex_key")
+                        or findings.get("seed_phrase")
+                    )
+                    uri = record.get("source_uri") or ""
+                    if uri:
+                        TargetIntelligence().record_outcome(
+                            uri,
+                            platform=record.get("platform") or "unknown",
+                            has_key=has_key,
+                            has_balance=False,
+                            finding_types=[
+                                k for k, v in findings.items()
+                                if v and k not in (
+                                    "high_entropy", "base58_strings", "base64_strings",
+                                    "derived_addresses", "wallet", "confidence", "correlated",
+                                )
+                            ],
+                            meta={"ts": record["ts"], "repo": record.get("repo")},
+                        )
+                except Exception as _ti_exc:
+                    logger.debug("target intelligence update skipped: %s", _ti_exc)
 
             with BALANCE_HITS_LOCK:
                 total_hits = BALANCE_HITS_COUNT

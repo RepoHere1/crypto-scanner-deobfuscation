@@ -60,3 +60,8 @@ test_clone_ok/
 # Build artifacts / binaries
 -a
 cb_snippet.txt
+
+# Learn/targeting runtime
+.scan_outcomes.jsonl
+learn_run.log
+target_gen_run.log

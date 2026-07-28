@@ -2,7 +2,7 @@
 # Wallet balance viewer shortcut
 
 clear
-python3 "$HOME/wallet_view.py"
+python3 "$HOME/wallet_view.py" --watch
 echo ""
 read -n 1 -s -r -p "Tap any key to close..." || true
 echo ""

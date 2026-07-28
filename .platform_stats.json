@@ -1,46 +1,119 @@
 {
-  "github": {
-    "success_rate": 0.05500000000000001,
-    "last_checked": "2026-07-28T03:13:39.870866"
-  },
-  "gitlab": {
-    "success_rate": 0.028499999999999998,
-    "last_checked": null
-  },
-  "huggingface": {
-    "success_rate": 0.02,
-    "last_checked": null
-  },
-  "docker": {
-    "success_rate": 0.01,
-    "last_checked": null
+  "aws_s3": {
+    "balance_hits": 0,
+    "empty_scans": 0,
+    "key_hits": 0,
+    "last_checked": null,
+    "note": "empirical only \u2014 no fake priors",
+    "scans": 0,
+    "success_rate": 0.0
   },
   "circleci": {
-    "success_rate": 0.04,
-    "last_checked": null
+    "balance_hits": 0,
+    "empty_scans": 0,
+    "key_hits": 0,
+    "last_checked": null,
+    "note": "empirical only \u2014 no fake priors",
+    "scans": 0,
+    "success_rate": 0.0
   },
-  "postman": {
-    "success_rate": 0.03,
-    "last_checked": null
-  },
-  "aws_s3": {
-    "success_rate": 0.07,
-    "last_checked": null
-  },
-  "gcs": {
-    "success_rate": 0.06,
-    "last_checked": null
-  },
-  "jenkins": {
-    "success_rate": 0.02,
-    "last_checked": null
+  "docker": {
+    "balance_hits": 0,
+    "empty_scans": 0,
+    "key_hits": 0,
+    "last_checked": null,
+    "note": "empirical only \u2014 no fake priors",
+    "scans": 0,
+    "success_rate": 0.0
   },
   "elasticsearch": {
-    "success_rate": 0.01,
-    "last_checked": null
+    "balance_hits": 0,
+    "empty_scans": 0,
+    "key_hits": 0,
+    "last_checked": null,
+    "note": "empirical only \u2014 no fake priors",
+    "scans": 0,
+    "success_rate": 0.0
+  },
+  "gcs": {
+    "balance_hits": 0,
+    "empty_scans": 0,
+    "key_hits": 0,
+    "last_checked": null,
+    "note": "empirical only \u2014 no fake priors",
+    "scans": 0,
+    "success_rate": 0.0
+  },
+  "gist": {
+    "balance_hits": 0,
+    "empty_scans": 0,
+    "key_hits": 0,
+    "last_checked": null,
+    "note": "empirical only \u2014 no fake priors",
+    "scans": 0,
+    "success_rate": 0.0
+  },
+  "github": {
+    "balance_hits": 1,
+    "empty_scans": 0,
+    "key_hits": 1,
+    "last_checked": "2026-07-28T11:15:36.306595Z",
+    "note": "empirical only \u2014 no fake priors",
+    "scans": 2,
+    "success_rate": 1.5
+  },
+  "gitlab": {
+    "balance_hits": 0,
+    "empty_scans": 0,
+    "key_hits": 0,
+    "last_checked": null,
+    "note": "empirical only \u2014 no fake priors",
+    "scans": 0,
+    "success_rate": 0.0
+  },
+  "huggingface": {
+    "balance_hits": 0,
+    "empty_scans": 0,
+    "key_hits": 0,
+    "last_checked": null,
+    "note": "empirical only \u2014 no fake priors",
+    "scans": 0,
+    "success_rate": 0.0
+  },
+  "jenkins": {
+    "balance_hits": 0,
+    "empty_scans": 0,
+    "key_hits": 0,
+    "last_checked": null,
+    "note": "empirical only \u2014 no fake priors",
+    "scans": 0,
+    "success_rate": 0.0
+  },
+  "postman": {
+    "balance_hits": 0,
+    "empty_scans": 0,
+    "key_hits": 0,
+    "last_checked": null,
+    "note": "empirical only \u2014 no fake priors",
+    "scans": 0,
+    "success_rate": 0.0
   },
   "syslog": {
-    "success_rate": 0.01,
-    "last_checked": null
+    "balance_hits": 0,
+    "empty_scans": 0,
+    "key_hits": 0,
+    "last_checked": null,
+    "note": "empirical only \u2014 no fake priors",
+    "scans": 0,
+    "success_rate": 0.0
+  },
+  "unknown": {
+    "balance_hits": 0,
+    "empty_scans": 0,
+    "key_hits": 0,
+    "last_checked": null,
+    "note": "empirical only \u2014 no fake priors",
+    "scans": 0,
+    "success_rate": 0.0
   }
 }

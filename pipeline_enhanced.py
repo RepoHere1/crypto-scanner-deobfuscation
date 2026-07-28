@@ -199,20 +199,18 @@ def _ensure_crypto_scanner_running() -> bool:
     return CRYPTO_PID_FILE.exists()
 
 def generate_targets() -> int:
-    """Generate targets with enhanced intelligence if available."""
-    if ENHANCED_MODULES_AVAILABLE:
-        _log("[*] Using enhanced target intelligence...")
-        ti = TargetIntelligence()
-        
-        # Run the original target generator first
-        ret = _exec([sys.executable, str(TARGET_GENERATOR)], "target generation")
-        
-        # Then apply intelligence to prioritize targets
-        # This would typically read from paste_box.txt and reorder targets intelligently
-        _log("[*] Target intelligence applied to prioritize scanning")
+    """Live production targets + outcome-based reorder. No placeholders."""
+    ret = _exec([sys.executable, str(TARGET_GENERATOR)], "target generation (live)")
+    if ret != 0:
         return ret
-    else:
-        return _exec([sys.executable, str(TARGET_GENERATOR)], "target generation")
+    if ENHANCED_MODULES_AVAILABLE:
+        try:
+            ti = TargetIntelligence()
+            n = ti.reorder_paste_box()
+            _log(f"[*] Outcome intelligence prioritized {n} real targets")
+        except Exception as exc:
+            _log(f"[!] Intelligence reorder failed: {exc}")
+    return 0
 
 def process_paste_box() -> int:
     """Process paste box with enhanced deobfuscation."""

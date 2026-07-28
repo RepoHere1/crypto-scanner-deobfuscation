@@ -2,7 +2,7 @@
 """
 Refresh wallet balances shown by wallet_view.py.
 
-Reads crypto_scanner_memory.jsonl, force-checks every derived (and directly
+Reads crypto_scanner_memory.jsonl, LIVE force-checks every derived (and directly
 detected) address, and writes results to balance_cache.jsonl.
 Run this after changing balance providers or when many addresses show PENDING.
 """
@@ -125,7 +125,7 @@ def main():
             checked += 1
             sp.update(f"Refreshing {checked}/{total} balances ({chain})")
             try:
-                rec = cs.get_balance(chain, addr)
+                rec = cs.get_balance(chain, addr, force=True)
                 bal = rec.get("balance")
                 if bal and bal > 0:
                     nonzero += 1

