@@ -106,37 +106,38 @@ def cleanup(signum=None, frame=None):
 signal.signal(signal.SIGTERM, cleanup)
 signal.signal(signal.SIGINT, cleanup)
 
-try:
-    for line in proc.stdout:
-        # Monitor stdout during execution — if WiFi drops we can't easily
-        # detect it from here, but the child subprocess (trufflehog) will
-        # hit connection errors and either hang or fail.  If the subprocess
-        # exits, we wait for WiFi and restart it.
-        sys.stdout.write("[%s] %s" % (time.strftime("%H:%M:%S"), line))
-        sys.stdout.flush()
-except KeyboardInterrupt:
-    cleanup()
-
-# Process exited — if it was due to a WiFi outage, wait and restart.
-ret = proc.wait()
-if ret != 0 and not _is_wifi_connected():
-    print("[wifi] Mass scan exited with code %d — WiFi looks down, waiting..." % ret)
-    _wait_for_wifi()
-    print("[wifi] Restarting mass scan after connectivity restored.")
-    proc = subprocess.Popen(
-        cmd,
-        cwd=HOME,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,
-        bufsize=1,
-    )
+# ---------------------------------------------------------------------------
+# Retry loop: if the mass scan exits because WiFi dropped, wait for WiFi
+# and restart from where it left off.  TruffleHog resumes scanning
+# repos from its checkpoint file so nothing is re-scanned unnecessarily.
+# ---------------------------------------------------------------------------
+while True:
     try:
         for line in proc.stdout:
             sys.stdout.write("[%s] %s" % (time.strftime("%H:%M:%S"), line))
             sys.stdout.flush()
     except KeyboardInterrupt:
         cleanup()
+
     ret = proc.wait()
+
+    # If WiFi looks down, wait for it and restart the mass scan.
+    if ret != 0 and not _is_wifi_connected():
+        print("[wifi] Mass scan exited with code %d — WiFi down, waiting..." % ret)
+        _wait_for_wifi()
+        print("[wifi] Restarting mass scan after connectivity restored.")
+        proc = subprocess.Popen(
+            cmd,
+            cwd=HOME,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1,
+        )
+        continue
+
+    # Non-zero exit while WiFi was up — trufflehog failed for a
+    # reason other than network loss; don't loop forever.
+    break
 
 cleanup()

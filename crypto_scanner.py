@@ -68,11 +68,11 @@ def wait_for_wifi(
     check_interval: float = _WIFI_WAIT_INTERVAL,
     max_wait: float | None = _WIFI_WAIT_TIMEOUT,
 ) -> None:
-    """Block until WiFi/internet connectivity is restored.
-
-    Prints a log message every *check_interval* seconds so the user knows
-    the scanner is still alive and waiting rather than crashed.
-    """
+    """Block until WiFi/internet connectivity is restored, or *max_wait*
+    seconds elapse (whichever comes first).  Default *max_wait* is
+    ``None`` — wait forever.  In production callers typically pass a
+    finite ceiling so a single stuck provider doesn't freeze a worker
+    thread indefinitely."""
     logger.info("[wifi] No connectivity — waiting for WiFi to return...")
     start = time.time()
     while True:
@@ -86,8 +86,10 @@ def wait_for_wifi(
 
 
 def _is_connectivity_error(exc: BaseException) -> bool:
-    """Return True if *exc* looks like a lost-WiFi / no-network error."""
-    if isinstance(exc, (requests.ConnectionError, requests.Timeout)):
+    """Return True if *exc* looks like a lost-WiFi / network-level failure
+    rather than a provider-side issue.  Timeouts are excluded because a
+    slow provider is not the same as no WiFi."""
+    if isinstance(exc, requests.ConnectionError):
         return True
     msg = str(exc).lower()
     keywords = (
@@ -97,7 +99,6 @@ def _is_connectivity_error(exc: BaseException) -> bool:
         "name or service not known",
         "no address associated",
         "network is unreachable",
-        "timed out",
         "temporary failure in name resolution",
         "err_connection",
     )
