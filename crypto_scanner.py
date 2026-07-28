@@ -812,13 +812,23 @@ BALANCE_HITS_COUNT = 0
 BALANCE_HITS_LOCK = threading.Lock()
 
 def save_balance_cache() -> None:
+    """Atomic rewrite so readers never see a truncated 0-byte cache."""
     try:
         with BALANCE_CACHE_LOCK:
-            with open(BALANCE_CACHE_FILE, "w", encoding="utf-8") as f:
+            tmp = BALANCE_CACHE_FILE + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
                 for rec in BALANCE_CACHE.values():
                     f.write(json.dumps(rec) + "\n")
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp, BALANCE_CACHE_FILE)
     except Exception as e:
         logger.warning("Could not save balance cache: %s", e)
+        try:
+            if os.path.exists(BALANCE_CACHE_FILE + ".tmp"):
+                os.remove(BALANCE_CACHE_FILE + ".tmp")
+        except Exception:
+            pass
 
 def notify(title: str, message: str) -> None:
     """Send Android notification via termux-notification if available."""
@@ -919,9 +929,13 @@ def get_balance(chain: str, address: str, force: bool = False) -> Dict[str, Any]
     with BALANCE_CACHE_LOCK:
         BALANCE_CACHE[key] = rec
         try:
-            with open(BALANCE_CACHE_FILE, "w", encoding="utf-8") as f:
+            tmp = BALANCE_CACHE_FILE + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
                 for row in BALANCE_CACHE.values():
                     f.write(json.dumps(row) + "\n")
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp, BALANCE_CACHE_FILE)
         except Exception as e:
             logger.warning("Could not save balance cache: %s", e)
     return rec

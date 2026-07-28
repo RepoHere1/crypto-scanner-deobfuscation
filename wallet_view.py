@@ -1,17 +1,21 @@
 #!/usr/bin/env python3
 """
-Live Wallet Balance Viewer — production truth view.
+Wallet Balance Viewer — instant paint, live truth in background.
 
-Always hits live chain providers for every reconstructed wallet address,
-writes results back to balance_cache.jsonl, and only totals balances that
-belong to wallets derived from keys/seeds (never unrelated cache junk).
+Never blanks the screen waiting on RPCs.
+  1) Paint from balance_cache immediately
+  2) Refresh a limited batch of stale/pending wallet addrs in background
+  3) Re-paint when batch finishes (watch mode)
 
 Usage:
-    python3 ~/wallet_view.py              # live check once
-    python3 ~/wallet_view.py --watch      # live refresh loop (default 30s)
-    python3 ~/wallet_view.py -w -i 15     # refresh every 15s
-    python3 ~/wallet_view.py --cached     # display-only from cache (no RPC)
+    walletview                     # watch (default)
+    python3 ~/wallet_view.py -w
+    python3 ~/wallet_view.py --once
+    python3 ~/wallet_view.py --cached
+    python3 ~/wallet_view.py -w -i 20 --batch 40
 """
+from __future__ import annotations
+
 import argparse
 import json
 import os
@@ -27,27 +31,53 @@ CACHE_FILE = os.path.join(HOME, "balance_cache.jsonl")
 HITS_FILE = os.path.join(HOME, "balances_hit.jsonl")
 
 sys.path.insert(0, HOME)
-import crypto_scanner as cs
+import crypto_scanner as cs  # noqa: E402
 
-# Parallel live checks — keep modest on Termux to avoid rate-limits / OOM.
-LIVE_WORKERS = 6
-DEFAULT_INTERVAL = 30
+LIVE_WORKERS = 4
+DEFAULT_INTERVAL = 20
+DEFAULT_BATCH = 48          # max live RPC checks per refresh cycle
+MEMORY_TAIL_BYTES = 800_000  # only reconstruct wallets from recent memory
+STALE_OK_SEC = 300           # reuse cache younger than 5 min unless pending
 
 BOLD = "\033[1m"
 DIM = "\033[2m"
 GREEN = "\033[92m"
 YELLOW = "\033[93m"
-RED = "\033[91m"
 CYAN = "\033[96m"
 RESET = "\033[0m"
 
+_refresh_lock = threading.Lock()
+_refresh_state = {
+    "running": False,
+    "done": 0,
+    "total": 0,
+    "last_msg": "",
+    "last_finish": 0.0,
+}
 
-def load_records(path):
+
+def clear_screen():
+    sys.stdout.write("\033[H\033[J")
+    sys.stdout.flush()
+
+
+def load_jsonl_tail(path: str, max_bytes: int = 0):
+    """Load jsonl rows; if max_bytes>0 only read file tail (fast on huge memory)."""
     records = []
     if not os.path.exists(path):
         return records
-    with open(path, "r", encoding="utf-8", errors="ignore") as f:
-        for line in f:
+    try:
+        with open(path, "rb") as f:
+            if max_bytes and os.path.getsize(path) > max_bytes:
+                f.seek(-max_bytes, 2)
+                data = f.read()
+                # drop partial first line
+                nl = data.find(b"\n")
+                if nl >= 0:
+                    data = data[nl + 1 :]
+            else:
+                data = f.read()
+        for line in data.decode("utf-8", errors="ignore").splitlines():
             line = line.strip()
             if not line:
                 continue
@@ -55,25 +85,44 @@ def load_records(path):
                 records.append(json.loads(line))
             except Exception:
                 pass
+    except Exception:
+        pass
     return records
 
 
 def load_balances():
-    """Load cache as {(chain, address): balance_or_None} plus meta."""
     balances = {}
     meta = {}
-    for rec in load_records(CACHE_FILE):
-        chain = (rec.get("chain") or "?").lower()
-        addr = rec.get("address") or ""
-        if not addr:
-            continue
-        key = (chain, addr)
-        balances[key] = rec.get("balance")
-        meta[key] = {
-            "checked_at": rec.get("checked_at"),
-            "live": rec.get("live", False),
-            "ts": rec.get("ts"),
-        }
+    if not os.path.exists(CACHE_FILE) or os.path.getsize(CACHE_FILE) == 0:
+        return balances, meta
+    try:
+        with open(CACHE_FILE, "r", encoding="utf-8", errors="ignore") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    rec = json.loads(line)
+                except Exception:
+                    continue
+                chain = (rec.get("chain") or "?").lower()
+                addr = rec.get("address") or ""
+                if not addr:
+                    continue
+                key = (chain, addr)
+                # keep newest ts if dupes
+                prev = meta.get(key)
+                ts = float(rec.get("ts") or 0)
+                if prev and float(prev.get("ts") or 0) > ts:
+                    continue
+                balances[key] = rec.get("balance")
+                meta[key] = {
+                    "checked_at": rec.get("checked_at"),
+                    "live": rec.get("live", False),
+                    "ts": ts,
+                }
+    except Exception:
+        pass
     return balances, meta
 
 
@@ -82,51 +131,49 @@ def format_balance(bal):
         return f"{YELLOW}PENDING{RESET}"
     if bal == 0:
         return "0.00000000"
-    if bal > 0:
+    if isinstance(bal, (int, float)) and bal > 0:
         return f"{GREEN}{bal:,.8f}{RESET}"
     return f"{bal:,.8f}"
 
 
 def derive_for_key(key_type, key_value):
-    """Re-derive the current chain set from a private key/seed."""
-    if key_type == "WIF":
-        priv = cs.wif_to_priv_bytes(key_value)
-        addrs = cs.priv_to_addresses(priv) if priv else {}
-    elif key_type == "HEX":
-        try:
+    try:
+        if key_type == "WIF":
+            priv = cs.wif_to_priv_bytes(key_value)
+            addrs = cs.priv_to_addresses(priv) if priv else {}
+        elif key_type == "HEX":
             addrs = cs.priv_to_addresses(bytes.fromhex(key_value))
-        except Exception:
+        elif key_type == "SEED":
+            addrs = cs.seed_to_addresses(key_value)
+        else:
             addrs = {}
-    elif key_type == "SEED":
-        addrs = cs.seed_to_addresses(key_value)
-    else:
+    except Exception:
         addrs = {}
-    result = {}
-    for chain, addr in addrs.items():
+    out = {}
+    for chain, addr in (addrs or {}).items():
         chain = (chain or "?").lower()
         if addr:
-            result[(chain, addr)] = {"chain": chain, "address": addr, "from": key_type.lower()}
-    return result
+            out[(chain, addr)] = {"chain": chain, "address": addr, "from": key_type.lower()}
+    return out
 
 
-def gather_wallets():
-    """Group records by private key/seed and collect all derived addresses."""
+def gather_wallets(max_wallets: int = 40):
+    """Reconstruct wallets from recent memory only (fast)."""
     wallets = {}
-    records = load_records(MEMORY_FILE)
+    records = load_jsonl_tail(MEMORY_FILE, MEMORY_TAIL_BYTES)
+    # newest first
+    records.sort(key=lambda x: x.get("ts") or x.get("timestamp") or "", reverse=True)
 
-    sorted_records = sorted(
-        records,
-        key=lambda x: x.get("timestamp", str(x.get("time", ""))),
-        reverse=True,
-    )
+    for rec in records:
+        findings = rec.get("findings") or {}
+        wallet = findings.get("wallet") or {}
+        derived = findings.get("derived_addresses") or []
 
-    for rec in sorted_records:
-        findings = rec.get("findings", {}) or {}
-        wallet = findings.get("wallet", {}) or {}
-        derived = findings.get("derived_addresses", []) or []
-
-        def add_wallet(key_type, key_value, rec=rec, derived=derived):
+        def add(key_type, key_value, rec=rec, derived=derived):
             if not key_value:
+                return
+            # cap total wallets
+            if (key_type, key_value) not in wallets and len(wallets) >= max_wallets:
                 return
             w = wallets.setdefault(
                 (key_type, key_value),
@@ -134,7 +181,8 @@ def gather_wallets():
                     "type": key_type,
                     "key": key_value,
                     "addresses": {},
-                    "timestamp": rec.get("timestamp", rec.get("time", "")),
+                    "timestamp": rec.get("ts") or rec.get("timestamp") or "",
+                    "source": rec.get("source_uri") or rec.get("source") or "",
                 },
             )
             for d in derived:
@@ -147,22 +195,46 @@ def gather_wallets():
                         "from": d.get("from", key_type.lower()),
                     }
 
-        for wif in wallet.get("wifs", []) or []:
-            add_wallet("WIF", wif)
-        for hexk in wallet.get("hex_keys", []) or []:
-            add_wallet("HEX", hexk)
-        for seed in wallet.get("seed_phrases", []) or []:
-            add_wallet("SEED", seed)
+        for wif in wallet.get("wifs") or []:
+            add("WIF", wif)
+        for hx in wallet.get("hex_keys") or []:
+            add("HEX", hx)
+        for seed in wallet.get("seed_phrases") or []:
+            add("SEED", seed)
 
-    # Ensure every wallet shows the latest supported chains (re-derive).
-    for (key_type, key_value), w in wallets.items():
-        w["addresses"].update(derive_for_key(key_type, key_value))
+    # re-derive current chain set (cheap crypto, no network)
+    for (kt, kv), w in list(wallets.items()):
+        try:
+            w["addresses"].update(derive_for_key(kt, kv))
+        except Exception:
+            pass
 
-    return sorted(wallets.values(), key=lambda x: x.get("timestamp", ""), reverse=True)
+    return sorted(wallets.values(), key=lambda x: x.get("timestamp") or "", reverse=True)
+
+
+def pick_refresh_targets(all_keys, balances, meta, batch: int):
+    """Prefer PENDING and stale; skip fresh zeros/nonzeros within STALE_OK_SEC."""
+    now = time.time()
+    pending = []
+    stale = []
+    fresh = []
+    for k in all_keys:
+        bal = balances.get(k)
+        m = meta.get(k) or {}
+        age = now - float(m.get("ts") or 0)
+        if bal is None:
+            pending.append(k)
+        elif age > STALE_OK_SEC:
+            stale.append(k)
+        else:
+            fresh.append(k)
+    # pending first, then oldest stale
+    stale.sort(key=lambda k: float((meta.get(k) or {}).get("ts") or 0))
+    ordered = pending + stale
+    return ordered[: max(1, batch)]
 
 
 def _check_one(chain, addr):
-    """Live force-refresh a single (chain, address). Returns rec dict."""
     try:
         return cs.get_balance(chain, addr, force=True)
     except Exception as exc:
@@ -177,66 +249,43 @@ def _check_one(chain, addr):
         }
 
 
-def live_refresh(address_keys, progress_cb=None):
-    """Force live balance checks for every (chain, addr) in parallel.
-
-    Returns {(chain, addr): balance_or_None} for the keys we checked.
-    Also merges results into balance_cache.jsonl via crypto_scanner.get_balance.
-    """
-    seen = set()
-    targets = []
-    for chain, addr in address_keys:
-        key = ((chain or "?").lower(), addr)
-        if not addr or key in seen:
-            continue
-        seen.add(key)
-        targets.append(key)
-
+def live_refresh_batch(targets, progress_cb=None):
     results = {}
+    if not targets:
+        return results
     total = len(targets)
     done = 0
-    lock = threading.Lock()
-
-    if total == 0:
-        return results
-
     with ThreadPoolExecutor(max_workers=LIVE_WORKERS) as pool:
-        futures = {pool.submit(_check_one, c, a): (c, a) for c, a in targets}
-        for fut in as_completed(futures):
-            chain, addr = futures[fut]
+        futs = {pool.submit(_check_one, c, a): (c, a) for c, a in targets}
+        for fut in as_completed(futs):
+            c, a = futs[fut]
             try:
                 rec = fut.result()
             except Exception as exc:
-                rec = {
-                    "chain": chain,
-                    "address": addr,
-                    "balance": None,
-                    "error": str(exc),
-                }
-            bal = rec.get("balance") if isinstance(rec, dict) else None
-            results[(chain, addr)] = bal
-            with lock:
-                done += 1
-                if progress_cb:
-                    progress_cb(done, total, chain, addr, bal)
+                rec = {"balance": None, "error": str(exc)}
+            results[(c, a)] = rec.get("balance") if isinstance(rec, dict) else None
+            done += 1
+            if progress_cb:
+                progress_cb(done, total, c, a, results[(c, a)])
     return results
 
 
-def record_hits(balances_for_wallets):
-    """Append any newly discovered nonzero wallet balances to hits file."""
+def record_hits(wallet_bals):
     try:
         existing = set()
-        for rec in load_records(HITS_FILE):
-            existing.add(
-                (
-                    (rec.get("chain") or "").lower(),
-                    rec.get("address") or "",
-                    rec.get("balance"),
-                )
-            )
+        if os.path.exists(HITS_FILE):
+            with open(HITS_FILE, "r", encoding="utf-8", errors="ignore") as f:
+                for line in f:
+                    try:
+                        rec = json.loads(line)
+                        existing.add(
+                            ((rec.get("chain") or "").lower(), rec.get("address") or "", rec.get("balance"))
+                        )
+                    except Exception:
+                        pass
         with open(HITS_FILE, "a", encoding="utf-8") as f:
-            for (chain, addr), bal in balances_for_wallets.items():
-                if bal is None or bal <= 0:
+            for (chain, addr), bal in wallet_bals.items():
+                if not isinstance(bal, (int, float)) or bal <= 1e-12:
                     continue
                 tup = (chain, addr, bal)
                 if tup in existing:
@@ -246,9 +295,7 @@ def record_hits(balances_for_wallets):
                     "address": addr,
                     "balance": bal,
                     "ts": time.time(),
-                    "checked_at": datetime.now(timezone.utc)
-                    .isoformat()
-                    .replace("+00:00", "Z"),
+                    "checked_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
                     "source": "wallet_view_live",
                 }
                 f.write(json.dumps(rec) + "\n")
@@ -257,203 +304,219 @@ def record_hits(balances_for_wallets):
         pass
 
 
-def clear_screen():
-    sys.stdout.write("\033[H\033[J")
-    sys.stdout.flush()
-
-
-def render(live=True, status_line=""):
-    wallets = gather_wallets()
-
-    all_addresses = []
+def paint(wallets, balances, meta, status_line="", live_note=""):
+    all_keys = []
     seen = set()
     for w in wallets:
-        for key in w["addresses"].keys():
-            if key not in seen:
-                seen.add(key)
-                all_addresses.append(key)
+        for k in w.get("addresses") or {}:
+            if k not in seen:
+                seen.add(k)
+                all_keys.append(k)
 
-    # Start from cache so first paint is instant, then overlay live results.
-    balances, meta = load_balances()
-    live_checked = 0
-    live_failed = 0
-    refresh_started = time.time()
-
-    if live and all_addresses:
-        # Show a "refreshing" frame first so the user knows it's not frozen.
-        clear_screen()
-        print("=" * 76)
-        print(" " * 18 + f"{BOLD}WALLET BALANCE VIEWER — LIVE{RESET}")
-        print("=" * 76)
-        print()
-        print(f"  Wallets reconstructed: {len(wallets)}")
-        print(f"  Unique addresses:      {len(all_addresses)}")
-        print(f"  {CYAN}Hitting live chain RPCs...{RESET}")
-        if status_line:
-            print(f"  {DIM}{status_line}{RESET}")
-        print()
-        sys.stdout.flush()
-
-        progress_state = {"last_print": 0.0}
-
-        def on_progress(done, total, chain, addr, bal):
-            now = time.time()
-            # Throttle progress redraws
-            if now - progress_state["last_print"] < 0.25 and done < total:
-                return
-            progress_state["last_print"] = now
-            bal_s = "PENDING" if bal is None else f"{bal:.8f}"
-            sys.stdout.write(
-                f"\r  [{done:>3}/{total}] {chain.upper():>6}  {addr[:34]:<34}  {bal_s:<14}"
-            )
-            sys.stdout.flush()
-
-        live_results = live_refresh(all_addresses, progress_cb=on_progress)
-        sys.stdout.write("\r" + " " * 76 + "\r")
-        sys.stdout.flush()
-
-        for key, bal in live_results.items():
-            balances[key] = bal
-            meta[key] = {
-                "checked_at": datetime.now(timezone.utc)
-                .isoformat()
-                .replace("+00:00", "Z"),
-                "live": True,
-                "ts": time.time(),
-            }
-            live_checked += 1
-            if bal is None:
-                live_failed += 1
-
-        # Only count / record hits for wallet-owned addresses
-        wallet_bals = {k: balances.get(k) for k in all_addresses}
-        record_hits(wallet_bals)
-
-    # TRUTH totals: only addresses that belong to reconstructed wallets
-    wallet_keys = set(all_addresses)
+    wallet_keys = set(all_keys)
     nonzero = [
-        k
-        for k in wallet_keys
-        if isinstance(balances.get(k), (int, float)) and balances.get(k) > 0
+        k for k in wallet_keys
+        if isinstance(balances.get(k), (int, float)) and balances.get(k) > 1e-12
     ]
-    total_balance = sum(float(balances[k]) for k in nonzero)
+    total = sum(float(balances[k]) for k in nonzero)
     pending = sum(1 for k in wallet_keys if balances.get(k) is None)
-    elapsed = time.time() - refresh_started
 
-    # Freshest checked_at among wallet addresses
     newest = None
     for k in wallet_keys:
-        m = meta.get(k) or {}
-        ca = m.get("checked_at")
+        ca = (meta.get(k) or {}).get("checked_at")
         if ca and (newest is None or ca > newest):
             newest = ca
 
+    with _refresh_lock:
+        rs = dict(_refresh_state)
+
     clear_screen()
-    mode = f"{GREEN}LIVE RPC{RESET}" if live else f"{YELLOW}CACHE ONLY{RESET}"
     print("=" * 76)
-    print(" " * 18 + f"{BOLD}WALLET BALANCE VIEWER — {mode}{RESET}")
+    print(" " * 14 + f"{BOLD}WALLET VIEW — INSTANT + LIVE{RESET}")
     print("=" * 76)
     print()
-    print(f"  Wallets reconstructed:  {len(wallets)}")
-    print(f"  Unique addresses:       {len(all_addresses)}")
-    print(f"  Addresses with balance: {len(nonzero)}")
-    print(f"  Pending / failed RPC:   {pending}")
-    print(f"  Total nonzero balance:  {GREEN}{total_balance:,.8f}{RESET}")
-    print(
-        f"  Updated:                {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')}"
-    )
+    print(f"  Wallets shown (recent):   {len(wallets)}")
+    print(f"  Unique addresses:         {len(all_keys)}")
+    print(f"  With nonzero balance:     {len(nonzero)}")
+    print(f"  Pending (no cache yet):   {pending}")
+    print(f"  Total nonzero (truth):    {GREEN}{total:,.8f}{RESET}")
+    print(f"  Updated:                  {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')}")
     if newest:
-        print(f"  Last on-chain check:    {newest}")
-    if live:
+        print(f"  Last on-chain check:      {newest}")
+    if rs.get("running"):
         print(
-            f"  Live refresh:           {live_checked} addr in {elapsed:.1f}s"
-            + (f" ({live_failed} still pending)" if live_failed else "")
+            f"  {CYAN}Live refresh: {rs.get('done',0)}/{rs.get('total',0)}  "
+            f"{rs.get('last_msg','')}{RESET}"
         )
+    elif live_note:
+        print(f"  {DIM}{live_note}{RESET}")
     if status_line:
         print(f"  {DIM}{status_line}{RESET}")
     print()
 
     if not wallets:
-        print("  No wallet data yet. Waiting for crypto_scanner.py to process keys...")
+        print("  No wallet keys in recent memory yet.")
+        print("  Scanner is still running — wait for key findings.")
         print()
         print("-" * 76)
-        print("Press Ctrl+C to exit.")
-        return {
-            "wallets": 0,
-            "nonzero": 0,
-            "total": 0.0,
-            "pending": 0,
-        }
+        print("Ctrl+C exits view only.")
+        return {"total": total, "nonzero": len(nonzero), "pending": pending}
 
-    for w in wallets:
+    # show wallets with nonzero first, then others (cap display)
+    def w_score(w):
+        s = 0.0
+        for k in w.get("addresses") or {}:
+            b = balances.get(k)
+            if isinstance(b, (int, float)) and b > 1e-12:
+                s += float(b)
+        return s
+
+    ordered = sorted(wallets, key=w_score, reverse=True)
+    shown = 0
+    max_show = 12
+    for w in ordered:
+        if shown >= max_show:
+            break
+        shown += 1
         print("-" * 76)
         print(f"  TYPE: {w['type']}")
-        print(f"  KEY:  {w['key']}")
+        key = w.get("key") or ""
+        if len(key) > 72:
+            key = key[:34] + "…" + key[-34:]
+        print(f"  KEY:  {key}")
+        src = w.get("source") or ""
+        if src:
+            print(f"  SRC:  {src[:70]}")
         print()
-        print(f"  {'CHAIN':>8}  {'ADDRESS':<50}  {'BALANCE':>12}")
-        print(f"  {'-' * 8}  {'-' * 50}  {'-' * 12}")
+        print(f"  {'CHAIN':>8}  {'ADDRESS':<46}  {'BALANCE':>12}")
+        print(f"  {'-'*8}  {'-'*46}  {'-'*12}")
+        for (chain, addr), _ in sorted((w.get("addresses") or {}).items()):
+            bal = balances.get((chain, addr))
+            mark = f"{GREEN}*** {RESET}" if isinstance(bal, (int, float)) and bal > 1e-12 else "    "
+            a = addr if len(addr) <= 46 else addr[:22] + "…" + addr[-21:]
+            print(f"{mark}{chain.upper():>8}  {a:<46}  {format_balance(bal):>12}")
+        print()
 
-        for (chain, addr), _info in sorted(w["addresses"].items()):
-            bal = balances.get((chain, addr), None)
-            marker = (
-                f"{GREEN}*** {RESET}"
-                if isinstance(bal, (int, float)) and bal > 0
-                else "    "
-            )
-            print(
-                f"{marker}{chain.upper():>8}  {addr:<50}  {format_balance(bal):>12}"
-            )
+    if len(ordered) > max_show:
+        print(f"  {DIM}… {len(ordered) - max_show} more wallets not shown (recent tail only){RESET}")
         print()
 
     print("-" * 76)
     print(
-        f"  Totals above count ONLY wallet-derived addresses "
-        f"({len(wallet_keys)}), never unrelated cache rows."
+        f"  Totals count ONLY wallet-derived addrs ({len(wallet_keys)}). "
+        f"Never unrelated cache junk."
     )
-    print("Press Ctrl+C to exit.")
-    return {
-        "wallets": len(wallets),
-        "nonzero": len(nonzero),
-        "total": total_balance,
-        "pending": pending,
-    }
+    print("  Ctrl+C exits view only — scanners keep running.")
+    sys.stdout.flush()
+    return {"total": total, "nonzero": len(nonzero), "pending": pending, "all_keys": all_keys}
+
+
+def background_refresh(targets):
+    def run():
+        with _refresh_lock:
+            if _refresh_state["running"]:
+                return
+            _refresh_state["running"] = True
+            _refresh_state["done"] = 0
+            _refresh_state["total"] = len(targets)
+            _refresh_state["last_msg"] = "starting"
+
+        def prog(done, total, chain, addr, bal):
+            with _refresh_lock:
+                _refresh_state["done"] = done
+                _refresh_state["total"] = total
+                bs = "PENDING" if bal is None else f"{bal:.6f}"
+                _refresh_state["last_msg"] = f"{chain}:{bs}"
+
+        try:
+            results = live_refresh_batch(targets, progress_cb=prog)
+            # hits for nonzero
+            record_hits(results)
+        finally:
+            with _refresh_lock:
+                _refresh_state["running"] = False
+                _refresh_state["last_finish"] = time.time()
+                _refresh_state["last_msg"] = "idle"
+
+    t = threading.Thread(target=run, daemon=True)
+    t.start()
+    return t
+
+
+def cycle(live: bool, batch: int, status_line: str = "", max_wallets: int = 40):
+    # Instant path — no network
+    wallets = gather_wallets(max_wallets=max_wallets)
+    balances, meta = load_balances()
+    info = paint(wallets, balances, meta, status_line=status_line, live_note=("cache only" if not live else ""))
+
+    if not live:
+        return info
+
+    all_keys = info.get("all_keys") or []
+    targets = pick_refresh_targets(all_keys, balances, meta, batch=batch)
+    if not targets:
+        paint(
+            wallets,
+            balances,
+            meta,
+            status_line=status_line,
+            live_note="all shown addrs fresh in cache",
+        )
+        return info
+
+    thr = background_refresh(targets)
+    # while refreshing, re-paint every 1s so screen is never blank
+    start = time.time()
+    while thr.is_alive() and time.time() - start < 120:
+        time.sleep(1.0)
+        balances, meta = load_balances()
+        paint(
+            wallets,
+            balances,
+            meta,
+            status_line=status_line,
+            live_note=f"refreshing {len(targets)} addrs…",
+        )
+    thr.join(timeout=1)
+    balances, meta = load_balances()
+    return paint(
+        wallets,
+        balances,
+        meta,
+        status_line=status_line,
+        live_note=f"last batch {len(targets)} live checks done",
+    )
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Live wallet balance viewer")
-    parser.add_argument(
-        "--watch", "-w", action="store_true", help="refresh continuously"
-    )
-    parser.add_argument(
-        "--interval",
-        "-i",
-        type=int,
-        default=DEFAULT_INTERVAL,
-        help=f"watch refresh interval seconds (default {DEFAULT_INTERVAL})",
-    )
-    parser.add_argument(
-        "--cached",
-        action="store_true",
-        help="display cache only (skip live RPC force-refresh)",
-    )
-    args = parser.parse_args()
-    live = not args.cached
+    ap = argparse.ArgumentParser(description="Instant wallet viewer with live background refresh")
+    ap.add_argument("-w", "--watch", action="store_true", help="continuous (default if no --once)")
+    ap.add_argument("--once", action="store_true", help="one shot then exit")
+    ap.add_argument("-i", "--interval", type=int, default=DEFAULT_INTERVAL)
+    ap.add_argument("--batch", type=int, default=DEFAULT_BATCH, help="max live RPC checks per cycle")
+    ap.add_argument("--cached", action="store_true", help="cache only, no RPC")
+    ap.add_argument("--max-wallets", type=int, default=40)
+    args = ap.parse_args()
 
-    if not args.watch:
-        render(live=live)
+    live = not args.cached
+    watch = args.watch or not args.once
+
+    if not watch:
+        cycle(live=live, batch=args.batch, max_wallets=args.max_wallets)
         return
 
+    # default watch
     try:
-        cycle = 0
+        n = 0
         while True:
-            cycle += 1
-            status = f"watch cycle #{cycle} · next refresh in {args.interval}s"
-            render(live=live, status_line=status)
-            # Sleep in 1s slices so Ctrl+C is snappy
-            remaining = max(1, int(args.interval))
-            while remaining > 0:
+            n += 1
+            status = f"watch #{n} · interval {args.interval}s · batch {args.batch}"
+            cycle(live=live, batch=args.batch, status_line=status, max_wallets=args.max_wallets)
+            # sleep in 1s slices
+            left = max(1, int(args.interval))
+            while left > 0:
                 time.sleep(1)
-                remaining -= 1
+                left -= 1
     except KeyboardInterrupt:
         print()
         sys.exit(0)

@@ -68,11 +68,28 @@ def is_running(pid_file):
 
 
 def file_lines(path):
+    """Fast line estimate. Never full-scan multi-GB files (that blanks the dash)."""
     if not os.path.exists(path):
         return 0
     try:
+        size = os.path.getsize(path)
+        if size == 0:
+            return 0
+        if size <= 2_000_000:
+            with open(path, "rb") as f:
+                return sum(1 for _ in f)
         with open(path, "rb") as f:
-            return sum(1 for _ in f)
+            head = f.read(512_000)
+            try:
+                f.seek(-min(256_000, size), 2)
+            except OSError:
+                f.seek(0)
+            tail = f.read(256_000)
+        nl = bytes([10])
+        sample = head + nl + tail
+        n = sample.count(nl) or 1
+        avg = max(len(sample) / n, 40.0)
+        return int(size / avg)
     except Exception:
         return 0
 
@@ -247,51 +264,72 @@ def latest_memory_highlights(n=8):
 
 
 def wallet_truth_summary(max_wallets=6):
-    """Summarize reconstructed wallets using ONLY wallet-derived addresses.
-
-    Totals never include unrelated scanner cache junk (contracts, genesis, etc).
-    """
+    """Fast wallet truth from cache + memory tail. Never blocks the dash."""
     try:
-        import wallet_view as wv
+        balances = {}
+        if os.path.exists(CACHE_FILE) and os.path.getsize(CACHE_FILE) > 0:
+            with open(CACHE_FILE, "r", encoding="utf-8", errors="ignore") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        rec = json.loads(line)
+                    except Exception:
+                        continue
+                    chain = (rec.get("chain") or "?").lower()
+                    addr = rec.get("address") or ""
+                    if addr:
+                        balances[(chain, addr)] = rec.get("balance")
+
+        wallets = 0
+        addrs = set()
+        if os.path.exists(MEMORY_FILE):
+            with open(MEMORY_FILE, "rb") as f:
+                f.seek(0, 2)
+                size = f.tell()
+                f.seek(max(0, size - 400_000))
+                tail = f.read().decode("utf-8", errors="ignore")
+            for line in tail.splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    rec = json.loads(line)
+                except Exception:
+                    continue
+                findings = rec.get("findings") or {}
+                wallet = findings.get("wallet") or {}
+                if wallet.get("wifs") or wallet.get("hex_keys") or wallet.get("seed_phrases"):
+                    wallets += 1
+                for d in findings.get("derived_addresses") or []:
+                    c = (d.get("chain") or "?").lower()
+                    a = d.get("address") or ""
+                    if a:
+                        addrs.add((c, a))
+
+        nonzero = []
+        pending = 0
+        total = 0.0
+        seen = addrs if addrs else set(balances.keys())
+        for k in seen:
+            bal = balances.get(k)
+            if bal is None:
+                pending += 1
+            elif isinstance(bal, (int, float)) and bal > 1e-12:
+                nonzero.append((k[0], k[1], float(bal)))
+                total += float(bal)
+        nonzero.sort(key=lambda x: -x[2])
+        return {
+            "wallets": wallets,
+            "addresses": len(addrs) if addrs else len(seen),
+            "nonzero": nonzero[:12],
+            "pending": pending,
+            "total": total,
+            "newest": None,
+        }
     except Exception:
         return None
-    try:
-        wallets = wv.gather_wallets()
-        balances, meta = wv.load_balances()
-    except Exception:
-        return None
-
-    wallet_keys = set()
-    for w in wallets:
-        wallet_keys.update(w.get("addresses", {}).keys())
-
-    nonzero = []
-    pending = 0
-    total = 0.0
-    newest = None
-    for k in wallet_keys:
-        bal = balances.get(k)
-        if bal is None:
-            pending += 1
-            continue
-        if isinstance(bal, (int, float)) and bal > 0:
-            nonzero.append((k[0], k[1], float(bal)))
-            total += float(bal)
-        m = meta.get(k) or {}
-        ca = m.get("checked_at")
-        if ca and (newest is None or ca > newest):
-            newest = ca
-
-    nonzero.sort(key=lambda x: -x[2])
-    return {
-        "wallets": len(wallets),
-        "addresses": len(wallet_keys),
-        "nonzero": nonzero,
-        "pending": pending,
-        "total": total,
-        "newest": newest,
-        "samples": wallets[:max_wallets],
-    }
 
 
 def render(spinner_char=""):
@@ -496,7 +534,7 @@ def watch(interval=15):
             except Exception:
                 pass
         clear_screen()
-        print(render(" "))
+        print(safe_render(" "))
         print("\nDashboard stopped.")
         sys.exit(0)
 
@@ -527,7 +565,7 @@ def watch(interval=15):
 
             # Normal refresh cycle
             clear_screen()
-            print(render(spinner.char))
+            print(safe_render(spinner.char))
 
             # Sleep in small slices so we can still detect user input
             remaining = interval
@@ -536,6 +574,18 @@ def watch(interval=15):
                 remaining -= 1
     except KeyboardInterrupt:
         on_sigint(None, None)
+
+
+def safe_render(spinner_char=""):
+    try:
+        return render(spinner_char)
+    except Exception as exc:
+        msg = [
+            BOLD + '  DASHBOARD ERROR (services may still be running)' + RESET,
+            '  ' + str(exc),
+            '  Try: watch2   or   walletview',
+        ]
+        return chr(10).join(msg) + chr(10)
 
 
 def main():
@@ -547,7 +597,7 @@ def main():
     if args.watch:
         watch(args.interval)
     else:
-        print(render())
+        print(safe_render())
 
 
 if __name__ == "__main__":

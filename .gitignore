@@ -65,3 +65,14 @@ cb_snippet.txt
 .scan_outcomes.jsonl
 learn_run.log
 target_gen_run.log
+
+# runtime / proof snapshots
+.progress_t0.json
+.progress_t1.json
+.patch_dash.py
+.adaptive_config.json
+.target_scores.json
+.platform_stats.json
+.hot_targets.json
+watchdog.log
+stack_on_run.log
