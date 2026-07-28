@@ -1,0 +1,415 @@
+#!/usr/bin/env python3
+"""
+Live crypto-scan dashboard for Termux.
+
+Usage:
+    python3 ~/dashboard.py              # print once
+    python3 ~/dashboard.py --watch      # refresh every 15s
+    python3 ~/dashboard.py -w -i 5      # refresh every 5s
+"""
+import argparse
+import itertools
+import json
+import os
+import shutil
+import signal
+import sys
+import threading
+import time
+from collections import defaultdict
+from datetime import datetime, timezone
+
+HOME = os.path.expanduser("~")
+
+PID_DIR = os.path.join(HOME, ".run_pids")
+STATUS_FILE = os.path.join(HOME, "crypto_scanner_status.txt")
+MEMORY_FILE = os.path.join(HOME, "crypto_scanner_memory.jsonl")
+CACHE_FILE = os.path.join(HOME, "balance_cache.jsonl")
+HITS_FILE = os.path.join(HOME, "balances_hit.jsonl")
+RESULTS_FILE = os.path.join(HOME, ".trufflehog_results.jsonl")
+MASS_FILE = os.path.join(HOME, ".trufflehog_mass_results.jsonl")
+LAUNCH_LOG = os.path.join(HOME, "launch_all.log")
+SCANNER_LOG = os.path.join(HOME, "crypto_scanner_scanner.log")
+
+CHAIN_COLORS = {
+    "btc": "\033[93m", "eth": "\033[96m", "ltc": "\033[94m",
+    "sol": "\033[95m", "doge": "\033[92m", "matic": "\033[95m",
+    "avax": "\033[91m", "bnb": "\033[93m", "base": "\033[96m",
+    "xrp": "\033[94m", "ton": "\033[94m",
+}
+RESET = "\033[0m"
+BOLD = "\033[1m"
+DIM = "\033[2m"
+GREEN = "\033[92m"
+RED = "\033[91m"
+
+
+def color_chain(chain):
+    c = CHAIN_COLORS.get(chain.lower(), "")
+    return f"{c}{chain.upper()}{RESET}"
+
+
+def is_running(pid_file):
+    if not os.path.exists(pid_file):
+        return False
+    try:
+        with open(pid_file) as f:
+            pid = int(f.read().strip())
+        os.kill(pid, 0)
+        return True
+    except Exception:
+        return False
+
+
+def file_lines(path):
+    if not os.path.exists(path):
+        return 0
+    try:
+        with open(path, "rb") as f:
+            return sum(1 for _ in f)
+    except Exception:
+        return 0
+
+
+def file_size(path):
+    try:
+        return os.path.getsize(path)
+    except Exception:
+        return 0
+
+
+def human_size(n):
+    for unit in ("B", "KB", "MB", "GB"):
+        if n < 1024:
+            return f"{n:.1f}{unit}"
+        n /= 1024
+    return f"{n:.1f}TB"
+
+
+def parse_status():
+    if not os.path.exists(STATUS_FILE):
+        return {}
+    try:
+        with open(STATUS_FILE) as f:
+            text = f.read().strip()
+        out = {}
+        for part in text.split(","):
+            kv = part.strip().split("=", 1)
+            if len(kv) == 2:
+                out[kv[0].strip()] = kv[1].strip()
+        return out
+    except Exception:
+        return {}
+
+
+def load_jsonl_tail(path, n=10):
+    if not os.path.exists(path):
+        return []
+    try:
+        with open(path, "r", encoding="utf-8", errors="ignore") as f:
+            lines = [line.strip() for line in f if line.strip()]
+        return [json.loads(line) for line in lines[-n:]]
+    except Exception:
+        return []
+
+
+def summarize_balances():
+    totals = defaultdict(float)
+    latest = {}
+    if not os.path.exists(CACHE_FILE):
+        return totals, latest
+    try:
+        with open(CACHE_FILE, "r", encoding="utf-8", errors="ignore") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    rec = json.loads(line)
+                except Exception:
+                    continue
+                chain = rec.get("chain", "?")
+                addr = rec.get("address", "")
+                bal = rec.get("balance")
+                if bal is None:
+                    continue
+                latest[(chain, addr)] = bal
+        for (chain, addr), bal in latest.items():
+            totals[chain] += bal
+        return totals, latest
+    except Exception:
+        return totals, latest
+
+
+def nonzero_hits():
+    hits = []
+    if not os.path.exists(HITS_FILE):
+        return hits
+    try:
+        with open(HITS_FILE, "r", encoding="utf-8", errors="ignore") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    rec = json.loads(line)
+                except Exception:
+                    continue
+                bal = rec.get("balance")
+                if bal and bal > 0:
+                    hits.append(rec)
+        return hits
+    except Exception:
+        return hits
+
+
+def latest_memory_highlights(n=8):
+    out = []
+    for rec in load_jsonl_tail(MEMORY_FILE, n=n):
+        findings = rec.get("findings", {})
+        ts = rec.get("ts", "?")
+        items = []
+        for chain in ("btc", "eth", "ltc", "sol", "doge", "xrp", "ton", "avax", "matic", "bnb", "base"):
+            for addr in findings.get(chain, [])[:2]:
+                items.append((chain, addr[:20] + ("..." if len(addr) > 20 else "")))
+        wallet = findings.get("wallet", {})
+        if wallet.get("wifs"):
+            items.append(("wif", f"{len(wallet['wifs'])} WIF(s)"))
+        if wallet.get("hex_keys"):
+            items.append(("hex", f"{len(wallet['hex_keys'])} hex key(s)"))
+        if wallet.get("seed_phrases"):
+            items.append(("seed", f"{len(wallet['seed_phrases'])} seed(s)"))
+        if items:
+            out.append((ts, items))
+    return out
+
+
+def render(spinner_char=""):
+    cols, _rows = shutil.get_terminal_size((80, 24))
+    bar = "=" * cols
+    thin = "-" * cols
+
+    scanner_running = is_running(os.path.join(PID_DIR, "crypto_scanner.pid"))
+    mass_running = is_running(os.path.join(PID_DIR, "mass_scan.pid"))
+
+    status = parse_status()
+    totals, latest = summarize_balances()
+    hits = nonzero_hits()
+
+    lines = []
+    lines.append(bar)
+    lines.append(f"{BOLD}  CRYPTO SCAN DASHBOARD {spinner_char}{RESET}")
+    lines.append(bar)
+    lines.append(f"  Updated: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')}")
+    lines.append("")
+
+    lines.append(f"{BOLD}  PROCESSES{RESET}")
+    lines.append(thin)
+    s_state = f"{GREEN}RUNNING{RESET}" if scanner_running else f"{RED}STOPPED{RESET}"
+    m_state = f"{GREEN}RUNNING{RESET}" if mass_running else f"{RED}STOPPED{RESET}"
+    lines.append(f"  Crypto scanner : {s_state}")
+    lines.append(f"  Mass scan      : {m_state}")
+    lines.append("")
+
+    lines.append(f"{BOLD}  SCANNER STATUS{RESET}")
+    lines.append(thin)
+    if status:
+        for k, v in status.items():
+            lines.append(f"  {k:12s} : {v}")
+    else:
+        lines.append("  (no status file yet)")
+    lines.append("")
+
+    lines.append(f"{BOLD}  FILES{RESET}")
+    lines.append(thin)
+    files = [
+        ("Mass results", MASS_FILE),
+        ("Scan results", RESULTS_FILE),
+        ("Memory", MEMORY_FILE),
+        ("Balance cache", CACHE_FILE),
+        ("Balance hits", HITS_FILE),
+    ]
+    for label, path in files:
+        ln = file_lines(path)
+        sz = human_size(file_size(path))
+        lines.append(f"  {label:15s} : {ln:>8,} lines  ({sz})")
+    lines.append("")
+
+    lines.append(f"{BOLD}  BALANCE SUMMARY{RESET}")
+    lines.append(thin)
+    if totals:
+        total_addrs = len(latest)
+        nonzero = sum(1 for bal in latest.values() if bal and bal > 0)
+        lines.append(f"  Addresses checked : {total_addrs:,}")
+        lines.append(f"  Non-zero balances : {nonzero}")
+        for chain in sorted(totals.keys(), key=lambda c: -totals[c]):
+            bal = totals[chain]
+            if bal > 0:
+                lines.append(f"  {color_chain(chain):>6s} total : {bal:,.8f}")
+    else:
+        lines.append("  (no balances cached yet)")
+    lines.append("")
+
+    if hits:
+        lines.append(f"{BOLD}  NONZERO BALANCE HITS ({len(hits)} total){RESET}")
+        lines.append(thin)
+        for rec in hits[-8:]:
+            chain = rec.get("chain", "?")
+            addr = rec.get("address", "")
+            bal = rec.get("balance", 0)
+            when = rec.get("checked_at", "?")[11:19] if rec.get("checked_at") else "?"
+            lines.append(f"  [{when}] {color_chain(chain)} {addr:<42s} {bal:,.8f}")
+        lines.append("")
+
+    mem = latest_memory_highlights(n=6)
+    if mem:
+        lines.append(f"{BOLD}  LATEST MEMORY ACTIVITY{RESET}")
+        lines.append(thin)
+        for ts, items in mem:
+            short_ts = ts[11:19] if "T" in ts else ts
+            parts = []
+            for c, v in items[:4]:
+                if c in ("wif", "hex", "seed"):
+                    parts.append(f"{c.upper()} {v}")
+                else:
+                    parts.append(f"{color_chain(c)} {v}")
+            lines.append(f"  [{short_ts}] {', '.join(parts)}")
+        lines.append("")
+
+    lines.append(bar)
+    lines.append(f"  {DIM}Logs: tail -f {LAUNCH_LOG} | tail -f {SCANNER_LOG}{RESET}")
+    lines.append(bar)
+
+    return "\n".join(lines)
+
+
+class Spinner:
+    def __init__(self):
+        self._stop = threading.Event()
+        self._char = " "
+        self._thread = threading.Thread(target=self._spin, daemon=True)
+
+    def _spin(self):
+        for char in itertools.cycle(["|", "/", "-", "\\"]):
+            if self._stop.is_set():
+                break
+            self._char = char
+            time.sleep(0.15)
+
+    def start(self):
+        self._thread.start()
+
+    def stop(self):
+        self._stop.set()
+        self._thread.join()
+
+    @property
+    def char(self):
+        return self._char
+
+
+def clear_screen():
+    sys.stdout.write("\033[H\033[2J\033[3J")
+    sys.stdout.flush()
+
+
+def watch(interval=15):
+    spinner = Spinner()
+    spinner.start()
+
+    # Track user interaction to pause refresh cycles.
+    # When the user presses a key (scrolls/interacts), we stop the normal
+    # refresh loop, wait for them to finish, then wait a full minute before
+    # resuming the 15-second refresh cycle.
+    _stdin_fd = sys.stdin.fileno()
+    _orig_flags = None
+    try:
+        import termios
+        _orig_flags = termios.tcgetattr(_stdin_fd)
+        new_flags = termios.tcgetattr(_stdin_fd)
+        new_flags[3] &= ~termios.ICANON  # disable canonical mode
+        new_flags[6][termios.VMIN] = 0   # non-blocking read
+        new_flags[6][termios.VTIME] = 0  # no timeout
+        termios.tcsetattr(_stdin_fd, termios.TCSANOW, new_flags)
+    except (ImportError, termios.error, AttributeError):
+        pass  # not a TTY or termios unavailable
+
+    user_active = False
+    user_active_at = 0.0
+    cooled_down = False
+
+    def _check_user_input():
+        """Return True if the user pressed a key."""
+        try:
+            import select
+            if select.select([sys.stdin], [], [], 0)[0]:
+                ch = sys.stdin.read(1)
+                return bool(ch)
+        except Exception:
+            pass
+        return False
+
+    def on_sigint(_sig, _frame):
+        spinner.stop()
+        if _orig_flags is not None:
+            try:
+                termios.tcsetattr(_stdin_fd, termios.TCSANOW, _orig_flags)
+            except Exception:
+                pass
+        clear_screen()
+        print(render(" "))
+        print("\nDashboard stopped.")
+        sys.exit(0)
+
+    signal.signal(signal.SIGINT, on_sigint)
+
+    try:
+        while True:
+            # Check for user keypress (scroll / interaction)
+            if _check_user_input():
+                user_active = True
+                user_active_at = time.time()
+
+            # If user was active, wait for them to finish then a full minute cooldown
+            if user_active:
+                elapsed_since_active = time.time() - user_active_at
+                # Give the user 1 second after last keypress, then 60s cooldown
+                if elapsed_since_active >= 61:
+                    user_active = False
+                    cooled_down = True
+                    user_active_at = 0.0
+                # Still animating the spinner while waiting
+                clear_screen()
+                print(f"  {BOLD}Dashboard paused — interaction detected{RESET}")
+                print(f"  Resuming auto-refresh in {max(0, 61 - int(elapsed_since_active))}s...")
+                print(f"  (Press Ctrl+C to stop)")
+                time.sleep(1)
+                continue
+
+            # Normal refresh cycle
+            clear_screen()
+            print(render(spinner.char))
+
+            # Sleep in small slices so we can still detect user input
+            remaining = interval
+            while remaining > 0 and not user_active:
+                time.sleep(min(1, remaining))
+                remaining -= 1
+    except KeyboardInterrupt:
+        on_sigint(None, None)
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Live crypto-scan dashboard")
+    parser.add_argument("-w", "--watch", action="store_true", help="refresh continuously")
+    parser.add_argument("-i", "--interval", type=int, default=15, help="refresh interval in seconds (default 15)")
+    args = parser.parse_args()
+
+    if args.watch:
+        watch(args.interval)
+    else:
+        print(render())
+
+
+if __name__ == "__main__":
+    main()
