@@ -1,0 +1,8 @@
+#!/data/data/com.termux/files/usr/bin/bash
+# Wallet balance viewer shortcut
+
+clear
+python3 "$HOME/wallet_view.py"
+echo ""
+read -n 1 -s -r -p "Tap any key to close..." || true
+echo ""

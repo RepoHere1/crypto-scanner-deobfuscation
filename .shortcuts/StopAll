@@ -17,13 +17,10 @@ notify() {
     termux-toast "$1" 2>/dev/null || true
 }
 
-banner "LaunchAll - Starting all scanners"
-export ALCHEMY_API_KEY="${ALCHEMY_API_KEY:-mi8wM6xm7rRBMYTCjHfM5}"
-notify "Launching all scanners..."
-bash "$HOME/launch_all.sh"
+banner "StopAll - Stopping scanners"
+notify "Stopping all scanners..."
+bash "$HOME/stop_all.sh"
 echo ""
-echo "Recent log output:"
-tail -n 30 "$HOME/launch_all.log" 2>/dev/null || echo "[no log yet]"
-echo ""
-echo "Services are running in the background."
+echo "[+] All scanners stopped"
+notify "All scanners stopped"
 wait_key

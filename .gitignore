@@ -1,23 +1,38 @@
-# TruffleHog output - user can regen
-.trufflehog_results.jsonl
-.trufflehog_mass_results.jsonl
-crypto_findings.jsonl
+# Secrets
+.github_token
+*_token
+*.key
+*.pem
 
 # Runtime/generated files
-crypto_scanner.pid
+*.log
+*.pid
+*.bak
+.run_pids/
 crypto_scanner_memory.jsonl
 crypto_scanner_status.txt
-crypto_scanner_scanner.log
+balance_cache.jsonl
+balances_hit.jsonl
+high_confidence_hits.jsonl
+api_keys.jsonl
+rpc_endpoints.jsonl
 launch_all.log
 trufflehog_throttled.log
 scan_out.txt
 scan_test_out.txt
+shortcut_out.txt
+shortcut_install.log
+icon_finish.log
+paste.txt
+paste.txt.bak
+paste_box.txt
+
+# Android / Termux artifacts
+*.apk
 
 # Test files
 test_crypto.jsonl
 test_sample.jsonl
-paste.txt
-paste.txt.bak
 
 # System / IDE / cache
 .bash_history
