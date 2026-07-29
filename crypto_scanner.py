@@ -46,6 +46,12 @@ try:
 except ImportError:
     raise SystemExit("[!] mnemonic is required: pip3 install mnemonic")
 
+# Optional IQ layer (PyCryptodome keccak + secp range + smarter scoring)
+try:
+    import crypto_iq as _crypto_iq
+except ImportError:
+    _crypto_iq = None  # type: ignore
+
 # ---------------------------------------------------------------------------
 # WiFi resilience helpers
 # ---------------------------------------------------------------------------
@@ -373,7 +379,16 @@ def _keccak_f1600(state):
         state[0] ^= RC[r]
 
 def keccak_256(data: bytes) -> bytes:
-    """Return Keccak-256 digest (as used by Ethereum)."""
+    """Return Keccak-256 digest (as used by Ethereum).
+
+    Prefer PyCryptodome C implementation via crypto_iq when available —
+    same digest, much faster on bulk ETH checksum/derivation work.
+    """
+    if _crypto_iq is not None and getattr(_crypto_iq, "_PYCRYPTODOME", False):
+        try:
+            return _crypto_iq.keccak_256(data)
+        except Exception:
+            pass
     rate = 136
     state = [0] * 25
     buf = bytearray(data)
@@ -536,8 +551,17 @@ def wif_to_priv_bytes(wif: str) -> Optional[bytes]:
 def hex_to_eth_address(hex_key: str) -> Optional[str]:
     """64-char hex private key -> checksummed Ethereum address."""
     try:
-        priv = bytes.fromhex(hex_key)
+        h = hex_key.strip().lower().removeprefix("0x")
+        if _crypto_iq is not None:
+            ok, _reason, _score = _crypto_iq.validate_hex_privkey(h)
+            if not ok:
+                return None
+        priv = bytes.fromhex(h)
         if len(priv) != 32 or priv == bytes(32):
+            return None
+        # secp256k1 range guard even without IQ module
+        n = int.from_bytes(priv, "big")
+        if n <= 0 or n >= 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141:
             return None
         sk = ecdsa.SigningKey.from_string(priv, curve=ecdsa.SECP256k1)
         vk = sk.get_verifying_key()
@@ -599,6 +623,14 @@ def priv_to_addresses(priv: bytes) -> Dict[str, str]:
     """32-byte private key -> addresses for common chains."""
     if len(priv) != 32 or priv == bytes(32):
         return {}
+    if _crypto_iq is not None:
+        ok, _reason = _crypto_iq.validate_secp256k1_priv(priv)
+        if not ok:
+            return {}
+    else:
+        n = int.from_bytes(priv, "big")
+        if n <= 0 or n >= 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141:
+            return {}
     try:
         pub = priv_to_compressed_pub(priv)
         addresses = {
@@ -1266,6 +1298,20 @@ def try_decode_base64(token: str) -> List[str]:
 # Correlation
 # ---------------------------------------------------------------------------
 def correlate_findings(findings: Dict[str, Any], source_line: str, context_window: List[str]) -> Dict[str, Any]:
+    """Derive addresses + score confidence. Uses crypto_iq when available."""
+    if _crypto_iq is not None:
+        try:
+            return _crypto_iq.enrich_correlate(
+                findings,
+                source_line,
+                context_window,
+                derive_fn=priv_to_addresses,
+                wif_to_priv_fn=wif_to_priv_bytes,
+                seed_to_addrs_fn=seed_to_addresses,
+            )
+        except Exception as exc:
+            logger.debug("crypto_iq enrich failed, legacy path: %s", exc)
+
     enriched = dict(findings)
     nearby = " ".join(context_window + [source_line])
     has_nearby_addr = any(
@@ -1296,9 +1342,12 @@ def correlate_findings(findings: Dict[str, Any], source_line: str, context_windo
 
     # Derive addresses from hex keys
     for hexk in findings.get("hex_key", []):
-        for chain, addr in priv_to_addresses(bytes.fromhex(hexk)).items():
-            enriched["derived_addresses"].append({"chain": chain, "address": addr, "from": "hex_key"})
-        enriched["wallet"]["hex_keys"].append(hexk)
+        try:
+            for chain, addr in priv_to_addresses(bytes.fromhex(hexk)).items():
+                enriched["derived_addresses"].append({"chain": chain, "address": addr, "from": "hex_key"})
+            enriched["wallet"]["hex_keys"].append(hexk)
+        except Exception:
+            pass
 
     # Derive addresses from seed phrases
     for seed in findings.get("seed_phrase", []):
@@ -1456,7 +1505,14 @@ def scan_line(line: str) -> Dict[str, Any]:
     findings["matic"] = [a for a in MATIC_ADDR.findall(text) if validate_eth_address(a)]
 
     findings["wif"] = WIF_PAT.findall(text)
-    findings["hex_key"] = HEX_KEY_PAT.findall(text)
+    raw_hex = HEX_KEY_PAT.findall(text)
+    if _crypto_iq is not None:
+        # Pre-filter obvious junk before correlate (saves derive CPU)
+        findings["hex_key"] = [
+            x["hex"] for x in _crypto_iq.filter_hex_keys(raw_hex, context=text)
+        ]
+    else:
+        findings["hex_key"] = raw_hex
 
     # Seed phrase detection: sliding window over all words.
     # Pre-filter windows to avoid expensive PBKDF2 checksums on non-BIP39 text.
@@ -1610,6 +1666,19 @@ def main():
     logger.info("Memory: %s", MEMORY_FILE)
     logger.info("Balance cache: %s", BALANCE_CACHE_FILE)
     logger.info("High-confidence hits: %s", HIGH_CONFIDENCE_FILE)
+    if _crypto_iq is not None:
+        try:
+            info = _crypto_iq.backend_info()
+            logger.info(
+                "Crypto IQ: ON  backend=%s  keccak=%s  pycryptodome=%s",
+                info.get("module"),
+                info.get("keccak"),
+                info.get("pycryptodome"),
+            )
+        except Exception:
+            logger.info("Crypto IQ: ON")
+    else:
+        logger.info("Crypto IQ: OFF (crypto_iq.py / pycryptodome not available)")
     logger.info("Interval: %ds", CHECK_INTERVAL)
     logger.info("Press Ctrl+C to stop")
 

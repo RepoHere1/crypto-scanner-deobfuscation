@@ -43,11 +43,19 @@ CHAIN_COLORS = {
     "avax": "\033[91m", "bnb": "\033[93m", "base": "\033[96m",
     "xrp": "\033[94m", "ton": "\033[94m", "monad": "\033[92m",
 }
+YELLOW = "\033[93m"
 RESET = "\033[0m"
 BOLD = "\033[1m"
 DIM = "\033[2m"
 GREEN = "\033[92m"
 RED = "\033[91m"
+
+# Progress snapshot between watch refreshes (processed/queue rates).
+_progress_prev = {"t": None, "processed": None, "queue": None}
+
+# Exact line-count budget: cheap on Termux for cache/hits/status-sized files.
+# Multi-GB mass/results stay sampled so the dash never blanks.
+EXACT_LINES_MAX = 20_000_000
 
 
 def color_chain(chain):
@@ -85,16 +93,20 @@ def proc_running(pattern: str) -> bool:
 
 
 def file_lines(path):
-    """Fast line estimate. Never full-scan multi-GB files (that blanks the dash)."""
+    """Return (line_count, is_estimate).
+
+    Exact count for files <= EXACT_LINES_MAX (cache/hits/memory-sized).
+    Head+tail sample for multi-GB mass/results so the dash never blanks.
+    """
     if not os.path.exists(path):
-        return 0
+        return 0, False
     try:
         size = os.path.getsize(path)
         if size == 0:
-            return 0
-        if size <= 2_000_000:
+            return 0, False
+        if size <= EXACT_LINES_MAX:
             with open(path, "rb") as f:
-                return sum(1 for _ in f)
+                return sum(1 for _ in f), False
         with open(path, "rb") as f:
             head = f.read(512_000)
             try:
@@ -106,9 +118,9 @@ def file_lines(path):
         sample = head + nl + tail
         n = sample.count(nl) or 1
         avg = max(len(sample) / n, 40.0)
-        return int(size / avg)
+        return int(size / avg), True
     except Exception:
-        return 0
+        return 0, False
 
 
 def file_size(path):
@@ -140,7 +152,7 @@ def disk_info():
 
 
 def encrypt_status():
-    """Return list of status lines about encrypted findings."""
+    """Return list of status lines about encrypted findings / live vault."""
     lines = []
     manifest = {}
     if os.path.exists(ENCRYPT_MANIFEST):
@@ -150,21 +162,75 @@ def encrypt_status():
         except Exception:
             pass
 
+    vault_dir = os.path.join(HOME, ".vault")
+    vault_enc = []
+    if os.path.isdir(vault_dir):
+        try:
+            vault_enc = [
+                f for f in os.listdir(vault_dir)
+                if f.endswith(".enc")
+            ]
+        except Exception:
+            vault_enc = []
+
+    home_enc = []
+    for f in ENCRYPTED_FILES:
+        if os.path.exists(f):
+            home_enc.append(os.path.basename(f))
+    # also pick up any other *.enc in home (not recursive)
+    try:
+        for name in os.listdir(HOME):
+            if name.endswith(".enc") and name not in home_enc:
+                home_enc.append(name)
+    except Exception:
+        pass
+
+    pass_path = os.path.join(HOME, ".encrypt_passphrase")
+    has_pass = os.path.exists(pass_path)
+
     if manifest:
         when = manifest.get("encrypted_at", "?")
-        url = manifest.get("gist_url", "")
+        url = manifest.get("gist_url", "") or "(none)"
         files = manifest.get("files", [])
-        lines.append(f"  Status : {GREEN}ENCRYPTED{RESET}")
-        lines.append(f"  Gist   : {url}")
-        lines.append(f"  At     : {when}")
+        mode = manifest.get("mode", "?")
+        backend = manifest.get("backend", "?")
+        age = parse_iso_age(when) if when and when != "?" else None
+        ac = age_color(age, good=3600, ok=86400)
+        lines.append(f"  Status : {GREEN}ENCRYPTED{RESET}  mode={mode}  backend={backend}")
+        lines.append(f"  At     : {when}  {ac}({format_age(age)} ago){RESET}")
         lines.append(f"  Files  : {len(files)} encrypted")
+        if url and url != "(none)":
+            lines.append(f"  Gist   : {url}")
+        else:
+            lines.append(f"  Gist   : {DIM}not uploaded{RESET}")
     else:
-        any_encrypted = any(os.path.exists(f) for f in ENCRYPTED_FILES)
+        any_encrypted = bool(home_enc or vault_enc)
         if any_encrypted:
-            lines.append(f"  Status : {RED}PARTIAL{RESET} (some .enc files exist but no manifest)")
+            lines.append(
+                f"  Status : {YELLOW}PARTIAL{RESET} "
+                f"(.enc present, no manifest)"
+            )
         else:
             lines.append(f"  Status : {DIM}Not encrypted{RESET}")
-            lines.append(f"  Run    : encrypt_offload.py --encrypt")
+
+    if vault_enc:
+        lines.append(f"  Vault  : {GREEN}{len(vault_enc)} file(s){RESET} in ~/.vault/")
+        for name in sorted(vault_enc)[:4]:
+            try:
+                sz = human_size(os.path.getsize(os.path.join(vault_dir, name)))
+            except Exception:
+                sz = "?"
+            lines.append(f"           {name} ({sz})")
+    if home_enc:
+        lines.append(f"  Home .enc: {len(home_enc)} file(s)")
+    if has_pass:
+        lines.append(f"  Passphrase file: {GREEN}present{RESET} (~/.encrypt_passphrase)")
+    else:
+        lines.append(f"  Passphrase file: {YELLOW}missing{RESET}")
+    if not has_pass or (not manifest and not vault_enc and not home_enc):
+        lines.append(f"  Run    : python3 ~/encrypt_offload.py --live-backup")
+    else:
+        lines.append(f"  Run    : encrypt_offload.py --live-backup | --decrypt")
     return lines
 
 
@@ -182,6 +248,164 @@ def parse_status():
         return out
     except Exception:
         return {}
+
+
+def file_age_seconds(path):
+    """Seconds since mtime, or None if missing."""
+    try:
+        if not os.path.exists(path):
+            return None
+        return max(0.0, time.time() - os.path.getmtime(path))
+    except Exception:
+        return None
+
+
+def format_age(seconds):
+    """Human age like '3s', '16m', '2h5m'."""
+    if seconds is None:
+        return "?"
+    try:
+        s = int(seconds)
+    except Exception:
+        return "?"
+    if s < 60:
+        return f"{s}s"
+    if s < 3600:
+        return f"{s // 60}m"
+    if s < 86400:
+        h, m = divmod(s, 3600)
+        return f"{h}h{m // 60}m"
+    d, rem = divmod(s, 86400)
+    return f"{d}d{rem // 3600}h"
+
+
+def age_color(seconds, good=300, ok=1800):
+    """Green < good, yellow < ok, else red. good/ok in seconds."""
+    if seconds is None:
+        return DIM
+    if seconds <= good:
+        return GREEN
+    if seconds <= ok:
+        return YELLOW
+    return RED
+
+
+def parse_iso_age(iso_str):
+    """Seconds since an ISO timestamp (…Z or offset). None if unparseable."""
+    if not iso_str or not isinstance(iso_str, str):
+        return None
+    try:
+        s = iso_str.strip()
+        if s.endswith("Z"):
+            s = s[:-1] + "+00:00"
+        dt = datetime.fromisoformat(s)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return max(0.0, (datetime.now(timezone.utc) - dt).total_seconds())
+    except Exception:
+        return None
+
+
+def read_pid_info(pid_file):
+    """Return dict: pid, alive, cmdline_short, age_s (process start if available)."""
+    info = {"pid": None, "alive": False, "cmd": "", "age_s": None, "stale_file": False}
+    if not os.path.exists(pid_file):
+        return info
+    try:
+        with open(pid_file) as f:
+            pid = int(f.read().strip().split()[0])
+        info["pid"] = pid
+    except Exception:
+        info["stale_file"] = True
+        return info
+    try:
+        os.kill(pid, 0)
+        info["alive"] = True
+    except Exception:
+        info["stale_file"] = True
+        return info
+    try:
+        raw = open(f"/proc/{pid}/cmdline", "rb").read().replace(b"\x00", b" ").decode(errors="ignore").strip()
+        # keep basename-ish tail
+        info["cmd"] = raw[-60:] if len(raw) > 60 else raw
+    except Exception:
+        pass
+    try:
+        # /proc/pid/stat field 22 is starttime (clock ticks); prefer stime of cmdline file
+        st = os.stat(f"/proc/{pid}")
+        # Not start time reliably; use status file mtime of pid file as fallback age of record
+        info["age_s"] = max(0.0, time.time() - os.path.getmtime(pid_file))
+        # Better: read process start from /proc/pid/stat
+        with open(f"/proc/{pid}/stat", "r") as sf:
+            stat_txt = sf.read()
+        # comm can contain spaces/parens — split after last ')'
+        rparen = stat_txt.rfind(")")
+        if rparen >= 0:
+            fields = stat_txt[rparen + 2 :].split()
+            # starttime is field 20 in the post-comm fields (man proc: 22 overall → index 19 post-comm)
+            start_ticks = int(fields[19])
+            hz = os.sysconf(os.sysconf_names.get("SC_CLK_TCK", "SC_CLK_TCK")) if hasattr(os, "sysconf") else 100
+            try:
+                with open("/proc/uptime", "r") as uf:
+                    uptime = float(uf.read().split()[0])
+                info["age_s"] = max(0.0, uptime - (start_ticks / float(hz or 100)))
+            except Exception:
+                pass
+    except Exception:
+        pass
+    return info
+
+
+def count_dashboard_watches():
+    """How many live dashboard.py --watch processes (including this one)."""
+    try:
+        import subprocess
+        r = subprocess.run(
+            ["pgrep", "-af", "dashboard.py"],
+            capture_output=True, text=True, timeout=5,
+        )
+        if r.returncode != 0:
+            return 0
+        n = 0
+        for line in (r.stdout or "").splitlines():
+            if "pgrep" in line or "bash -c" in line:
+                continue
+            if "dashboard.py" in line and "python" in line:
+                n += 1
+        return n
+    except Exception:
+        return 0
+
+
+def progress_rates(status):
+    """Return (proc_per_min, queue_delta_per_min, note) from status vs last snapshot."""
+    global _progress_prev
+    now = time.time()
+    try:
+        processed = int(str(status.get("processed", "")).split()[0])
+    except Exception:
+        processed = None
+    try:
+        queue = int(str(status.get("queue", "")).split()[0])
+    except Exception:
+        queue = None
+
+    proc_rate = None
+    queue_rate = None
+    prev = _progress_prev
+    if (
+        prev["t"] is not None
+        and processed is not None
+        and prev["processed"] is not None
+    ):
+        dt = max(now - prev["t"], 0.001)
+        proc_rate = (processed - prev["processed"]) / dt * 60.0
+        if queue is not None and prev["queue"] is not None:
+            queue_rate = (queue - prev["queue"]) / dt * 60.0
+
+    if processed is not None:
+        _progress_prev = {"t": now, "processed": processed, "queue": queue}
+    return proc_rate, queue_rate
 
 
 def load_jsonl_tail(path, n=10):
@@ -462,24 +686,28 @@ def render(spinner_char=""):
     bar = "=" * cols
     thin = "-" * cols
 
-    scanner_running = (
-        is_running(os.path.join(PID_DIR, "crypto_scanner.pid"))
-        or proc_running("crypto_scanner.py")
-    )
+    keep_info = read_pid_info(os.path.join(PID_DIR, "keepalive.pid"))
+    scan_info = read_pid_info(os.path.join(PID_DIR, "crypto_scanner.pid"))
+    adapt_info = read_pid_info(os.path.join(PID_DIR, "adaptive_scan.pid"))
+    mass_info = read_pid_info(os.path.join(PID_DIR, "mass_scan.pid"))
+    watch_info = read_pid_info(os.path.join(PID_DIR, "stack_watchdog.pid"))
+    stack_on_info = read_pid_info(os.path.join(PID_DIR, "stack_on.pid"))
+
+    scanner_running = scan_info["alive"] or proc_running("crypto_scanner.py")
     mass_running = (
-        is_running(os.path.join(PID_DIR, "mass_scan.pid"))
-        or is_running(os.path.join(PID_DIR, "adaptive_scan.pid"))
+        mass_info["alive"]
+        or adapt_info["alive"]
         or proc_running("mass_scan.py")
         or proc_running("adaptive_throttler.py")
     )
-    keep_running = (
-        is_running(os.path.join(PID_DIR, "keepalive.pid"))
-        or proc_running("keepalive.py")
-    )
+    keep_running = keep_info["alive"] or proc_running("keepalive.py")
+    dash_copies = count_dashboard_watches()
 
     status = parse_status()
     totals, latest, newest_check = summarize_balances()
     hits = nonzero_hits()
+    status_age = file_age_seconds(STATUS_FILE)
+    proc_rate, queue_rate = progress_rates(status)
 
     lines = []
     lines.append(bar)
@@ -488,21 +716,90 @@ def render(spinner_char=""):
     lines.append(f"  Updated: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')}")
     lines.append("")
 
+    def _proc_line(label, running, info):
+        if running:
+            state = f"{GREEN}RUNNING{RESET}"
+        elif info.get("stale_file") and info.get("pid") is not None:
+            state = f"{YELLOW}STALE PID{RESET}"
+        else:
+            state = f"{RED}STOPPED{RESET}"
+        bits = [f"  {label:16s}: {state}"]
+        if info.get("pid") is not None:
+            bits.append(f"pid {info['pid']}")
+        if info.get("alive") and info.get("age_s") is not None:
+            bits.append(f"up {format_age(info['age_s'])}")
+        elif info.get("stale_file") and info.get("pid") is not None:
+            bits.append("file dead")
+        return "  ".join(bits)
+
     lines.append(f"{BOLD}  PROCESSES{RESET}")
     lines.append(thin)
-    s_state = f"{GREEN}RUNNING{RESET}" if scanner_running else f"{RED}STOPPED{RESET}"
-    m_state = f"{GREEN}RUNNING{RESET}" if mass_running else f"{RED}STOPPED{RESET}"
-    k_state = f"{GREEN}RUNNING{RESET}" if keep_running else f"{RED}STOPPED{RESET}"
-    lines.append(f"  Keepalive      : {k_state}")
-    lines.append(f"  Crypto scanner : {s_state}")
-    lines.append(f"  Mass / adaptive: {m_state}")
+    lines.append(_proc_line("Keepalive", keep_running, keep_info))
+    lines.append(_proc_line("Crypto scanner", scanner_running, scan_info))
+    m_info = adapt_info if adapt_info.get("pid") else mass_info
+    m_line = _proc_line("Mass / adaptive", mass_running, m_info)
+    if mass_info.get("alive") and adapt_info.get("alive"):
+        m_line += f"  +mass pid {mass_info['pid']}"
+    elif proc_running("mass_scan.py") and not mass_info.get("alive"):
+        m_line += "  +mass_scan live"
+    lines.append(m_line)
+    lines.append(_proc_line("Watchdog", bool(watch_info.get("alive")), watch_info))
+    if stack_on_info.get("pid") is not None and not stack_on_info.get("alive"):
+        lines.append(
+            f"  {'stack_on.pid':16s}: {YELLOW}STALE PID{RESET}  "
+            f"pid {stack_on_info['pid']}  file dead"
+        )
+    if dash_copies > 1:
+        lines.append(
+            f"  {'Dash copies':16s}: {YELLOW}{dash_copies}{RESET}  "
+            f"{DIM}(multiple dashboard.py — kill extras){RESET}"
+        )
+    elif dash_copies == 1:
+        lines.append(f"  {'Dash copies':16s}: {GREEN}1{RESET}")
     lines.append("")
 
     lines.append(f"{BOLD}  SCANNER STATUS{RESET}")
     lines.append(thin)
     if status:
+        # findings = scanner all-time funded hits, NOT key discovery volume
+        label_map = {
+            "processed": "processed",
+            "findings": "balance hits",
+            "memory": "memory bytes",
+            "queue": "queue depth",
+            "started": "started",
+        }
         for k, v in status.items():
-            lines.append(f"  {k:12s} : {v}")
+            lab = label_map.get(k, k)
+            if k == "findings":
+                lines.append(
+                    f"  {lab:16s}: {v}  "
+                    f"{DIM}(all-time funded hits from scanner){RESET}"
+                )
+            else:
+                lines.append(f"  {lab:16s}: {v}")
+        age_c = age_color(status_age, good=30, ok=120)
+        lines.append(
+            f"  {'status file':16s}: {age_c}{format_age(status_age)} ago{RESET}"
+        )
+        if proc_rate is not None:
+            if proc_rate > 0.5:
+                rc = GREEN
+            elif proc_rate >= 0:
+                rc = YELLOW
+            else:
+                rc = RED
+            qbit = ""
+            if queue_rate is not None:
+                sign = "+" if queue_rate >= 0 else ""
+                qbit = f"  queue {sign}{queue_rate:.0f}/min"
+            lines.append(
+                f"  {'progress':16s}: {rc}{proc_rate:.1f} processed/min{RESET}{qbit}"
+            )
+        else:
+            lines.append(
+                f"  {'progress':16s}: {DIM}(rate on next refresh){RESET}"
+            )
     else:
         lines.append("  (no status file yet)")
     lines.append("")
@@ -517,9 +814,12 @@ def render(spinner_char=""):
         ("Balance hits", HITS_FILE),
     ]
     for label, path in files:
-        ln = file_lines(path)
+        ln, est = file_lines(path)
         sz = human_size(file_size(path))
-        lines.append(f"  {label:15s} : {ln:>8,} lines  ({sz})")
+        if est:
+            lines.append(f"  {label:15s} : ~{ln:>7,} lines (est.)  ({sz})")
+        else:
+            lines.append(f"  {label:15s} : {ln:>8,} lines  ({sz})")
     lines.append("")
 
     lines.append(f"{BOLD}  BALANCE SUMMARY{RESET}")
@@ -533,7 +833,19 @@ def render(spinner_char=""):
         if pending:
             lines.append(f"  Pending / failed  : {pending}")
         if newest_check:
-            lines.append(f"  Last on-chain     : {newest_check}")
+            onchain_age = parse_iso_age(newest_check)
+            ac = age_color(onchain_age, good=300, ok=1800)
+            age_bit = (
+                f"  {ac}({format_age(onchain_age)} ago){RESET}"
+                if onchain_age is not None
+                else ""
+            )
+            lines.append(f"  Last on-chain     : {newest_check}{age_bit}")
+            if scanner_running and onchain_age is not None and onchain_age > 1800:
+                lines.append(
+                    f"  {YELLOW}  ⚠ balances lag scanner — on-chain idle >30m "
+                    f"while scanner runs{RESET}"
+                )
         for chain in sorted(totals.keys(), key=lambda c: -totals[c]):
             bal = totals[chain]
             if bal > 0:
@@ -550,12 +862,24 @@ def render(spinner_char=""):
         nz_n = wt.get("nonzero_count", len(wt.get("nonzero") or []))
         lines.append(f"{BOLD}  WALLET TRUTH (CACHE + HITS, DEDUPED){RESET}")
         lines.append(thin)
-        lines.append(f"  Unique keys (mem tail): {wt['wallets']:,}")
-        lines.append(f"  Addresses in cache    : {wt['addresses']:,}")
-        lines.append(f"  Nonzero / zero / pend : {nz_n} / {wt.get('zeroed', 0)} / {wt['pending']}")
-        lines.append(f"  Total nonzero         : {GREEN}{wt['total']:,.8f}{RESET}")
+        lines.append(
+            f"  Unique keys (last ~2MB mem): {wt['wallets']:,}  "
+            f"{DIM}(sample, not all-time){RESET}"
+        )
+        lines.append(f"  Addresses in cache        : {wt['addresses']:,}")
+        lines.append(
+            f"  Nonzero / zero / pend     : {nz_n} / {wt.get('zeroed', 0)} / {wt['pending']}"
+        )
+        lines.append(f"  Total nonzero             : {GREEN}{wt['total']:,.8f}{RESET}")
         if wt.get("newest"):
-            lines.append(f"  Last on-chain check   : {wt['newest']}")
+            onchain_age = parse_iso_age(wt["newest"])
+            ac = age_color(onchain_age, good=300, ok=1800)
+            age_bit = (
+                f"  {ac}({format_age(onchain_age)} ago){RESET}"
+                if onchain_age is not None
+                else ""
+            )
+            lines.append(f"  Last on-chain check       : {wt['newest']}{age_bit}")
         if wt["nonzero"]:
             for chain, addr, bal in wt["nonzero"][:8]:
                 lines.append(
@@ -594,6 +918,13 @@ def render(spinner_char=""):
                     parts.append(f"{color_chain(c)} {v}")
             lines.append(f"  [{short_ts}] {', '.join(parts)}")
         lines.append("")
+
+    # Encryption / vault health (was defined but never rendered)
+    lines.append(f"{BOLD}  ENCRYPTION / VAULT{RESET}")
+    lines.append(thin)
+    for el in encrypt_status():
+        lines.append(el)
+    lines.append("")
 
     lines.append(bar)
     lines.append(f"  {DIM}Logs: tail -f {LAUNCH_LOG} | tail -f {SCANNER_LOG}{RESET}")

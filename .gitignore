@@ -67,3 +67,8 @@ storage/
 test_crypto.jsonl
 test_sample.jsonl
 test_clone_ok/
+
+# Encryption secrets / vault (never push)
+.encrypt_passphrase
+.encrypt_manifest.json
+.vault/
