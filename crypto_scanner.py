@@ -720,9 +720,9 @@ def recommend_balance_workers() -> int:
         cpus = 4
     # I/O-bound HTTP checks → more threads than cores is fine
     if mem >= 6000:
-        n = min(24, max(12, cpus * 2))
+        n = min(24, max(16, cpus * 3))  # prefer high concurrency on big-RAM devices
     elif mem >= 3000:
-        n = min(16, max(8, cpus + 2))
+        n = min(20, max(12, cpus * 2))
     elif mem >= 1500:
         n = min(10, max(6, cpus))
     elif mem >= 700:
