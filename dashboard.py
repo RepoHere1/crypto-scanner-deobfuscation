@@ -60,9 +60,26 @@ def is_running(pid_file):
         return False
     try:
         with open(pid_file) as f:
-            pid = int(f.read().strip())
+            pid = int(f.read().strip().split()[0])
         os.kill(pid, 0)
         return True
+    except Exception:
+        return False
+
+
+def proc_running(pattern: str) -> bool:
+    """True if a live python process matches pattern."""
+    try:
+        import subprocess
+        r = subprocess.run(["pgrep", "-af", pattern], capture_output=True, text=True, timeout=5)
+        if r.returncode != 0:
+            return False
+        for line in (r.stdout or "").splitlines():
+            if "pgrep" in line or "bash -c" in line:
+                continue
+            if pattern in line and "python" in line:
+                return True
+        return False
     except Exception:
         return False
 
@@ -337,8 +354,20 @@ def render(spinner_char=""):
     bar = "=" * cols
     thin = "-" * cols
 
-    scanner_running = is_running(os.path.join(PID_DIR, "crypto_scanner.pid"))
-    mass_running = is_running(os.path.join(PID_DIR, "mass_scan.pid"))
+    scanner_running = (
+        is_running(os.path.join(PID_DIR, "crypto_scanner.pid"))
+        or proc_running("crypto_scanner.py")
+    )
+    mass_running = (
+        is_running(os.path.join(PID_DIR, "mass_scan.pid"))
+        or is_running(os.path.join(PID_DIR, "adaptive_scan.pid"))
+        or proc_running("mass_scan.py")
+        or proc_running("adaptive_throttler.py")
+    )
+    keep_running = (
+        is_running(os.path.join(PID_DIR, "keepalive.pid"))
+        or proc_running("keepalive.py")
+    )
 
     status = parse_status()
     totals, latest, newest_check = summarize_balances()
@@ -355,8 +384,10 @@ def render(spinner_char=""):
     lines.append(thin)
     s_state = f"{GREEN}RUNNING{RESET}" if scanner_running else f"{RED}STOPPED{RESET}"
     m_state = f"{GREEN}RUNNING{RESET}" if mass_running else f"{RED}STOPPED{RESET}"
+    k_state = f"{GREEN}RUNNING{RESET}" if keep_running else f"{RED}STOPPED{RESET}"
+    lines.append(f"  Keepalive      : {k_state}")
     lines.append(f"  Crypto scanner : {s_state}")
-    lines.append(f"  Mass scan      : {m_state}")
+    lines.append(f"  Mass / adaptive: {m_state}")
     lines.append("")
 
     lines.append(f"{BOLD}  SCANNER STATUS{RESET}")

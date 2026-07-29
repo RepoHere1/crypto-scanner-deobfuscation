@@ -16,8 +16,8 @@ alias pastep='python3 "$HOME/paste_box.py" && cat "$HOME/paste.txt"'
 alias dash='python3 "$HOME/dashboard.py"'
 alias dashw='python3 "$HOME/dashboard.py" --watch'
 # Multi-window safe: if stack up, only open dashboard
-alias dashgo='if python3 "$HOME/keepalive.py" --status 2>/dev/null | grep -q "keepalive:  RUNNING" && pgrep -f "mass_scan.py" >/dev/null 2>&1 && pgrep -f "crypto_scanner.py" >/dev/null 2>&1; then echo "[dashgo] stack already up — dashboard only"; python3 "$HOME/dashboard.py" --watch; else bash "$HOME/stack_on.sh" && python3 "$HOME/keepalive.py" --daemon && python3 "$HOME/dashboard.py" --watch; fi'
-alias dashall='dashgo'
+alias dashgo='bash "$HOME/dashgo.sh"'
+alias dashall='bash "$HOME/dashgo.sh"'
 
 alias walletview='python3 "$HOME/wallet_view.py" --watch --page-size 8 --page-sec 8'
 alias walletall='python3 "$HOME/wallet_view.py" --once --all --cached'
