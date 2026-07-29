@@ -182,11 +182,28 @@ class AdaptiveThrottler:
         self._wait_for_wifi_before_launch()
         
         # Command to run the mass scan with adaptive control
+        # -j scaled by free RAM (was hard-coded 2; phone has headroom)
+        try:
+            mem_mb = 0.0
+            with open("/proc/meminfo") as _mf:
+                for _ln in _mf:
+                    if _ln.startswith("MemAvailable:"):
+                        mem_mb = int(_ln.split()[1]) / 1024.0
+                        break
+        except Exception:
+            mem_mb = 0.0
+        if mem_mb >= 6000:
+            mass_jobs = "4"
+        elif mem_mb >= 3000:
+            mass_jobs = "3"
+        else:
+            mass_jobs = "2"
+        mass_jobs = os.environ.get("MASS_SCAN_JOBS", mass_jobs)
         cmd = [
             sys.executable,
             os.path.expanduser("~/.local/lib/trufflehog-tools/mass_scan.py"),
             "-f", os.path.expanduser("~/paste.txt"),
-            "-j", "2",
+            "-j", str(mass_jobs),
             "-o", os.path.expanduser("~/.trufflehog_mass_results.jsonl"),
         ]
         

