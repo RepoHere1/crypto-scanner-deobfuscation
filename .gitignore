@@ -1,26 +1,50 @@
 # Secrets
+.env
+.env.*
+!.env.template
 .github_token
 *_token
 *.key
 *.pem
+api_keys.jsonl
+rpc_endpoints.jsonl
 
-# TruffleHog output
+# TruffleHog / scan output (multi-GB)
 .trufflehog_results.jsonl
 .trufflehog_mass_results.jsonl
 crypto_findings.jsonl
+verified_crypto_findings.jsonl
 
-# Runtime/generated files
+# Runtime / generated
 *.log
 *.pid
 *.bak
+*.tmp
 .run_pids/
+__pycache__/
+*.pyc
+tmp/
+core
+*.so
+node-compile-cache/
+
 crypto_scanner_memory.jsonl
 crypto_scanner_status.txt
 balance_cache.jsonl
+balance_cache.jsonl.*
 balances_hit.jsonl
 high_confidence_hits.jsonl
-api_keys.jsonl
-rpc_endpoints.jsonl
+.scan_outcomes.jsonl
+.hot_targets.json
+.target_scores.json
+.platform_stats.json
+.adaptive_config.json
+.checkpoint.json
+.process_registry.json
+.scanner_checkpoint
+.controlled_shutdown
+.resource_stats.json
+
 launch_all.log
 trufflehog_throttled.log
 scan_out.txt
@@ -31,48 +55,15 @@ icon_finish.log
 paste.txt
 paste.txt.bak
 paste_box.txt
+paste_box.txt.enhanced
+github_repositories.csv
+learn_findings.jsonl
 
-# Android / Termux artifacts
+# Android / Termux
 *.apk
+storage/
 
-# Test files
+# Test
 test_crypto.jsonl
 test_sample.jsonl
-
-# System / IDE / cache
-.bash_history
-.bashrc
-.bun/
-.cache/
-.cline/
-.lesshst
-.local/
-.npm/
-.ssh/
-.termux/
-.tmp_scan/
-__pycache__/
-core/
-core
-storage/
 test_clone_ok/
-
-# Build artifacts / binaries
--a
-cb_snippet.txt
-
-# Learn/targeting runtime
-.scan_outcomes.jsonl
-learn_run.log
-target_gen_run.log
-
-# runtime / proof snapshots
-.progress_t0.json
-.progress_t1.json
-.patch_dash.py
-.adaptive_config.json
-.target_scores.json
-.platform_stats.json
-.hot_targets.json
-watchdog.log
-stack_on_run.log

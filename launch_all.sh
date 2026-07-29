@@ -134,6 +134,17 @@ fi
 
 notify "Crypto Scanner" "Pipeline started; services running in background"
 
+# Multi-day keepalive — keeps mass+crypto alive until reboot
+if [ -f "$HOME_DIR/keepalive.py" ]; then
+    if [ -f "$PID_DIR/keepalive.pid" ] && kill -0 "$(cat "$PID_DIR/keepalive.pid" 2>/dev/null)" 2>/dev/null; then
+        log "keepalive already running pid=$(cat "$PID_DIR/keepalive.pid")"
+    else
+        nohup python3 "$HOME_DIR/keepalive.py" >>"$HOME_DIR/keepalive.log" 2>&1 &
+        echo $! > "$PID_DIR/keepalive.pid"
+        log "keepalive started pid=$!"
+    fi
+fi
+
 # ---------------------------------------------------------------------------
 # Optional encrypt + offload after pipeline completes
 # ---------------------------------------------------------------------------

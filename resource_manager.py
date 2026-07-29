@@ -7,7 +7,10 @@ checkpoint/recovery capabilities for the scanning pipeline.
 """
 
 import os
-import psutil
+try:
+    import psutil
+except ImportError:
+    psutil = None
 import signal
 import subprocess
 import sys
@@ -93,14 +96,13 @@ class ResourceManager:
     def get_system_resources(self) -> Dict[str, Any]:
         """Get current system resource usage."""
         # Try to get resources using psutil if available, otherwise use basic methods
-        try:
-            import psutil
+        if psutil is not None:
             cpu_percent = psutil.cpu_percent(interval=1)
             memory_percent = psutil.virtual_memory().percent
             disk_percent = psutil.disk_usage('/').percent
             available_memory_gb = psutil.virtual_memory().available / (1024**3)
             total_processes = len(psutil.pids())
-        except ImportError:
+        else:
             # Basic fallback without psutil
             cpu_percent = 50  # Default assumption
             memory_percent = 50  # Default assumption

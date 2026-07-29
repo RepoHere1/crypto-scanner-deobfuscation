@@ -191,7 +191,22 @@ TON_ADDR_RE = re.compile(r"\b[UE]Q[a-zA-Z0-9_-]{46}\b")
 AVAX_ADDR_RE = re.compile(r"\b[XC][1-9A-HJ-NP-Za-km-z]{33}\b")
 WIF_RE = re.compile(r"\b([5][1-9A-HJ-NP-Za-km-z]{50}|[KL][1-9A-HJ-NP-Za-km-z]{51})\b")
 HEX_KEY_RE = re.compile(r"\b[0-9a-fA-F]{64}\b")
-SEED_RE = re.compile(r"\b([a-z]{3,}(?:\s+[a-z]{3,}){11,23})\b", re.IGNORECASE)
+# NOTE: The old seed regex was catastrophic on large inputs.  We use a fast
+# bounded regex instead: BIP-39 words are 3-8 letters, 12-24 words long.
+SEED_RE = re.compile(
+    r"\b([a-z]{3,8}(?:\s+[a-z]{3,8}){11,23})\b",
+    re.IGNORECASE,
+)
+
+def _extract_seed_phrases(text: str) -> List[str]:
+    """Find BIP-39-like seed-phrase candidates safely.
+
+    This is a replacement for the old catastrophic regex
+    ``([a-z]{3,}(?:\\s+[a-z]{3,}){11,23})``.  Word length is capped at 8
+    because no BIP-39 word is longer, which eliminates the exponential
+    backtracking path.
+    """
+    return [m.group(0).strip() for m in SEED_RE.finditer(text)]
 
 AWS_KEY_RE = re.compile(r"\bAKIA[0-9A-Z]{16}\b")
 GITHUB_PAT_RE = re.compile(r"\b(?:ghp_|github_pat_)[A-Za-z0-9_]+\b")
@@ -624,8 +639,8 @@ def extract_crypto_material(text: str) -> List[dict]:
         add("Bitcoin WIF", m.group(0), "btc")
     for m in HEX_KEY_RE.finditer(text):
         add("Hex private key", m.group(0), "eth")
-    for m in SEED_RE.finditer(text):
-        add("Seed phrase", m.group(0).strip(), "seed")
+    for phrase in _extract_seed_phrases(text):
+        add("Seed phrase", phrase, "seed")
 
     return records
 

@@ -19,9 +19,23 @@ export ANKR_API_KEY="${ANKR_API_KEY:-}"
 
 log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*" | tee -a "$LOG"; }
 
+# SINGLETON — if stack already healthy, do not re-run full pipeline
+_alive() { [ -f "$1" ] && kill -0 "$(tr -d ' \n\r' <"$1" 2>/dev/null)" 2>/dev/null; }
+if _alive "$PID_DIR/keepalive.pid" && _alive "$PID_DIR/adaptive_scan.pid" && _alive "$PID_DIR/crypto_scanner.pid"; then
+  if pgrep -f "mass_scan.py" >/dev/null 2>&1; then
+    log "STACK already ON (keepalive+adaptive+mass+crypto) — skip bring-up"
+    echo "[+] Stack already running. Use: keepstatus | walletview | dashw"
+    python3 "$HOME_DIR/keepalive.py" --status 2>/dev/null || true
+    exit 0
+  fi
+fi
+
 log "========================================"
 log "STACK_ON — production bring-up"
 log "========================================"
+
+# Keep the device awake while the stack is running
+termux-wake-lock 2>/dev/null || true
 
 # Connectivity (short)
 if ! curl -sf --connect-timeout 5 https://www.google.com >/dev/null 2>&1; then
@@ -103,6 +117,16 @@ else
   nohup bash "$HOME_DIR/stack_watchdog.sh" >>"$HOME_DIR/watchdog.log" 2>&1 &
   echo $! > "$PID_DIR/stack_watchdog.pid"
   log "watchdog pid=$!"
+fi
+
+# Multi-day keepalive (survives until reboot)
+log "[+] Keepalive supervisor"
+if [ -f "$PID_DIR/keepalive.pid" ] && kill -0 "$(cat "$PID_DIR/keepalive.pid")" 2>/dev/null; then
+  log "keepalive already up pid=$(cat "$PID_DIR/keepalive.pid")"
+else
+  nohup python3 "$HOME_DIR/keepalive.py" >>"$HOME_DIR/keepalive.log" 2>&1 &
+  echo $! > "$PID_DIR/keepalive.pid"
+  log "keepalive pid=$!"
 fi
 
 log "STACK_ON complete — services left running"

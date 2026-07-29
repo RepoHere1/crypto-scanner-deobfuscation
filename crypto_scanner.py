@@ -113,7 +113,42 @@ CHECK_INTERVAL = 5
 ENTROPY_THRESHOLD = 4.0
 MIN_BASE64_LEN = 20
 MIN_BASE58_LEN = 25
-SCAN_FILE = sys.argv[1] if len(sys.argv) > 1 else ".trufflehog_results.jsonl"
+def _resolve_scan_file() -> str:
+    """Pick scan input. Prefer explicit argv; never accept a directory."""
+    candidates = []
+    if len(sys.argv) > 1:
+        candidates.append(sys.argv[1])
+    home = os.path.expanduser("~")
+    candidates.extend([
+        os.path.join(home, ".trufflehog_mass_results.jsonl"),
+        os.path.join(home, ".trufflehog_results.jsonl"),
+        ".trufflehog_mass_results.jsonl",
+        ".trufflehog_results.jsonl",
+    ])
+    for c in candidates:
+        if not c:
+            continue
+        path = os.path.abspath(os.path.expanduser(c))
+        base = os.path.basename(path.rstrip(os.sep))
+        if base in ("", ".", ".."):
+            continue
+        if os.path.isdir(path):
+            continue
+        if os.path.isfile(path) or path.endswith(".jsonl"):
+            try:
+                if not os.path.exists(path):
+                    open(path, "a").close()
+            except OSError:
+                continue
+            return path
+    fallback = os.path.join(os.path.expanduser("~"), ".trufflehog_mass_results.jsonl")
+    try:
+        open(fallback, "a").close()
+    except OSError:
+        pass
+    return fallback
+
+SCAN_FILE = _resolve_scan_file()
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
 MEMORY_FILE = os.path.join(APP_DIR, "crypto_scanner_memory.jsonl")
 PID_FILE = os.path.join(APP_DIR, ".run_pids", "crypto_scanner.pid")
@@ -129,34 +164,136 @@ SAFE_SHUTDOWN_THRESHOLD_MB = 100  # MB free below this → controlled shutdown
 CONTROLLED_SHUTDOWN_FLAG = os.path.join(APP_DIR, ".controlled_shutdown")
 CHECKPOINT_FILE = os.path.join(APP_DIR, ".scanner_checkpoint")
 
-# Optional API keys read from env
-ETHERSCAN_KEY = os.environ.get("ETHERSCAN_API_KEY", "")
-ALCHEMY_KEY = os.environ.get("ALCHEMY_API_KEY", "")
-ANKR_API_KEY = os.environ.get("ANKR_API_KEY", "")
+# ---------------------------------------------------------------------------
+# Load ~/.env (and fall back to bashrc / api_keys.jsonl) BEFORE reading keys
+# ---------------------------------------------------------------------------
+def _load_dotenv(path: str | None = None) -> None:
+    env_path = path or os.path.join(os.path.expanduser("~"), ".env")
+    if not os.path.exists(env_path):
+        return
+    try:
+        with open(env_path, "r", encoding="utf-8") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                key, value = line.split("=", 1)
+                key = key.strip()
+                value = value.strip().strip('"').strip("'")
+                if key and value and key not in os.environ:
+                    os.environ[key] = value
+                elif key and value and not os.environ.get(key):
+                    os.environ[key] = value
+    except OSError:
+        pass
+
+def _bootstrap_api_keys_from_files() -> None:
+    """Pull Alchemy/Ankr/etc from api_keys.jsonl + .bashrc if env still empty."""
+    # bashrc ALCHEMY_API_KEY=...
+    if not os.environ.get("ALCHEMY_API_KEY"):
+        brc = os.path.join(os.path.expanduser("~"), ".bashrc")
+        if os.path.exists(brc):
+            try:
+                for line in open(brc, encoding="utf-8", errors="ignore"):
+                    if "ALCHEMY_API_KEY=" in line and not line.strip().startswith("#"):
+                        part = line.split("ALCHEMY_API_KEY=", 1)[1].strip().strip('"').strip("'")
+                        # strip trailing comments
+                        part = part.split()[0] if part else ""
+                        if part and "YOUR_" not in part:
+                            os.environ["ALCHEMY_API_KEY"] = part
+                            break
+            except OSError:
+                pass
+    keys_file = os.path.join(APP_DIR, "api_keys.jsonl")
+    if not os.path.exists(keys_file):
+        return
+    try:
+        with open(keys_file, encoding="utf-8", errors="ignore") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    rec = json.loads(line)
+                except Exception:
+                    continue
+                prov = (rec.get("provider") or "").lower()
+                key = (rec.get("key") or "").strip()
+                if not key or "YOUR_" in key or key.startswith("FAKE_") or key.startswith("DEMO_"):
+                    continue
+                if prov == "alchemy" and not os.environ.get("ALCHEMY_API_KEY"):
+                    os.environ["ALCHEMY_API_KEY"] = key
+                elif prov == "ankr" and not os.environ.get("ANKR_API_KEY"):
+                    os.environ["ANKR_API_KEY"] = key
+                elif prov in ("etherscan", "etherscan") and not os.environ.get("ETHERSCAN_API_KEY"):
+                    os.environ["ETHERSCAN_API_KEY"] = key
+                elif prov == "infura" and not os.environ.get("INFURA_API_KEY"):
+                    os.environ["INFURA_API_KEY"] = key
+    except OSError:
+        pass
+
+_load_dotenv()
+_bootstrap_api_keys_from_files()
+
+# Optional API keys read from env (after dotenv)
+ETHERSCAN_KEY = os.environ.get("ETHERSCAN_API_KEY", "") or os.environ.get("ETHERSCAN_KEY", "")
+ALCHEMY_KEY = os.environ.get("ALCHEMY_API_KEY", "") or os.environ.get("ALCHEMY_KEY", "")
+ANKR_API_KEY = os.environ.get("ANKR_API_KEY", "") or os.environ.get("ANKR_KEY", "")
+INFURA_KEY = os.environ.get("INFURA_API_KEY", "") or os.environ.get("INFURA_KEY", "")
+POLYGONSCAN_KEY = os.environ.get("POLYGONSCAN_API_KEY", "") or ETHERSCAN_KEY
+BSCSCAN_KEY = os.environ.get("BSCSCAN_API_KEY", "") or ETHERSCAN_KEY
+BASESCAN_KEY = os.environ.get("BASESCAN_API_KEY", "") or ETHERSCAN_KEY
+
 
 # Load user-supplied RPC endpoints discovered by paste_box.py.
 # We dedupe them and drop known-broken / key-required placeholders so a noisy
 # rpc_endpoints.jsonl file cannot drown out the curated public providers.
-USER_RPC_ENDPOINTS: Dict[str, List[str]] = {"eth": [], "sol": [], "btc": [], "matic": [], "avax": [], "bnb": []}
+USER_RPC_ENDPOINTS: Dict[str, List[str]] = {
+    "eth": [], "sol": [], "btc": [], "matic": [], "avax": [], "bnb": [],
+    "base": [], "monad": [], "arb": [], "op": [],
+}
 _RPC_FILE = os.path.join(APP_DIR, "rpc_endpoints.jsonl")
+# Only block obvious placeholders / known-dead hosts. Public RPCs are allowed.
 _BLOCKED_RPC_PARTS = (
     "YOUR_ALCHEMY_KEY",
-    "llamarpc.com",
-    "meowrpc.com",
-    "cloudflare-eth.com",
-    "bsc-dataseed.binance.org",
-    "polygon-rpc.com",
-    "avalanche.public-rpc.com",
-    "bscrpc.com",
+    "FAKE_ALCHEMY",
+    "your_api_key",
+    "API_KEY_HERE",
+    "<api",
+    "example.com",
 )
 
 def _is_keyless_ankr(url: str) -> bool:
-    """Keyless Ankr URLs require an API key and just waste time."""
-    if "rpc.ankr.com" not in url.lower():
-        return False
-    # A keyed URL looks like .../eth/<64-char-key>. A keyless URL ends with the chain name.
-    last = url.rstrip("/").rsplit("/", 1)[-1]
-    return len(last) != 64
+    """Bare rpc.ankr.com/<chain> without a key often rate-limits hard; keep as last-resort public."""
+    # We no longer drop them — public Ankr free tier still returns balances sometimes.
+    return False
+
+def _classify_rpc_url(url: str, hint: str = "") -> str:
+    low = (url or "").lower()
+    h = (hint or "").lower()
+    if h in USER_RPC_ENDPOINTS:
+        return h
+    if "solana" in low or "/sol" in low or low.endswith("/sol"):
+        return "sol"
+    if "polygon" in low or "matic" in low:
+        return "matic"
+    if "binance" in low or "/bsc" in low or "bnb" in low:
+        return "bnb"
+    if "avax" in low or "avalanche" in low:
+        return "avax"
+    if "bitcoin" in low or "/btc" in low:
+        return "btc"
+    if "base" in low:
+        return "base"
+    if "monad" in low:
+        return "monad"
+    if "arbitrum" in low or "/arb" in low:
+        return "arb"
+    if "optimism" in low or "/opt" in low or low.rstrip("/").endswith("/op"):
+        return "op"
+    if "eth" in low or "ethereum" in low:
+        return "eth"
+    return "eth"
 
 if os.path.exists(_RPC_FILE):
     try:
@@ -166,30 +303,24 @@ if os.path.exists(_RPC_FILE):
                 line = line.strip()
                 if not line:
                     continue
-                rec = json.loads(line)
-                url = rec.get("url", "").strip().rstrip("/")
+                try:
+                    rec = json.loads(line)
+                except Exception:
+                    continue
+                url = (rec.get("url") or "").strip().rstrip("/")
                 if not url or url in seen_urls:
                     continue
                 if any(part.lower() in url.lower() for part in _BLOCKED_RPC_PARTS):
                     continue
-                if _is_keyless_ankr(url):
-                    continue
+                # Substitute YOUR_ALCHEMY_KEY placeholders with real key
+                if "YOUR_ALCHEMY_KEY" in url and ALCHEMY_KEY:
+                    url = url.replace("YOUR_ALCHEMY_KEY", ALCHEMY_KEY)
                 seen_urls.add(url)
-                low = url.lower()
-                if "solana" in low or "sol" in low:
-                    USER_RPC_ENDPOINTS["sol"].append(url)
-                elif "polygon" in low or "matic" in low:
-                    USER_RPC_ENDPOINTS["matic"].append(url)
-                elif "binance" in low or "bsc" in low:
-                    USER_RPC_ENDPOINTS["bnb"].append(url)
-                elif "avax" in low or "avalanche" in low:
-                    USER_RPC_ENDPOINTS["avax"].append(url)
-                elif "bitcoin" in low or "btc" in low:
-                    USER_RPC_ENDPOINTS["btc"].append(url)
-                else:
-                    USER_RPC_ENDPOINTS["eth"].append(url)
+                chain = _classify_rpc_url(url, rec.get("chain") or "")
+                USER_RPC_ENDPOINTS.setdefault(chain, []).append(url)
     except Exception as e:
-        logger.debug("Could not load RPC endpoints: %s", e)
+        pass  # logger may not exist yet
+
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -659,8 +790,12 @@ def _rpc_payload(addr: str, chain: str) -> dict:
 
 BALANCE_PROVIDERS: Dict[str, List[Tuple[str, Any, Any, Optional[dict]]]] = {
     "btc": [
-        ("https://blockchain.info/q/addressbalance/{addr}", _resp_text, lambda t: int(t) / 1e8, None),
+        ("https://mempool.space/api/address/{addr}", _resp_json,
+         lambda d: (int((d.get("chain_stats") or {}).get("funded_txo_sum", 0)) - int((d.get("chain_stats") or {}).get("spent_txo_sum", 0))) / 1e8, None),
+        ("https://blockstream.info/api/address/{addr}", _resp_json,
+         lambda d: (int((d.get("chain_stats") or {}).get("funded_txo_sum", 0)) - int((d.get("chain_stats") or {}).get("spent_txo_sum", 0))) / 1e8, None),
         ("https://api.blockcypher.com/v1/btc/main/addrs/{addr}/balance", _resp_json, lambda d: d.get("balance", 0) / 1e8, None),
+        ("https://blockchain.info/q/addressbalance/{addr}", _resp_text, lambda t: int(t) / 1e8, None),
     ],
     "eth": [
         ("https://api.etherscan.io/api?module=account&action=balance&address={addr}&tag=latest&apikey={key}", _resp_json,
@@ -668,9 +803,13 @@ BALANCE_PROVIDERS: Dict[str, List[Tuple[str, Any, Any, Optional[dict]]]] = {
         ("https://api.blockcypher.com/v1/eth/main/addrs/{addr}/balance", _resp_json, lambda d: d.get("balance", 0) / 1e18, None),
     ],
     "ltc": [
+        ("https://litecoinspace.org/api/address/{addr}", _resp_json,
+         lambda d: (int((d.get("chain_stats") or {}).get("funded_txo_sum", 0)) - int((d.get("chain_stats") or {}).get("spent_txo_sum", 0))) / 1e8, None),
         ("https://api.blockcypher.com/v1/ltc/main/addrs/{addr}/balance", _resp_json, lambda d: d.get("balance", 0) / 1e8, None),
     ],
     "doge": [
+        ("https://dogechain.info/api/v1/address/balance/{addr}", _resp_json,
+         lambda d: float((d.get("balance") if isinstance(d.get("balance"), (int, float, str)) else (d.get("data") or {}).get("balance", 0)) or 0), None),
         ("https://api.blockcypher.com/v1/doge/main/addrs/{addr}/balance", _resp_json, lambda d: d.get("balance", 0) / 1e8, None),
     ],
     "matic": [
@@ -686,102 +825,175 @@ BALANCE_PROVIDERS: Dict[str, List[Tuple[str, Any, Any, Optional[dict]]]] = {
 }
 
 # Public RPC endpoints (curated, free, no API key required)
+# Always wired — balances check by default even without paid keys.
 PUBLIC_RPCS = {
     "eth": [
         "https://ethereum.publicnode.com",
         "https://eth.drpc.org",
         "https://rpc.mevblocker.io",
         "https://eth-mainnet.public.blastapi.io",
-        "https://eth.rpc.blxrbdn.com",
         "https://1rpc.io/eth",
+        "https://rpc.ankr.com/eth",
+        "https://cloudflare-eth.com",
     ],
     "matic": [
         "https://polygon.publicnode.com",
         "https://polygon.drpc.org",
+        "https://1rpc.io/matic",
+        "https://rpc.ankr.com/polygon",
+        "https://polygon-rpc.com",
     ],
     "avax": [
         "https://avalanche.publicnode.com",
         "https://avalanche.drpc.org",
         "https://api.avax.network/ext/bc/C/rpc",
         "https://1rpc.io/avax/c",
+        "https://rpc.ankr.com/avalanche",
     ],
     "bnb": [
         "https://bsc.publicnode.com",
-        "https://binance.nodereal.io",
+        "https://bsc-dataseed.binance.org",
         "https://bsc-mainnet.public.blastapi.io",
+        "https://1rpc.io/bnb",
+        "https://rpc.ankr.com/bsc",
     ],
     "sol": [
         "https://api.mainnet-beta.solana.com",
         "https://solana.publicnode.com",
+        "https://rpc.ankr.com/solana",
     ],
     "base": [
         "https://base.publicnode.com",
         "https://base.drpc.org",
         "https://mainnet.base.org",
+        "https://1rpc.io/base",
+        "https://rpc.ankr.com/base",
     ],
     "monad": [
         "https://rpc.monad.xyz",
         "https://rpc1.monad.xyz",
         "https://rpc-mainnet.monadinfra.com",
     ],
+    "arb": [
+        "https://arbitrum.publicnode.com",
+        "https://arb1.arbitrum.io/rpc",
+        "https://1rpc.io/arb",
+        "https://rpc.ankr.com/arbitrum",
+    ],
+    "op": [
+        "https://optimism.publicnode.com",
+        "https://mainnet.optimism.io",
+        "https://1rpc.io/op",
+        "https://rpc.ankr.com/optimism",
+    ],
 }
 
-for chain, urls in PUBLIC_RPCS.items():
+def _add_rpc_provider(chain: str, url: str, front: bool = False) -> None:
+    if not url:
+        return
     extractor = _sol_balance_lamports if chain == "sol" else _evm_balance_wei
-    for url in urls:
-        BALANCE_PROVIDERS.setdefault(chain, []).append((
-            url, _json_rpc_result, extractor, _rpc_payload("{addr}", chain)
-        ))
+    existing = {p[0] for p in BALANCE_PROVIDERS.get(chain, [])}
+    if url in existing:
+        return
+    entry = (url, _json_rpc_result, extractor, _rpc_payload("{addr}", chain))
+    if front:
+        BALANCE_PROVIDERS.setdefault(chain, []).insert(0, entry)
+    else:
+        BALANCE_PROVIDERS.setdefault(chain, []).append(entry)
 
-# Insert user-discovered RPC endpoints near the front so they are used in
-# harmony with the public fallbacks.  Broken / placeholder / duplicate URLs
-# have already been filtered out when USER_RPC_ENDPOINTS was loaded.
-for chain in USER_RPC_ENDPOINTS:
+for chain, urls in PUBLIC_RPCS.items():
+    for url in urls:
+        _add_rpc_provider(chain, url, front=False)
+
+# User / .env-discovered RPCs go to the FRONT (preferred)
+for chain, urls in USER_RPC_ENDPOINTS.items():
     if chain == "btc":
         continue
-    extractor = _sol_balance_lamports if chain == "sol" else _evm_balance_wei
-    existing_urls = {p[0] for p in BALANCE_PROVIDERS.get(chain, [])}
-    for url in USER_RPC_ENDPOINTS[chain]:
-        if url in existing_urls:
-            continue
-        BALANCE_PROVIDERS.setdefault(chain, []).insert(0, (
-            url, _json_rpc_result, extractor, _rpc_payload("{addr}", chain)
-        ))
+    for url in urls:
+        _add_rpc_provider(chain, url, front=True)
 
-# Ankr providers (if key is available) - tried before public nodes.
+# Explicit QuickNode URLs from env
+for chain, env_name in (
+    ("eth", "QUICKNODE_ETH_URL"),
+    ("matic", "QUICKNODE_MATIC_URL"),
+    ("bnb", "QUICKNODE_BSC_URL"),
+    ("avax", "QUICKNODE_AVAX_URL"),
+    ("base", "QUICKNODE_BASE_URL"),
+    ("sol", "QUICKNODE_SOL_URL"),
+):
+    u = os.environ.get(env_name, "").strip()
+    if u:
+        _add_rpc_provider(chain, u.rstrip("/"), front=True)
+
+# Infura (eth + a few L2s)
+if INFURA_KEY:
+    for chain, path in (
+        ("eth", f"https://mainnet.infura.io/v3/{INFURA_KEY}"),
+        ("matic", f"https://polygon-mainnet.infura.io/v3/{INFURA_KEY}"),
+        ("avax", f"https://avalanche-mainnet.infura.io/v3/{INFURA_KEY}"),
+        ("base", f"https://base-mainnet.infura.io/v3/{INFURA_KEY}"),
+        ("arb", f"https://arbitrum-mainnet.infura.io/v3/{INFURA_KEY}"),
+        ("op", f"https://optimism-mainnet.infura.io/v3/{INFURA_KEY}"),
+    ):
+        _add_rpc_provider(chain, path, front=True)
+
+# Ankr keyed providers — front of queue
 if ANKR_API_KEY:
     _ANKR_CHAIN_MAP = {
         "eth": "eth",
-        "bsc": "bsc",
+        "bnb": "bsc",
         "matic": "polygon",
         "avax": "avalanche",
         "sol": "solana",
         "base": "base",
         "monad": "monad_mainnet",
+        "arb": "arbitrum",
+        "op": "optimism",
     }
     for chain, ankr_name in _ANKR_CHAIN_MAP.items():
-        url = f"https://rpc.ankr.com/{ankr_name}/{ANKR_API_KEY}"
-        existing_urls = {p[0] for p in BALANCE_PROVIDERS.get(chain, [])}
-        if url in existing_urls:
-            continue
-        extractor = _sol_balance_lamports if chain == "sol" else _evm_balance_wei
-        BALANCE_PROVIDERS.setdefault(chain, []).insert(0, (
-            url, _json_rpc_result, extractor, _rpc_payload("{addr}", chain)
-        ))
+        _add_rpc_provider(chain, f"https://rpc.ankr.com/{ankr_name}/{ANKR_API_KEY}", front=True)
 
-# Alchemy providers (if key is available) - always first so the paid key is
-# preferred over public nodes and any duplicate discovered URL.
+# Alchemy multi-chain — always FIRST when key present
 if ALCHEMY_KEY:
-    alchemy_eth = f"https://eth-mainnet.g.alchemy.com/v2/{ALCHEMY_KEY}"
-    if alchemy_eth not in {p[0] for p in BALANCE_PROVIDERS.get("eth", [])}:
-        BALANCE_PROVIDERS["eth"].insert(0, (
-            alchemy_eth, _json_rpc_result, _evm_balance_wei, _rpc_payload("{addr}", "eth")
-        ))
-    alchemy_sol = f"https://solana-mainnet.g.alchemy.com/v2/{ALCHEMY_KEY}"
-    if alchemy_sol not in {p[0] for p in BALANCE_PROVIDERS.get("sol", [])}:
-        BALANCE_PROVIDERS["sol"].insert(0, (
-            alchemy_sol, _json_rpc_result, _sol_balance_lamports, _rpc_payload("{addr}", "sol")
-        ))
+    _ALCHEMY_MAP = {
+        "eth": f"https://eth-mainnet.g.alchemy.com/v2/{ALCHEMY_KEY}",
+        "matic": f"https://polygon-mainnet.g.alchemy.com/v2/{ALCHEMY_KEY}",
+        "avax": f"https://avax-mainnet.g.alchemy.com/v2/{ALCHEMY_KEY}",
+        "bnb": f"https://bnb-mainnet.g.alchemy.com/v2/{ALCHEMY_KEY}",
+        "base": f"https://base-mainnet.g.alchemy.com/v2/{ALCHEMY_KEY}",
+        "sol": f"https://solana-mainnet.g.alchemy.com/v2/{ALCHEMY_KEY}",
+        "arb": f"https://arb-mainnet.g.alchemy.com/v2/{ALCHEMY_KEY}",
+        "op": f"https://opt-mainnet.g.alchemy.com/v2/{ALCHEMY_KEY}",
+    }
+    for chain, url in _ALCHEMY_MAP.items():
+        _add_rpc_provider(chain, url, front=True)
+
+# Explorer APIs with optional keys (Etherscan-family) — append as extra fallbacks
+def _etherscan_style(url_tmpl: str, key: str):
+    return (
+        url_tmpl,
+        _resp_json,
+        lambda d: int(d.get("result", 0) or 0) / 1e18,
+        None,
+    )
+
+if ETHERSCAN_KEY:
+    # already in eth list with {key} template — ensure format works
+    pass
+
+# Log provider summary once at import (helps debug "always …")
+try:
+    _prov_summary = {c: len(v) for c, v in BALANCE_PROVIDERS.items() if v}
+    logger.info(
+        "Balance providers ready: %s | alchemy=%s ankr=%s infura=%s etherscan=%s",
+        _prov_summary,
+        bool(ALCHEMY_KEY),
+        bool(ANKR_API_KEY),
+        bool(INFURA_KEY),
+        bool(ETHERSCAN_KEY),
+    )
+except Exception:
+    pass
 
 # ---------------------------------------------------------------------------
 # Persistent balance cache
@@ -811,17 +1023,44 @@ BALANCE_CACHE_LOCK = threading.Lock()
 BALANCE_HITS_COUNT = 0
 BALANCE_HITS_LOCK = threading.Lock()
 
-def save_balance_cache() -> None:
-    """Atomic rewrite so readers never see a truncated 0-byte cache."""
+_CACHE_DIRTY = False
+_CACHE_LAST_FLUSH = 0.0
+_CACHE_FLUSH_INTERVAL = 5.0  # seconds between full rewrites
+_CACHE_PENDING_WRITES = 0
+_FAIL_STREAK: Dict[str, int] = {}
+
+def save_balance_cache(force: bool = False) -> None:
+    """Atomic rewrite so readers never see a truncated 0-byte cache.
+
+    Debounced: by default only flush every few seconds unless force=True,
+    so thousands of RPC checks do not thrash the filesystem.
+    """
+    global _CACHE_DIRTY, _CACHE_LAST_FLUSH, _CACHE_PENDING_WRITES
     try:
         with BALANCE_CACHE_LOCK:
+            now = time.time()
+            if not force and not _CACHE_DIRTY:
+                return
+            if not force and (now - _CACHE_LAST_FLUSH) < _CACHE_FLUSH_INTERVAL and _CACHE_PENDING_WRITES < 25:
+                return
             tmp = BALANCE_CACHE_FILE + ".tmp"
+            now_flush = time.time()
             with open(tmp, "w", encoding="utf-8") as f:
                 for rec in BALANCE_CACHE.values():
-                    f.write(json.dumps(rec) + "\n")
+                    # Never persist eternal PENDING — settle aged failures as 0
+                    if rec.get("balance") is None:
+                        age = now_flush - float(rec.get("ts") or 0)
+                        if age > 600 or rec.get("invalid") or rec.get("settled"):
+                            rec = dict(rec)
+                            rec["balance"] = 0.0
+                            rec["settled"] = True
+                    f.write(json.dumps(rec) + chr(10))
                 f.flush()
                 os.fsync(f.fileno())
             os.replace(tmp, BALANCE_CACHE_FILE)
+            _CACHE_DIRTY = False
+            _CACHE_LAST_FLUSH = now
+            _CACHE_PENDING_WRITES = 0
     except Exception as e:
         logger.warning("Could not save balance cache: %s", e)
         try:
@@ -829,6 +1068,12 @@ def save_balance_cache() -> None:
                 os.remove(BALANCE_CACHE_FILE + ".tmp")
         except Exception:
             pass
+
+def _mark_cache_dirty() -> None:
+    global _CACHE_DIRTY, _CACHE_PENDING_WRITES
+    _CACHE_DIRTY = True
+    _CACHE_PENDING_WRITES += 1
+
 
 def notify(title: str, message: str) -> None:
     """Send Android notification via termux-notification if available."""
@@ -898,26 +1143,73 @@ def fetch_balance(chain: str, address: str) -> Optional[float]:
             logger.debug("Provider error %s/%s: %s", chain, address, e)
     return None
 
+def _looks_like_valid_address(chain: str, address: str) -> bool:
+    """Cheap structural validation so we stop hammering junk strings forever."""
+    if not address or not isinstance(address, str):
+        return False
+    a = address.strip()
+    c = (chain or "").lower()
+    if c in ("eth", "matic", "avax", "bnb", "base", "monad"):
+        return bool(re.fullmatch(r"0x[0-9a-fA-F]{40}", a))
+    if c == "btc":
+        return bool(re.fullmatch(r"(bc1|[13])[a-zA-HJ-NP-Z0-9]{25,62}", a))
+    if c == "ltc":
+        return bool(re.fullmatch(r"([LM3]|ltc1)[a-zA-HJ-NP-Z0-9]{25,62}", a))
+    if c == "doge":
+        return bool(re.fullmatch(r"[DA9][a-km-zA-HJ-NP-Z1-9]{25,34}", a))
+    if c == "xrp":
+        return bool(re.fullmatch(r"r[1-9A-HJ-NP-Za-km-z]{24,34}", a))
+    if c == "sol":
+        return bool(re.fullmatch(r"[1-9A-HJ-NP-Za-km-z]{32,44}", a))
+    return 10 <= len(a) <= 128
+
 def get_balance(chain: str, address: str, force: bool = False) -> Dict[str, Any]:
     """Return balance for address on chain.
 
-    When force=False (scanner default), successful balances are cached for 1h
-    and failed checks for 60s.  When force=True (wallet viewer / refresh),
-    always hit live providers and rewrite the cache entry.
+    Successful balances cached 1h. Failed checks back off. After repeated
+    provider failures we settle balance=0 so the UI stops infinite PENDING.
     """
     key = chain + ":" + address
+    if not _looks_like_valid_address(chain, address):
+        rec = {
+            "chain": chain,
+            "address": address,
+            "balance": 0.0,
+            "ts": time.time(),
+            "checked_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+            "live": False,
+            "invalid": True,
+        }
+        with BALANCE_CACHE_LOCK:
+            BALANCE_CACHE[key] = rec
+            _mark_cache_dirty()
+        save_balance_cache()
+        return rec
+
     if not force:
         with BALANCE_CACHE_LOCK:
             cached = BALANCE_CACHE.get(key)
         if cached:
             age = time.time() - cached.get("ts", 0)
-            # Successful balances are valid for one hour.
             if cached.get("balance") is not None and age < 3600:
                 return cached
-            # Failed checks are retried after one minute instead of staying ERROR.
-            if cached.get("balance") is None and age < 60:
+            if cached.get("balance") is None and age < 300:
                 return cached
+            if cached.get("settled") and cached.get("balance") == 0 and age < 21600:
+                return cached
+
     balance = fetch_balance(chain, address)
+    settled = False
+    if balance is None:
+        streak = _FAIL_STREAK.get(key, 0) + 1
+        _FAIL_STREAK[key] = streak
+        # settle after enough fails so wallet view is not a sea of PENDING
+        if streak >= 3:
+            balance = 0.0
+            settled = True
+    else:
+        _FAIL_STREAK[key] = 0
+
     rec = {
         "chain": chain,
         "address": address,
@@ -925,19 +1217,12 @@ def get_balance(chain: str, address: str, force: bool = False) -> Dict[str, Any]
         "ts": time.time(),
         "checked_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
         "live": True,
+        "settled": settled,
     }
     with BALANCE_CACHE_LOCK:
         BALANCE_CACHE[key] = rec
-        try:
-            tmp = BALANCE_CACHE_FILE + ".tmp"
-            with open(tmp, "w", encoding="utf-8") as f:
-                for row in BALANCE_CACHE.values():
-                    f.write(json.dumps(row) + "\n")
-                f.flush()
-                os.fsync(f.fileno())
-            os.replace(tmp, BALANCE_CACHE_FILE)
-        except Exception as e:
-            logger.warning("Could not save balance cache: %s", e)
+        _mark_cache_dirty()
+    save_balance_cache(force=bool(isinstance(balance, (int, float)) and balance > 0))
     return rec
 
 
