@@ -5,6 +5,10 @@ Wallet Balance Viewer — fast paging through ALL wallets, live refresh.
 Fixes:
   - No more "28 wallets hidden forever" — pages rotate + NEXT UP index
   - No perpetual same-screen loop — page advances every --page-sec
+  - Live RPC is NON-BLOCKING in watch mode (was freezing page up to 75s)
+  - Nonzero-balance wallets from cache always float to page 1
+  - Junk HEX (PNG headers, curve constants, low-entropy) filtered out
+  - Address cache lookup is case-insensitive for EVM chains
   - Lazy address derive (only current page) so 1000s of keys stay snappy
   - Deduped wallet keys from memory tail
 
@@ -33,7 +37,7 @@ HITS_FILE = os.path.join(HOME, "balances_hit.jsonl")
 
 sys.path.insert(0, HOME)
 
-# Always load ~/.env so RPC API keys are present before crypto_scanner import
+
 def _load_dotenv():
     env_path = os.path.join(HOME, ".env")
     if not os.path.exists(env_path):
@@ -51,8 +55,8 @@ def _load_dotenv():
     except OSError:
         pass
 
+
 _load_dotenv()
-# bashrc fallback for alchemy
 if not os.environ.get("ALCHEMY_API_KEY"):
     brc = os.path.join(HOME, ".bashrc")
     if os.path.exists(brc):
@@ -78,6 +82,22 @@ DEFAULT_PAGE_SEC = 8
 MAX_ADDRS_SHOW = 14
 DERIVE_CACHE: dict = {}
 
+JUNK_HEX_EXACT = {
+    "5ac635d8aa3a93e7b3ebbd55769886bc651d06b0cc53b0f63bce3c3e27d2604b",
+    "ffffffff00000001000000000000000000000000ffffffffffffffffffffffff",
+    "ffffffff00000000ffffffffffffffffbce6faada7179e84f3b9cac2fc632551",
+    "fffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd0364141",
+    "fffffffffffffffffffffffffffffffffffffffffffffffffffffffefffffc2f",
+}
+JUNK_HEX_PREFIXES = (
+    "89504e47", "ffd8ffe0", "ffd8ffe1", "ffd8ffdb", "47494638",
+    "504b0304", "7f454c46", "25504446", "d0cf11e0", "52494646",
+)
+EVM_CHAINS = {
+    "eth", "matic", "avax", "bnb", "base", "arb", "op", "monad",
+    "ftm", "cro", "gno", "scrl", "linea", "blast", "zksync",
+}
+
 BOLD = "\033[1m"
 DIM = "\033[2m"
 GREEN = "\033[92m"
@@ -93,6 +113,8 @@ _refresh_state = {
     "last_msg": "",
     "last_finish": 0.0,
 }
+_BAL_INDEX: dict = {}
+_META_INDEX: dict = {}
 
 
 def clear_screen():
@@ -128,10 +150,22 @@ def load_jsonl_tail(path: str, max_bytes: int = 0):
     return records
 
 
+def _norm_addr(chain: str, addr: str) -> tuple:
+    chain = (chain or "?").lower()
+    addr = addr or ""
+    if chain in EVM_CHAINS:
+        return chain, addr.lower()
+    return chain, addr
+
+
 def load_balances():
+    global _BAL_INDEX, _META_INDEX
     balances = {}
     meta = {}
+    idx = {}
+    midx = {}
     if not os.path.exists(CACHE_FILE) or os.path.getsize(CACHE_FILE) == 0:
+        _BAL_INDEX, _META_INDEX = {}, {}
         return balances, meta
     try:
         with open(CACHE_FILE, "r", encoding="utf-8", errors="ignore") as f:
@@ -148,9 +182,13 @@ def load_balances():
                 if not addr:
                     continue
                 key = (chain, addr)
-                prev = meta.get(key)
+                nk = _norm_addr(chain, addr)
                 ts = float(rec.get("ts") or 0)
+                prev = meta.get(key)
                 if prev and float(prev.get("ts") or 0) > ts:
+                    continue
+                prev_n = midx.get(nk)
+                if prev_n and float(prev_n.get("ts") or 0) > ts:
                     continue
                 bal = rec.get("balance")
                 if bal is None and (rec.get("settled") or rec.get("invalid")):
@@ -162,9 +200,35 @@ def load_balances():
                     "ts": ts,
                     "settled": bool(rec.get("settled") or rec.get("invalid")),
                 }
+                idx[nk] = key
+                midx[nk] = meta[key]
     except Exception:
         pass
+    _BAL_INDEX = idx
+    _META_INDEX = midx
     return balances, meta
+
+
+def bal_get(balances, chain, addr):
+    key = (chain, addr)
+    if key in balances:
+        return balances[key]
+    nk = _norm_addr(chain, addr)
+    canon = _BAL_INDEX.get(nk)
+    if canon is not None:
+        return balances.get(canon)
+    return balances.get((chain, (addr or "").lower()))
+
+
+def meta_get(meta, chain, addr):
+    key = (chain, addr)
+    if key in meta:
+        return meta[key]
+    nk = _norm_addr(chain, addr)
+    canon = _BAL_INDEX.get(nk)
+    if canon is not None:
+        return meta.get(canon) or {}
+    return meta.get((chain, (addr or "").lower())) or {}
 
 
 def format_balance(bal):
@@ -175,6 +239,46 @@ def format_balance(bal):
     if isinstance(bal, (int, float)) and bal > 0:
         return f"{GREEN}{bal:,.8f}{RESET}"
     return str(bal)
+
+
+def is_junk_hex(hv: str) -> bool:
+    if not hv:
+        return True
+    h = hv.strip().lower().removeprefix("0x")
+    if len(h) != 64:
+        return True
+    if h in JUNK_HEX_EXACT:
+        return True
+    if any(h.startswith(p) for p in JUNK_HEX_PREFIXES):
+        return True
+    # long zero runs → structured binary, not a private key
+    if "000000" in h and h.count("00") >= 6:
+        return True
+    if len(set(h)) <= 4:
+        return True
+    try:
+        b = bytes.fromhex(h)
+    except ValueError:
+        return True
+    if b.count(0) > 8:
+        return True
+    if len(set(b)) < 12:
+        return True
+    # high printable-ASCII ratio → text/binary misread as hex
+    printable = sum(1 for x in b if 32 <= x < 127)
+    if printable >= 24:
+        return True
+    # control-char heavy (DFM/resource dumps)
+    controls = sum(1 for x in b if x < 32)
+    if controls >= 10:
+        return True
+    # repeating byte pairs / mask patterns (ff00ff00, ffffffff…)
+    if h.count("ff") >= 8 or h.count("00") >= 8:
+        return True
+    # low nibble diversity beyond earlier check
+    if len(set(h[i:i+2] for i in range(0, 64, 2))) < 10:
+        return True
+    return False
 
 
 def derive_for_key(key_type: str, key_value: str) -> dict:
@@ -188,29 +292,87 @@ def derive_for_key(key_type: str, key_value: str) -> dict:
             raw = cs.priv_to_addresses(priv) if priv else {}
         elif key_type == "HEX":
             hv = key_value.strip().lower().removeprefix("0x")
-            if len(hv) == 64:
+            if len(hv) == 64 and not is_junk_hex(hv):
                 raw = cs.priv_to_addresses(bytes.fromhex(hv))
             else:
                 raw = {}
         elif key_type == "SEED":
             raw = cs.seed_to_addresses(key_value)
+        elif key_type == "ADDR":
+            chain = key_value.split(":", 1)[0] if ":" in key_value else "?"
+            addr = key_value.split(":", 1)[1] if ":" in key_value else key_value
+            raw = {chain: addr} if addr else {}
         else:
             raw = {}
         for chain, addr in (raw or {}).items():
             chain = (chain or "?").lower()
             if addr:
-                addrs[(chain, addr)] = {"chain": chain, "address": addr, "from": key_type.lower()}
+                addrs[(chain, addr)] = {
+                    "chain": chain, "address": addr, "from": key_type.lower()
+                }
     except Exception:
         addrs = {}
     DERIVE_CACHE[ck] = addrs
     return addrs
 
 
-def gather_wallets(max_wallets: int = 0):
+def _inject_hit_wallets(wallets: dict):
+    """Promote every nonzero cached/hit address so funded wallets always page-1."""
+    hit_rows = []
+    for path in (HITS_FILE, CACHE_FILE):
+        if not os.path.exists(path):
+            continue
+        try:
+            with open(path, "r", encoding="utf-8", errors="ignore") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        rec = json.loads(line)
+                    except Exception:
+                        continue
+                    bal = rec.get("balance")
+                    if not isinstance(bal, (int, float)) or bal <= 1e-12:
+                        continue
+                    chain = (rec.get("chain") or "?").lower()
+                    addr = rec.get("address") or ""
+                    if not addr:
+                        continue
+                    hit_rows.append((float(bal), chain, addr, rec))
+        except Exception:
+            pass
+    hit_rows.sort(key=lambda t: t[0], reverse=True)
+    seen_hit = set()
+    for bal, chain, addr, rec in hit_rows:
+        nk = _norm_addr(chain, addr)
+        if nk in seen_hit:
+            continue
+        seen_hit.add(nk)
+        syn_key = f"{chain}:{addr}"
+        k = ("ADDR", syn_key)
+        if k in wallets:
+            wallets[k]["_hit_boost"] = max(
+                float(wallets[k].get("_hit_boost") or 0.0), float(bal)
+            )
+            continue
+        wallets[k] = {
+            "type": "ADDR",
+            "key": syn_key,
+            "addresses": {
+                (chain, addr): {"chain": chain, "address": addr, "from": "hit"}
+            },
+            "timestamp": rec.get("checked_at") or "",
+            "source": rec.get("source") or "balance_hit",
+            "_derived": True,
+            "_hit_boost": float(bal),
+        }
+
+
+def gather_wallets(max_wallets: int = 0, include_hits: bool = True):
     """Collect unique wallet keys FAST — no crypto derive here."""
-    wallets = {}  # (type, key) -> wallet dict
+    wallets = {}
     records = load_jsonl_tail(MEMORY_FILE, MEMORY_TAIL_BYTES)
-    # newest first so first-seen keeps freshest source
     records.sort(key=lambda x: x.get("ts") or x.get("timestamp") or "", reverse=True)
 
     for rec in records:
@@ -228,22 +390,27 @@ def gather_wallets(max_wallets: int = 0):
                 return
             if max_wallets and len(wallets) >= max_wallets:
                 return
-            # light sanity
             if kt == "HEX":
-                hx = kv.lower().removeprefix("0x")
+                hx = kv.lower().removeprefix("0x") if isinstance(kv, str) else ""
                 if len(hx) != 64:
                     return
                 try:
                     int(hx, 16)
                 except ValueError:
                     return
+                if is_junk_hex(hx):
+                    return
+            elif kt == "WIF":
+                if not isinstance(kv, str) or len(kv) < 50:
+                    return
             wallets[k] = {
                 "type": kt,
                 "key": kv,
-                "addresses": {},  # filled lazily
+                "addresses": {},
                 "timestamp": ts,
                 "source": src,
                 "_derived": False,
+                "_hit_boost": 0.0,
             }
 
         for wif in wallet.get("wifs") or []:
@@ -256,8 +423,12 @@ def gather_wallets(max_wallets: int = 0):
         if max_wallets and len(wallets) >= max_wallets:
             break
 
-    # stable order: newest first
-    return sorted(wallets.values(), key=lambda x: x.get("timestamp") or "", reverse=True)
+    if include_hits:
+        _inject_hit_wallets(wallets)
+
+    return sorted(
+        wallets.values(), key=lambda x: x.get("timestamp") or "", reverse=True
+    )
 
 
 def ensure_derived(w):
@@ -279,35 +450,41 @@ def ensure_derived_many(wallets):
 
 
 def wallet_score(w, balances):
-    """Score using derived addrs if present, else 0 (index may show 0 until page opens)."""
-    s = 0.0
-    pending = 0
-    checked = 0
+    """Score using derived addrs if present, else hit_boost."""
     addrs = w.get("addresses") or {}
     if not addrs and not w.get("_derived"):
-        # peek derive cache without forcing
         ck = (w.get("type"), w.get("key"))
         addrs = DERIVE_CACHE.get(ck) or {}
-    for k in addrs:
-        b = balances.get(k)
+    pos_sum = 0.0
+    pending = 0
+    checked = 0
+    seen_n = set()
+    for chain, addr in addrs:
+        nk = _norm_addr(chain, addr)
+        if nk in seen_n:
+            continue
+        seen_n.add(nk)
+        b = bal_get(balances, chain, addr)
         if isinstance(b, (int, float)) and b > 1e-12:
-            s += float(b)
+            pos_sum += float(b)
         elif b is None:
             pending += 1
         else:
             checked += 1
+    boost = float(w.get("_hit_boost") or 0.0)
+    s = pos_sum if pos_sum > 0 else boost
     return s, pending, checked
 
 
 def order_wallets(wallets, balances):
-    """Nonzero first (from cache/derived), then newest. Lazy — won't derive all."""
-    # Optionally quick-score from cache by deriving only if already cached
+    """Nonzero / hit-boost first, then newest. Lazy — won't derive all."""
     scored = []
     for w in wallets:
         sc, pend, chk = wallet_score(w, balances)
-        scored.append((sc, w.get("timestamp") or "", w))
-    scored.sort(key=lambda t: (t[0], t[1]), reverse=True)
-    return [w for _, _, w in scored]
+        boost = 1 if sc > 0 or (w.get("_hit_boost") or 0) > 0 else 0
+        scored.append((boost, sc, w.get("timestamp") or "", w))
+    scored.sort(key=lambda t: (t[0], t[1], t[2]), reverse=True)
+    return [w for _, _, _, w in scored]
 
 
 def pick_refresh_targets(all_keys, balances, meta, batch: int):
@@ -315,8 +492,9 @@ def pick_refresh_targets(all_keys, balances, meta, batch: int):
     pending = []
     stale = []
     for k in all_keys:
-        bal = balances.get(k)
-        m = meta.get(k) or {}
+        chain, addr = k
+        bal = bal_get(balances, chain, addr)
+        m = meta_get(meta, chain, addr) or {}
         age = now - float(m.get("ts") or 0)
         if m.get("settled") and (bal is None or bal == 0):
             if age < 21600:
@@ -327,7 +505,9 @@ def pick_refresh_targets(all_keys, balances, meta, batch: int):
             if isinstance(bal, (int, float)) and bal <= 1e-12 and age < 3600:
                 continue
             stale.append(k)
-    stale.sort(key=lambda k: float((meta.get(k) or {}).get("ts") or 0))
+    stale.sort(
+        key=lambda k: float((meta_get(meta, k[0], k[1]) or {}).get("ts") or 0)
+    )
     return (pending + stale)[: max(0, batch)]
 
 
@@ -376,7 +556,11 @@ def record_hits(wallet_bals):
                     try:
                         rec = json.loads(line)
                         existing.add(
-                            ((rec.get("chain") or "").lower(), rec.get("address") or "", rec.get("balance"))
+                            (
+                                (rec.get("chain") or "").lower(),
+                                rec.get("address") or "",
+                                rec.get("balance"),
+                            )
                         )
                     except Exception:
                         pass
@@ -392,7 +576,9 @@ def record_hits(wallet_bals):
                     "address": addr,
                     "balance": bal,
                     "ts": time.time(),
-                    "checked_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+                    "checked_at": datetime.now(timezone.utc)
+                    .isoformat()
+                    .replace("+00:00", "Z"),
                     "source": "wallet_view_live",
                 }
                 f.write(json.dumps(rec) + "\n")
@@ -483,33 +669,45 @@ def paint(
     end = min(n_wallets, start + page_size)
     page_wallets = ordered[start:end]
 
-    # Derive ONLY this page (+ small peek) — keeps UI instant
     peek_end = min(n_wallets, end + 12)
     ensure_derived_many(ordered[start:peek_end])
 
-    # Stats from whatever is derived so far + full cache isn't required
     all_keys = collect_keys_from_wallets([w for w in ordered if w.get("_derived")])
-    # also include keys from entire derived cache for better totals when paging
     for addrs in DERIVE_CACHE.values():
         for k in addrs:
             if k not in all_keys:
                 all_keys.append(k)
 
-    wallet_keys = set(all_keys)
-    nonzero_keys = [
-        k for k in wallet_keys
-        if isinstance(balances.get(k), (int, float)) and balances.get(k) > 1e-12
-    ]
-    total = sum(float(balances[k]) for k in nonzero_keys)
-    pending = sum(1 for k in wallet_keys if balances.get(k) is None)
+    wallet_keys = list(all_keys)
+    for (chain, addr), bal in balances.items():
+        if isinstance(bal, (int, float)) and bal > 1e-12:
+            k = (chain, addr)
+            if k not in wallet_keys:
+                wallet_keys.append(k)
+
+    nonzero_keys = []
+    nz_seen = set()
+    for k in wallet_keys:
+        b = bal_get(balances, k[0], k[1])
+        if isinstance(b, (int, float)) and b > 1e-12:
+            nk = _norm_addr(k[0], k[1])
+            if nk in nz_seen:
+                continue
+            nz_seen.add(nk)
+            nonzero_keys.append(k)
+
+    total = sum(float(bal_get(balances, k[0], k[1]) or 0) for k in nonzero_keys)
+    pending = sum(1 for k in all_keys if bal_get(balances, k[0], k[1]) is None)
     zeroed = sum(
-        1 for k in wallet_keys
-        if isinstance(balances.get(k), (int, float)) and balances.get(k) <= 1e-12
+        1
+        for k in all_keys
+        if isinstance(bal_get(balances, k[0], k[1]), (int, float))
+        and bal_get(balances, k[0], k[1]) <= 1e-12
     )
 
     newest = None
     for k in wallet_keys:
-        ca = (meta.get(k) or {}).get("checked_at")
+        ca = (meta_get(meta, k[0], k[1]) or {}).get("checked_at")
         if ca and (newest is None or ca > newest):
             newest = ca
 
@@ -523,15 +721,21 @@ def paint(
     print()
     print(f"  Wallets total:               {n_wallets}")
     print(f"  Addrs known (derived so far):{len(all_keys)}")
-    print(f"  Nonzero / zero / unresolved: {len(nonzero_keys):>4} / {zeroed:<5} / {pending}")
+    print(
+        f"  Nonzero / zero / unresolved: "
+        f"{len(nonzero_keys):>4} / {zeroed:<5} / {pending}"
+    )
     print(f"  Total nonzero (truth):       {GREEN}{total:,.8f}{RESET}")
-    print(f"  Updated:                     {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')}")
+    print(
+        f"  Updated:                     "
+        f"{datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')}"
+    )
     if newest:
         print(f"  Last on-chain check:         {newest}")
     print(
         f"  {CYAN}PAGE {page + 1}/{pages}{RESET}  "
         f"wallets {start + 1 if n_wallets else 0}–{end} of {n_wallets}  "
-        f"· size {page_size}  · auto-rotates in watch"
+        f"· size {page_size}  · auto-rotates every page-sec"
     )
     if rs.get("running"):
         print(
@@ -551,48 +755,59 @@ def paint(
         print("Ctrl+C exits view only.")
         sys.stdout.flush()
         return {
-            "total": total, "nonzero": len(nonzero_keys), "pending": pending,
-            "all_keys": all_keys, "pages": pages, "page": page, "n_wallets": 0,
+            "total": total,
+            "nonzero": len(nonzero_keys),
+            "pending": pending,
+            "all_keys": all_keys,
+            "pages": pages,
+            "page": page,
+            "n_wallets": 0,
             "page_keys": [],
         }
 
-    # INDEX — every wallet on this page listed
     print(f"  {BOLD}INDEX — page {page + 1}/{pages}{RESET}")
     print(f"  {'#':>4}  {'TYPE':<5}  {'NZ':>8}  {'P':>3}  KEY / SRC")
     print(f"  {'-'*4}  {'-'*5}  {'-'*8}  {'-'*3}  {'-'*52}")
     for i, w in enumerate(page_wallets, start=start + 1):
         sc, pend, _ = wallet_score(w, balances)
         nz_s = f"{GREEN}{sc:.6g}{RESET}" if sc > 0 else f"{DIM}0{RESET}"
-        src = (w.get("source") or "")
+        src = w.get("source") or ""
         if len(src) > 28:
             src = "…" + src[-27:]
         print(
-            f"  {i:>4}  {w.get('type','?'):<5}  {nz_s:>8}  {pend:>3}  "
+            f"  {i:>4}  {w.get('type', '?'):<5}  {nz_s:>8}  {pend:>3}  "
             f"{_short_key(w.get('key') or '', 40)}  {DIM}{src}{RESET}"
         )
 
-    # NEXT UP — where the "hidden" wallets are
     if end < n_wallets and not show_all:
         left = n_wallets - end
         peek_n = min(15, left)
         print()
         nxt_page = page + 2
-        print(f"  {BOLD}WHERE THE REST ARE{RESET}  {DIM}({left} more → pages {nxt_page}–{pages}){RESET}")
+        print(
+            f"  {BOLD}WHERE THE REST ARE{RESET}  "
+            f"{DIM}({left} more → pages {nxt_page}–{pages}){RESET}"
+        )
         for i, w in enumerate(ordered[end : end + peek_n], start=end + 1):
-            # don't force-derive peek beyond what ensure_derived_many did
             sc, _, _ = wallet_score(w, balances)
             star = f"{GREEN}*{RESET}" if sc > 0 else " "
             tgt_page = (i - 1) // page_size + 1
             print(
-                f"  {DIM}{star}#{i:<4} p{tgt_page:<3} {w.get('type','?'):<4} "
+                f"  {DIM}{star}#{i:<4} p{tgt_page:<3} {w.get('type', '?'):<4} "
                 f"{_short_key(w.get('key') or '', 46)}{RESET}"
             )
         if left > peek_n:
-            print(f"  {DIM}  … +{left - peek_n} more keys; watch mode flips page every few seconds{RESET}")
-        print(f"  {DIM}  jump:  python3 ~/wallet_view.py --once --cached --page N{RESET}")
-        print(f"  {DIM}  dump:  python3 ~/wallet_view.py --once --all --cached | less{RESET}")
+            print(
+                f"  {DIM}  … +{left - peek_n} more keys; "
+                f"watch mode flips page every few seconds{RESET}"
+            )
+        print(
+            f"  {DIM}  jump:  python3 ~/wallet_view.py --once --cached --page N{RESET}"
+        )
+        print(
+            f"  {DIM}  dump:  python3 ~/wallet_view.py --once --all --cached | less{RESET}"
+        )
 
-    # DETAIL cards
     print()
     print(f"  {BOLD}DETAIL — page {page + 1}/{pages}{RESET}")
     page_keys = []
@@ -615,7 +830,7 @@ def paint(
 
         def addr_rank(item):
             (chain, addr), _ = item
-            b = balances.get((chain, addr))
+            b = bal_get(balances, chain, addr)
             page_keys.append((chain, addr))
             if isinstance(b, (int, float)) and b > 1e-12:
                 return (0, -float(b), chain)
@@ -628,12 +843,24 @@ def paint(
         print(f"  {'CHAIN':>8}  {'ADDRESS':<46}  {'BALANCE':>14}")
         print(f"  {'-'*8}  {'-'*46}  {'-'*14}")
         for (chain, addr), _ in show_list:
-            bal = balances.get((chain, addr))
-            mark = f"{GREEN}*** {RESET}" if isinstance(bal, (int, float)) and bal > 1e-12 else "    "
-            print(f"{mark}{chain.upper():>8}  {_short_addr(addr, 46):<46}  {format_balance(bal):>14}")
+            bal = bal_get(balances, chain, addr)
+            mark = (
+                f"{GREEN}*** {RESET}"
+                if isinstance(bal, (int, float)) and bal > 1e-12
+                else "    "
+            )
+            print(
+                f"{mark}{chain.upper():>8}  "
+                f"{_short_addr(addr, 46):<46}  {format_balance(bal):>14}"
+            )
         rest = len(addrs_sorted) - len(show_list)
         if rest > 0:
-            print(f"  {DIM}  … {rest} more chains/addrs (all listed in --all dump){RESET}")
+            print(
+                f"  {DIM}  … {rest} more chains/addrs "
+                f"(all listed in --all dump){RESET}"
+            )
+        if not addrs_sorted:
+            print(f"  {DIM}  (no derived addresses){RESET}")
         print()
 
     print("-" * 78)
@@ -642,7 +869,8 @@ def paint(
         f"nothing permanently hidden — pages rotate in watch mode"
     )
     print(
-        f"  {DIM}walletall  |  walletpage N  |  --page-size 20  |  Ctrl+C = exit view only{RESET}"
+        f"  {DIM}walletall  |  walletpage N  |  --page-size 20  |  "
+        f"Ctrl+C = exit view only{RESET}"
     )
     sys.stdout.flush()
     return {
@@ -667,14 +895,19 @@ def dump_all_text(wallets, balances):
         ensure_derived(w)
         sc, pend, chk = wallet_score(w, balances)
         print("-" * 78)
-        print(f"[{i}/{len(ordered)}] {w.get('type')} sum={sc:.8f} pend={pend} zero={chk}")
+        print(
+            f"[{i}/{len(ordered)}] {w.get('type')} "
+            f"sum={sc:.8f} pend={pend} zero={chk}"
+        )
         print(f"KEY: {w.get('key')}")
         print(f"SRC: {w.get('source')}")
         print(f"TS:  {w.get('timestamp')}")
-        for (chain, addr) in sorted((w.get("addresses") or {}).keys()):
-            bal = balances.get((chain, addr))
+        for chain, addr in sorted((w.get("addresses") or {}).keys()):
+            bal = bal_get(balances, chain, addr)
             bs = "PENDING" if bal is None else f"{bal:.8f}"
-            flag = " ***" if isinstance(bal, (int, float)) and bal > 1e-12 else ""
+            flag = (
+                " ***" if isinstance(bal, (int, float)) and bal > 1e-12 else ""
+            )
             print(f"  {chain.upper():8} {addr}  {bs}{flag}")
         if i % 25 == 0:
             sys.stdout.flush()
@@ -691,7 +924,13 @@ def cycle(
     page_size: int = DEFAULT_PAGE_SIZE,
     show_all: bool = False,
     dump_all: bool = False,
+    block_refresh: bool = True,
 ):
+    """One paint + optional live refresh.
+
+    block_refresh=True  → --once: wait for batch (up to 75s)
+    block_refresh=False → watch: fire-and-forget so pages keep rotating
+    """
     t0 = time.time()
     wallets = gather_wallets(max_wallets=max_wallets)
     balances, meta = load_balances()
@@ -699,7 +938,13 @@ def cycle(
 
     if dump_all:
         dump_all_text(wallets, balances)
-        return {"n_wallets": len(wallets), "all_keys": [], "pages": 1, "page": 0, "page_keys": []}
+        return {
+            "n_wallets": len(wallets),
+            "all_keys": [],
+            "pages": 1,
+            "page": 0,
+            "page_keys": [],
+        }
 
     status = status_line or ""
     if status:
@@ -708,19 +953,21 @@ def cycle(
         status = f"load {gather_ms}ms / {len(wallets)} keys"
 
     info = paint(
-        wallets, balances, meta,
+        wallets,
+        balances,
+        meta,
         status_line=status,
         live_note=("cache only" if not live else ""),
-        page=page, page_size=page_size, show_all=show_all,
+        page=page,
+        page_size=page_size,
+        show_all=show_all,
     )
 
     if not live:
         return info
 
-    # refresh keys on current page first (what user sees), then other known keys
     page_keys = info.get("page_keys") or []
     all_keys = info.get("all_keys") or []
-    # prioritize page keys
     seen = set()
     ordered_keys = []
     for k in list(page_keys) + list(all_keys):
@@ -728,61 +975,120 @@ def cycle(
             seen.add(k)
             ordered_keys.append(k)
     targets = pick_refresh_targets(ordered_keys, balances, meta, batch=batch)
+
     if not targets:
         paint(
-            wallets, balances, meta,
+            wallets,
+            balances,
+            meta,
             status_line=status,
             live_note="page addrs fresh in cache",
-            page=page, page_size=page_size, show_all=show_all,
+            page=page,
+            page_size=page_size,
+            show_all=show_all,
+        )
+        return info
+
+    with _refresh_lock:
+        already = bool(_refresh_state.get("running"))
+
+    if already:
+        paint(
+            wallets,
+            balances,
+            meta,
+            status_line=status,
+            live_note="live refresh still running (non-blocking)",
+            page=page,
+            page_size=page_size,
+            show_all=show_all,
         )
         return info
 
     thr = background_refresh(targets)
+
+    if not block_refresh:
+        paint(
+            wallets,
+            balances,
+            meta,
+            status_line=status,
+            live_note=f"live refresh started ({len(targets)} addrs, background)",
+            page=page,
+            page_size=page_size,
+            show_all=show_all,
+        )
+        return info
+
     start = time.time()
     while thr.is_alive() and time.time() - start < 75:
         time.sleep(1.2)
         balances, meta = load_balances()
         paint(
-            wallets, balances, meta,
+            wallets,
+            balances,
+            meta,
             status_line=status,
             live_note=f"refreshing {len(targets)} addrs…",
-            page=page, page_size=page_size, show_all=show_all,
+            page=page,
+            page_size=page_size,
+            show_all=show_all,
         )
     thr.join(timeout=1)
     balances, meta = load_balances()
     return paint(
-        wallets, balances, meta,
+        wallets,
+        balances,
+        meta,
         status_line=status,
         live_note=f"batch {len(targets)} live checks done",
-        page=page, page_size=page_size, show_all=show_all,
+        page=page,
+        page_size=page_size,
+        show_all=show_all,
     )
 
 
 def main():
-    ap = argparse.ArgumentParser(description="Wallet viewer — full paging, no permanent hide")
+    ap = argparse.ArgumentParser(
+        description="Wallet viewer — full paging, no permanent hide"
+    )
     ap.add_argument("-w", "--watch", action="store_true")
     ap.add_argument("--once", action="store_true")
     ap.add_argument("-i", "--interval", type=int, default=DEFAULT_INTERVAL)
     ap.add_argument("--batch", type=int, default=DEFAULT_BATCH)
     ap.add_argument("--cached", action="store_true")
-    ap.add_argument("--max-wallets", type=int, default=0, help="0 = all unique keys in memory tail")
+    ap.add_argument(
+        "--max-wallets",
+        type=int,
+        default=0,
+        help="0 = all unique keys in memory tail",
+    )
     ap.add_argument("--page-size", type=int, default=DEFAULT_PAGE_SIZE)
     ap.add_argument("--page-sec", type=int, default=DEFAULT_PAGE_SEC)
     ap.add_argument("--page", type=int, default=0, help="0-based page index")
-    ap.add_argument("--all", action="store_true", help="with --once: full text dump of every wallet")
-    ap.add_argument("--show-all-page", action="store_true", help="one giant scrolling page")
+    ap.add_argument(
+        "--all",
+        action="store_true",
+        help="with --once: full text dump of every wallet",
+    )
+    ap.add_argument(
+        "--show-all-page", action="store_true", help="one giant scrolling page"
+    )
     args = ap.parse_args()
 
-    # LIVE by default always — balances check via wired public + .env RPCs.
-    # Only --cached skips network.
     live = not args.cached
     watch = args.watch or not args.once
 
     if not watch:
         cycle(
-            live=live, batch=args.batch, max_wallets=args.max_wallets,
-            page=max(0, args.page), page_size=max(1, args.page_size),
-            show_all=args.show_all_page, dump_all=args.all,
+            live=live,
+            batch=args.batch,
+            max_wallets=args.max_wallets,
+            page=max(0, args.page),
+            page_size=max(1, args.page_size),
+            show_all=args.show_all_page,
+            dump_all=args.all,
+            block_refresh=True,
         )
         return
 
@@ -791,31 +1097,60 @@ def main():
         page = max(0, args.page)
         page_size = max(1, args.page_size)
         page_sec = max(3, int(args.page_sec))
+        next_flip = time.time() + page_sec
         while True:
             n += 1
             status = (
-                f"watch #{n} · auto-page every {page_sec}s · "
+                f"watch #{n} · page {page + 1} · auto-page every {page_sec}s · "
                 f"rpc batch {args.batch}"
             )
             info = cycle(
-                live=live, batch=args.batch, status_line=status,
+                live=live,
+                batch=args.batch,
+                status_line=status,
                 max_wallets=args.max_wallets,
-                page=page, page_size=page_size,
+                page=page,
+                page_size=page_size,
                 show_all=args.show_all_page,
+                block_refresh=False,
             )
             pages = max(1, int(info.get("pages") or 1))
-            # readable hold on this page
-            hold = page_sec
-            while hold > 0:
-                time.sleep(1)
-                hold -= 1
+
+            while True:
+                now = time.time()
+                left = next_flip - now
+                if left <= 0:
+                    break
+                time.sleep(min(1.0, left))
+                if left > 1.5:
+                    balances, meta = load_balances()
+                    wallets = gather_wallets(max_wallets=args.max_wallets)
+                    with _refresh_lock:
+                        rs = dict(_refresh_state)
+                    note = ""
+                    if rs.get("running"):
+                        note = (
+                            f"live {rs.get('done', 0)}/{rs.get('total', 0)} "
+                            f"{rs.get('last_msg', '')}"
+                        )
+                    paint(
+                        wallets,
+                        balances,
+                        meta,
+                        status_line=status + f" · flip in {int(left)}s",
+                        live_note=note,
+                        page=page,
+                        page_size=page_size,
+                        show_all=args.show_all_page,
+                    )
+
             page = (page + 1) % pages
+            next_flip = time.time() + page_sec
             if page == 0:
-                # brief breather after full rotation before heavier work
                 extra = max(0, int(args.interval) - page_sec)
-                while extra > 0:
-                    time.sleep(1)
-                    extra -= 1
+                if extra:
+                    time.sleep(extra)
+                    next_flip = time.time() + page_sec
     except KeyboardInterrupt:
         print()
         sys.exit(0)

