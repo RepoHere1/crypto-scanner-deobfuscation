@@ -116,6 +116,29 @@ def _looks_like_ascii_hex_padding(h: str) -> bool:
     return False
 
 
+def _ascii_text_ratio(priv: bytes) -> float:
+    """Fraction of bytes that are printable ASCII (space..~)."""
+    if not priv:
+        return 0.0
+    return sum(32 <= b < 127 for b in priv) / len(priv)
+
+
+def _looks_like_ascii_text_key(priv: bytes) -> bool:
+    """True if 32 bytes decode as mostly English/text (common trufflehog FP)."""
+    ratio = _ascii_text_ratio(priv)
+    if ratio >= 0.85:
+        return True
+    # high printable + mostly letters/spaces
+    if ratio >= 0.70:
+        letters = sum(
+            (65 <= b <= 90) or (97 <= b <= 122) or b in (32, 9, 10, 13)
+            for b in priv
+        )
+        if letters / len(priv) >= 0.60:
+            return True
+    return False
+
+
 def validate_secp256k1_priv(priv: bytes) -> Tuple[bool, str]:
     """Return (ok, reason). ok=True means usable as secp256k1 private key."""
     if not isinstance(priv, (bytes, bytearray)) or len(priv) != 32:
@@ -157,15 +180,35 @@ def validate_hex_privkey(hex_key: str, context: str = "") -> Tuple[bool, str, fl
     if not ok:
         return False, reason, 0.0
 
+    if _looks_like_ascii_text_key(priv):
+        return False, "ascii_text", 0.0
+
     if _looks_like_ascii_hex_padding(h):
         return False, "low_charset", 0.0
 
     ent = shannon_entropy(h)
-    # hex of a strong key usually ~3.8–4.0 bits/char over 16-symbol alphabet
-    if ent < 3.2:
+    # Real random keys cluster ~3.7–4.0; text-as-hex often ~3.2–3.5
+    if ent < 3.45:
         return False, "low_entropy", 0.0
 
-    score = min(1.0, (ent - 3.2) / 0.8)  # 3.2→0, 4.0→1
+    score = min(1.0, (ent - 3.45) / 0.55)  # 3.45→0, 4.0→1
+
+    # Only penalize *text-like* byte distributions, not random printable density.
+    # Random keys land ~30–45% printable; English text is >>70% letters/spaces.
+    ascii_r = _ascii_text_ratio(priv)
+    letters = sum(
+        (65 <= b <= 90) or (97 <= b <= 122) or b in (32, 9, 10, 13)
+        for b in priv
+    ) / 32.0
+    if letters >= 0.50:
+        return False, "ascii_text", 0.0
+    if ascii_r >= 0.75 and letters >= 0.35:
+        score *= 0.6
+
+    # Base quality gate BEFORE context bonuses — context must not
+    # resurrect weak / patterned hex into "valid keys".
+    if score < 0.35:
+        return False, "low_score", score
 
     ctx = context or ""
     if _HASH_CONTEXT_RE.search(ctx) and not _KEY_CONTEXT_RE.search(ctx):
@@ -175,7 +218,7 @@ def validate_hex_privkey(hex_key: str, context: str = "") -> Tuple[bool, str, fl
             return False, "hash_context", score
 
     if _KEY_CONTEXT_RE.search(ctx):
-        score = min(1.0, score + 0.35)
+        score = min(1.0, score + 0.25)
 
     return True, "ok", score
 

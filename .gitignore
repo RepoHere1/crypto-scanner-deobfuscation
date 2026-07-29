@@ -72,3 +72,8 @@ test_clone_ok/
 .encrypt_passphrase
 .encrypt_manifest.json
 .vault/
+
+# Denoise backups (multi-hundred-MB)
+*.bak_denoise_*
+denoise_report.json
+denoise_run.log

