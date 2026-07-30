@@ -44,6 +44,7 @@ high_confidence_hits.jsonl
 .scanner_checkpoint
 .controlled_shutdown
 .resource_stats.json
+.token_prices.json
 
 launch_all.log
 trufflehog_throttled.log
@@ -77,3 +78,6 @@ test_clone_ok/
 *.bak_denoise_*
 denoise_report.json
 denoise_run.log
+balance_cache.jsonl.lock
+balance_cache.jsonl.tmp*
+balance_cache.jsonl.tmp

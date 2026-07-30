@@ -5,9 +5,10 @@ WalletX — Forensic Wallet Examiner (LIVE production, no mocks, no truncation).
 Stability / UX:
   - Does NOT auto-flip pages while you navigate
   - Auto-refresh ONLY after IDLE_REFRESH_SEC of no input (default 120s)
+  - Free-run rotates dossier focus across all ranks (not stuck on #1)
   - Touch/key activity resets the idle timer — scroll freely without repaint fights
   - Full private keys / seeds / WIFs / sources always printed complete (wrapped, never ellipsized)
-  - Highest balance always on top; focus pinned across soft re-ranks
+  - Highest balance always on top; focus pinned across soft re-ranks while you navigate
   - Live RPC is background-only; UI never blocks on it
   - All paint exceptions caught and shown on-screen
 
@@ -86,15 +87,20 @@ MAGENTA = "\033[95m"
 WHITE = "\033[97m"
 BLUE = "\033[94m"
 
-# Idle-only refresh: if user touches screen/keys, timer resets.
-# Only after this many seconds of ZERO input do we gather/repaint/RPC.
+# HARD freeze while interacting:
+#   - Any key/touch resets the idle timer
+#   - ZERO full-screen repaint / gather / live-RPC while idle_left > 0
+#   - After DEFAULT_IDLE_REFRESH_SEC of silence, free-run refresh until next touch
 DEFAULT_IDLE_REFRESH_SEC = 120.0
-DEFAULT_TICK_SEC = 2.0          # input poll cadence (does NOT repaint by itself)
+DEFAULT_TICK_SEC = 0.35         # snappy key poll only (never repaints by itself)
 DEFAULT_BATCH = 24
 LEADERBOARD_N = 14
 DETAIL_ADDRS = 0                # 0 = show ALL derived addresses (no truncation)
-GATHER_SEC = 120                # full memory re-scan only on idle refresh
-PAINT_MIN_SEC = 0.0             # paint on demand (nav / idle); never spin
+GATHER_SEC = 120                # full memory re-scan only on idle free-run
+PAINT_MIN_SEC = 0.0             # paint on demand (nav / idle free-run); never spin
+IDLE_FREE_RUN_TICK = 8.0        # while fully idle, refresh cadence (seconds)
+FREE_RUN_ROTATE = True          # cycle dossier focus across leaderboard while free-running
+COUNTDOWN_UPDATE_SEC = 30.0    # status-line only tick (no full clear) during freeze
 MEMORY_DEEP_BYTES = 6_000_000  # deeper reverse-link scan for funded addrs
 EXPORT_DIR = os.path.join(HOME, "forensic_exports")
 WRAP_WIDTH = 70                 # visual wrap only — full content always printed
@@ -502,13 +508,25 @@ def export_dossier(w: dict, balances: dict, meta: dict, rank: int, total_bal: fl
     os.makedirs(EXPORT_DIR, exist_ok=True)
     rows = wallet_addr_rows(w, balances, meta)
     bundle = forensic_bundle_for_wallet(w)
+    try:
+        prices = wv.get_usd_prices()
+    except Exception:
+        prices = {}
     addr_table = []
     for r in rows:
         m = r.get("meta") or {}
+        bal = r["balance"]
+        usd = None
+        try:
+            if isinstance(bal, (int, float)) and bal > 1e-12:
+                usd = wv.usd_value(r["chain"], bal, prices)
+        except Exception:
+            usd = None
         addr_table.append({
             "chain": r["chain"],
             "address": r["address"],
-            "balance": r["balance"],
+            "balance": bal,
+            "usd": usd,
             "noise": r["noise"],
             "from": r.get("from"),
             "ts": m.get("ts"),
@@ -517,10 +535,16 @@ def export_dossier(w: dict, balances: dict, meta: dict, rank: int, total_bal: fl
             "checked_at": m.get("checked_at"),
             "error": m.get("error"),
         })
+    try:
+        total_usd = wv.wallet_usd_total(w, balances, prices)
+    except Exception:
+        total_usd = None
     payload = {
         "exported_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
         "rank": rank,
         "total_balance": total_bal,
+        "total_usd": total_usd,
+        "usd_prices": prices,
         "wallet_type": w.get("type"),
         "key_full": w.get("key"),
         "source_full": w.get("source"),
@@ -905,28 +929,60 @@ def wallet_addr_rows(w, balances, meta):
 
 
 def collect_refresh_keys(ranked, balances, meta, focus_idx: int, batch: int):
+    """Fair RPC targets across the leaderboard (not only rank #1).
+
+    Order keys round-robin by wallet rank so a multi-chain #1 cannot starve
+    ranks 2..N. Focus wallet still gets first slot within the fair queue.
+    """
     keys = []
     seen = set()
 
-    def add_wallet(w):
+    def wallet_keys(w):
+        out = []
         try:
             wv.ensure_derived(w)
         except Exception:
-            return
+            return out
         for chain, addr in (w.get("addresses") or {}):
             k = (chain, addr)
             if k not in seen:
                 seen.add(k)
-                keys.append(k)
+                out.append(k)
+        return out
 
     try:
-        if 0 <= focus_idx < len(ranked):
-            add_wallet(ranked[focus_idx][4])
-        for _, _, _, _, w in ranked[:LEADERBOARD_N]:
-            add_wallet(w)
+        n = len(ranked or [])
+        if n == 0:
+            return []
+        focus_idx = max(0, min(n - 1, int(focus_idx)))
+        # Walk focus first, then the rest of the visible leaderboard, then tail.
+        order = list(range(n))
+        # rotate so focus is first
+        order = order[focus_idx:] + order[:focus_idx]
+        # Prefer leaderboard window, still include the rest for pending fills
+        lb = min(LEADERBOARD_N, n)
+        lb_set = set(range(lb))
+        order = [i for i in order if i in lb_set] + [i for i in order if i not in lb_set]
+
+        per_wallet = [wallet_keys(ranked[i][4]) for i in order]
+        # Round-robin merge so batch covers many ranks each tick
+        max_len = max((len(p) for p in per_wallet), default=0)
+        for col in range(max_len):
+            for bucket in per_wallet:
+                if col < len(bucket):
+                    keys.append(bucket[col])
         return wv.pick_refresh_targets(keys, balances, meta, batch=batch)
     except Exception:
         return []
+
+
+def _advance_free_run_focus(ranked, focus: int) -> int:
+    """Step dossier focus to the next rank (wrap). Used only during free-run."""
+    n = len(ranked or [])
+    if n <= 0:
+        return 0
+    # Rotate through the full ranked set (funded list is usually <= LEADERBOARD_N)
+    return (int(focus) + 1) % n
 
 
 # ── paint ──────────────────────────────────────────────────────────
@@ -1093,6 +1149,29 @@ def _paint_forensic_inner(
     except Exception as exc:
         bundle = {"error": str(exc)}
 
+    # Spot USD prices (cached 5 min via CoinGecko) for visual $ next to balances
+    try:
+        prices = wv.get_usd_prices()
+    except Exception:
+        prices = {}
+
+    # Portfolio USD across all ranked wallets (priced chains only)
+    portfolio_usd = 0.0
+    portfolio_usd_any = False
+    for row in ranked:
+        try:
+            u = wv.wallet_usd_total(row[4], balances, prices)
+            if u is not None:
+                portfolio_usd += u
+                portfolio_usd_any = True
+        except Exception:
+            pass
+    focus_usd = None
+    try:
+        focus_usd = wv.wallet_usd_total(w, balances, prices)
+    except Exception:
+        focus_usd = None
+
     _safe_clear()
     print("=" * 78)
     print(
@@ -1108,8 +1187,13 @@ def _paint_forensic_inner(
     )
     print(
         f"  Funded: {GREEN}{funded_n}{RESET}   "
-        f"Portfolio: {GREEN}{grand:,.10f}{RESET}   "
-        f"Keys: {n}   "
+        f"Portfolio: {GREEN}{grand:,.10f}{RESET}"
+        + (
+            f"  {wv.format_usd(portfolio_usd, color=True)}"
+            if portfolio_usd_any
+            else ""
+        )
+        + f"   Keys: {n}   "
         f"{datetime.now(timezone.utc).strftime('%H:%M:%S')}Z"
     )
     if idle_left >= 0:
@@ -1117,11 +1201,14 @@ def _paint_forensic_inner(
             mins = int(idle_left) // 60
             secs = int(idle_left) % 60
             print(
-                f"  {CYAN}Idle refresh in {mins:02d}:{secs:02d}{RESET}  "
-                f"{DIM}(touch/keys reset timer · default {int(idle_sec)}s){RESET}"
+                f"  {GREEN}FROZEN{RESET}  {CYAN}free-run in {mins:02d}:{secs:02d}{RESET}  "
+                f"{DIM}(any touch/key resets · no reload until {int(idle_sec)}s silence){RESET}"
             )
         else:
-            print(f"  {YELLOW}Idle refresh due — reloading…{RESET}")
+            print(
+                f"  {YELLOW}FREE-RUN active — refreshing + rotating ranks "
+                f"(touch freezes again){RESET}"
+            )
     if rs.get("running"):
         print(
             f"  {CYAN}Live RPC: {rs.get('done', 0)}/{rs.get('total', 0)}  "
@@ -1136,8 +1223,11 @@ def _paint_forensic_inner(
     print()
 
     print(f"  {BOLD}LEADERBOARD — highest balance on top{RESET}")
-    print(f"  {'#':>4}  {'TYPE':<5}  {'BALANCE':>16}  {'BAR':<18}  KEY / ADDRESS")
-    print(f"  {'-'*4}  {'-'*5}  {'-'*16}  {'-'*18}  {'-'*28}")
+    print(
+        f"  {'#':>4}  {'TYPE':<5}  {'BALANCE':>16}  {'USD':>10}  "
+        f"{'BAR':<14}  KEY / ADDRESS"
+    )
+    print(f"  {'-'*4}  {'-'*5}  {'-'*16}  {'-'*10}  {'-'*14}  {'-'*28}")
     lb_n = min(LEADERBOARD_N, n)
     for i in range(lb_n):
         sc, _pnd, _ck, _ts, ww = ranked[i]
@@ -1149,9 +1239,17 @@ def _paint_forensic_inner(
             bal_s = f"{YELLOW}{sc:>16.10f}{RESET}"
         else:
             bal_s = f"{DIM}{'0':>16}{RESET}"
+        try:
+            row_usd = wv.wallet_usd_total(ww, balances, prices)
+        except Exception:
+            row_usd = None
+        usd_s = wv.format_usd(row_usd, width=10, color=True)
         frac = (sc / top_bal) if top_bal > 0 else 0.0
-        show = _leaderboard_label(ww.get("key") or "", 36)
-        print(f"  {marker}{i + 1:>3}  {typ:<5}  {bal_s}  {_bar(frac, 16)}  {show}")
+        show = _leaderboard_label(ww.get("key") or "", 28)
+        print(
+            f"  {marker}{i + 1:>3}  {typ:<5}  {bal_s}  {usd_s}  "
+            f"{_bar(frac, 12)}  {show}"
+        )
     if n > lb_n:
         print(f"  {DIM}  … +{n - lb_n} more  (n/p or 1-9 / g N){RESET}")
     print()
@@ -1188,8 +1286,11 @@ def _paint_forensic_inner(
         print(f"  {BOLD}SOURCE{RESET}    {DIM}(unknown){RESET}")
 
     print(f"  {BOLD}FOUND{RESET}     {found_ts or (DIM + 'n/a' + RESET)}")
+    usd_bit = ""
+    if focus_usd is not None:
+        usd_bit = f"  ≈ {wv.format_usd(focus_usd, color=True)}"
     print(
-        f"  {BOLD}BALANCE{RESET}   {GREEN}{total_bal:,.12f}{RESET}  "
+        f"  {BOLD}BALANCE{RESET}   {GREEN}{total_bal:,.12f}{RESET}{usd_bit}  "
         f"(unresolved={pend}  zeroed={chk}  chains={len(rows)})"
     )
     if w.get("_hit_boost"):
@@ -1228,10 +1329,10 @@ def _paint_forensic_inner(
         print(f"  {RED}analysis paint: {exc}{RESET}")
 
     print(
-        f"  {BOLD}{'CHAIN':>8}  {'ADDRESS':<44}  {'BALANCE':>18}  "
-        f"{'AGE':>5}  FLAG{RESET}"
+        f"  {BOLD}{'CHAIN':>8}  {'ADDRESS':<42}  {'BALANCE':>16}  "
+        f"{'USD':>10}  {'AGE':>5}  FLAG{RESET}"
     )
-    print(f"  {'-'*8}  {'-'*44}  {'-'*18}  {'-'*5}  {'-'*12}")
+    print(f"  {'-'*8}  {'-'*42}  {'-'*16}  {'-'*10}  {'-'*5}  {'-'*12}")
 
     show_rows = rows if not DETAIL_ADDRS else rows[:DETAIL_ADDRS]
     for r in show_rows:
@@ -1243,29 +1344,37 @@ def _paint_forensic_inner(
         live = "LIVE" if m.get("live") else ("SET" if m.get("settled") else "")
         if r["noise"]:
             flag = f"{DIM}noise{RESET}"
-            bal_s = f"{DIM}{'0':>18}{RESET}"
+            bal_s = f"{DIM}{'0':>16}{RESET}"
+            usd_s = f"{DIM}{'—':>10}{RESET}"
             mark = "  "
         elif isinstance(bal, (int, float)) and bal > 1e-12:
             flag = f"{GREEN}*** FUNDED{RESET}"
-            bal_s = f"{GREEN}{bal:>18.12f}{RESET}"
+            bal_s = f"{GREEN}{bal:>16.10f}{RESET}"
+            usd_s = wv.format_usd(wv.usd_value(chain, bal, prices), width=10, color=True)
             mark = f"{GREEN}▶{RESET} "
         elif bal is None:
             flag = f"{YELLOW}pending{RESET}"
-            bal_s = f"{YELLOW}{'…':>18}{RESET}"
+            bal_s = f"{YELLOW}{'…':>16}{RESET}"
+            usd_s = f"{DIM}{'—':>10}{RESET}"
             mark = "  "
         else:
             flag = f"{DIM}zero{RESET}"
-            bal_s = f"{DIM}{'0':>18}{RESET}"
+            bal_s = f"{DIM}{'0':>16}{RESET}"
+            usd_s = f"{DIM}{'—':>10}{RESET}"
             mark = "  "
         live_s = f" {DIM}{live}{RESET}" if live else ""
-        if len(addr) <= 44:
+        ticker = wv.CHAIN_TICKER.get(str(chain).lower(), str(chain).upper()[:4])
+        if len(addr) <= 42:
             print(
-                f"  {mark}{chain.upper():>6}  {addr:<44}  {bal_s}  "
-                f"{age:>5}  {flag}{live_s}"
+                f"  {mark}{chain.upper():>6}  {addr:<42}  {bal_s}  "
+                f"{usd_s}  {age:>5}  {flag}{live_s}"
             )
         else:
             print(f"  {mark}{chain.upper():>6}  {addr}")
-            print(f"          {bal_s}  {age:>5}  {flag}{live_s}")
+            print(
+                f"          {ticker:<6}  {bal_s}  {usd_s}  "
+                f"{age:>5}  {flag}{live_s}"
+            )
 
     if DETAIL_ADDRS and len(rows) > DETAIL_ADDRS:
         print(f"  {DIM}  … {len(rows) - DETAIL_ADDRS} more (DETAIL_ADDRS=0 shows all){RESET}")
@@ -1283,7 +1392,7 @@ def _paint_forensic_inner(
         f"{CYAN}q{RESET} quit"
     )
     print(
-        f"  {DIM}idle-refresh {int(idle_sec)}s after no touch  ·  "
+        f"  {DIM}FROZEN until {int(idle_sec)}s silence then free-run  ·  "
         f"keys always full  ·  live production only  ·  "
         f"exports → ~/forensic_exports/{RESET}"
     )
@@ -1642,14 +1751,30 @@ def cycle_once(focus, funded_only, live, batch, max_wallets, block_refresh, stat
     return {"focus": focus, "n": len(st.ranked)}
 
 
+
+def _status_line_inplace(msg: str) -> None:
+    """Update bottom status without clearing the whole screen (no flicker)."""
+    try:
+        # Save cursor, jump near bottom, write one dim line, restore.
+        sys.stdout.write("\033[s")
+        sys.stdout.write("\033[999;1H")  # go to last row
+        sys.stdout.write("\033[2K")
+        sys.stdout.write(f"  {DIM}{msg}{RESET}")
+        sys.stdout.write("\033[u")
+        sys.stdout.flush()
+    except Exception:
+        pass
+
+
 def interactive_loop(args):
+    """Keyboard nav. Screen FREEZES while you touch; free-runs only after idle_sec silence."""
     focus = max(0, int(args.index))
     live = not args.cached
     batch = max(1, int(args.batch))
-    idle_sec = max(15.0, float(getattr(args, "idle_sec", DEFAULT_IDLE_REFRESH_SEC)))
-    poll_sec = max(0.15, float(getattr(args, "tick_sec", DEFAULT_TICK_SEC)))
+    idle_sec = max(30.0, float(getattr(args, "idle_sec", DEFAULT_IDLE_REFRESH_SEC)))
+    poll_sec = max(0.12, float(getattr(args, "tick_sec", DEFAULT_TICK_SEC)))
     global GATHER_SEC
-    GATHER_SEC = max(30.0, idle_sec)
+    GATHER_SEC = max(idle_sec, float(idle_sec))
 
     st = ForensicState(
         max_wallets=args.max_wallets,
@@ -1669,28 +1794,46 @@ def interactive_loop(args):
                 st.ranked[focus][4].get("type"),
                 st.ranked[focus][4].get("key"),
             )
+            try:
+                wv.ensure_derived(st.ranked[focus][4])
+            except Exception:
+                pass
+
+        # User is "active" at boot — do NOT auto-RPC or auto-reload until idle_sec.
         last_input = time.time()
+        last_idle_refresh = 0.0
+        last_countdown_tick = 0.0
+        free_run = False  # True only after idle_sec of silence
+
         paint_state(
             st, focus, live, idle_sec, batch, tag="walletx",
             force=True, idle_left=idle_sec,
         )
-        _maybe_start_refresh(st, focus, live, batch)
-
-        last_countdown_paint = time.time()
+        # No _maybe_start_refresh at boot — wait for full idle freeze expiry.
 
         while True:
             try:
                 now = time.time()
                 idle_for = now - last_input
                 idle_left = max(0.0, idle_sec - idle_for)
-                timeout = min(poll_sec, max(0.05, idle_left if idle_left > 0 else poll_sec))
+                # While user is active (idle_left > 0): ONLY poll keys, never gather/RPC/repaint.
+                if idle_left > 0:
+                    free_run = False
+                    timeout = min(poll_sec, max(0.08, idle_left))
+                else:
+                    free_run = True
+                    timeout = min(poll_sec, 0.5)
+
                 key = _stdin_key(timeout=timeout)
                 now = time.time()
                 force_paint = False
                 did_nav = False
+                user_touched = key is not None
 
-                if key is not None:
+                if user_touched:
+                    # HARD freeze again — cancel any free-run refresh cycle.
                     last_input = now
+                    free_run = False
                     if key in ("q", "Q", "\x03"):
                         print()
                         return
@@ -1713,9 +1856,11 @@ def interactive_loop(args):
                         st.rebuild_ranked()
                         did_nav = True
                     elif key in ("r", "R"):
+                        # Manual reload is explicit user action — allowed anytime.
                         st.snapshot(force_gather=True)
                         force_paint = True
                         last_input = time.time()
+                        free_run = False
                         _maybe_start_refresh(st, focus, live, batch)
                     elif key in ("e", "E"):
                         if st.ranked:
@@ -1740,10 +1885,13 @@ def interactive_loop(args):
                     elif key in ("g", "G", "#"):
                         dest = _prompt_jump(focus, len(st.ranked) if st.ranked else 1)
                         last_input = time.time()
+                        free_run = False
                         if dest is not None:
-                            focus = max(0, dest)
+                            focus = dest
                             pinned_key = None
                             did_nav = True
+                        else:
+                            force_paint = True
                     elif key == "\x1b":
                         k2 = _stdin_key(0.06)
                         if k2 == "[":
@@ -1770,18 +1918,48 @@ def interactive_loop(args):
                             print()
                             return
                     _drain_stdin()
-
-                # IDLE REFRESH only after idle_sec with zero input
-                idle_for = time.time() - last_input
-                if idle_for >= idle_sec:
-                    st.snapshot(force_gather=True)
-                    if pinned_key:
-                        focus = _refocus(st.ranked, pinned_key, focus)
-                    force_paint = True
+                    # Any residual burst also counts as activity.
                     last_input = time.time()
-                    _maybe_start_refresh(st, focus, live, batch)
+                    free_run = False
 
-                if pinned_key:
+                # ── FREE-RUN only after full idle_sec with ZERO input ──
+                idle_for = time.time() - last_input
+                if (not user_touched) and idle_for >= idle_sec:
+                    free_run = True
+                    # First entry into free-run, or cadence tick: full gather + RPC + paint.
+                    if (time.time() - last_idle_refresh) >= IDLE_FREE_RUN_TICK:
+                        st.snapshot(force_gather=True)
+                        if pinned_key:
+                            focus = _refocus(st.ranked, pinned_key, focus)
+                        # Rotate dossier across ranks so free-run doesn't stick on #1.
+                        # Skip advance on the very first free-run tick so rank #1 still
+                        # gets examined once before cycling.
+                        if FREE_RUN_ROTATE and st.ranked and last_idle_refresh > 0:
+                            focus = _advance_free_run_focus(st.ranked, focus)
+                            if st.ranked:
+                                focus = max(0, min(len(st.ranked) - 1, focus))
+                                pinned_key = (
+                                    st.ranked[focus][4].get("type"),
+                                    st.ranked[focus][4].get("key"),
+                                )
+                        _maybe_start_refresh(st, focus, live, batch)
+                        # Pull latest cache so paint shows RPC progress without fighting user
+                        # (user is idle here by definition).
+                        try:
+                            st.reload_balances()
+                        except Exception:
+                            pass
+                        if pinned_key:
+                            focus = _refocus(st.ranked, pinned_key, focus)
+                        try:
+                            if st.ranked:
+                                wv.ensure_derived(st.ranked[focus][4])
+                        except Exception:
+                            pass
+                        force_paint = True
+                        last_idle_refresh = time.time()
+
+                if pinned_key and st.ranked:
                     focus = _refocus(st.ranked, pinned_key, focus)
                 elif st.ranked:
                     focus = max(0, min(len(st.ranked) - 1, focus))
@@ -1800,28 +1978,27 @@ def interactive_loop(args):
 
                 idle_left_now = max(0.0, idle_sec - (time.time() - last_input))
 
-                # Update idle clock occasionally only — never fight the user.
-                # Full data reload happens solely when idle_for >= idle_sec.
-                need_countdown = (
-                    not did_nav
-                    and not force_paint
-                    and (time.time() - last_countdown_paint) >= 15.0
-                    and idle_left_now > 0
-                )
+                # FULL screen paint ONLY on: user nav / explicit r|e|a / free-run tick.
+                # NEVER while user is mid-session freezing (idle_left > 0 and no nav).
                 if force_paint or did_nav:
                     paint_state(
                         st, focus, live, idle_sec, batch,
                         tag="walletx", force=True,
                         idle_left=idle_left_now,
                     )
-                    last_countdown_paint = time.time()
-                elif need_countdown:
-                    paint_state(
-                        st, focus, live, idle_sec, batch,
-                        tag="walletx", force=True,
-                        idle_left=idle_left_now,
+                    last_countdown_tick = time.time()
+                elif (
+                    idle_left_now > 0
+                    and (time.time() - last_countdown_tick) >= COUNTDOWN_UPDATE_SEC
+                ):
+                    # Soft status only — no clear, no data reload, no RPC.
+                    mins = int(idle_left_now) // 60
+                    secs = int(idle_left_now) % 60
+                    _status_line_inplace(
+                        f"FROZEN · idle-refresh in {mins:02d}:{secs:02d} "
+                        f"(touch resets · free-run after {int(idle_sec)}s silence)"
                     )
-                    last_countdown_paint = time.time()
+                    last_countdown_tick = time.time()
 
             except KeyboardInterrupt:
                 print()
@@ -1856,13 +2033,13 @@ def interactive_loop(args):
 
 
 def watch_static(args):
-    """Non-interactive stable watch — refresh only on idle interval."""
+    """Non-interactive stable watch — free-run refresh only after idle interval."""
     focus = max(0, int(args.index))
     live = not args.cached
     batch = max(1, int(args.batch))
-    idle_sec = max(15.0, float(getattr(args, "idle_sec", DEFAULT_IDLE_REFRESH_SEC)))
+    idle_sec = max(30.0, float(getattr(args, "idle_sec", DEFAULT_IDLE_REFRESH_SEC)))
     global GATHER_SEC
-    GATHER_SEC = max(30.0, idle_sec)
+    GATHER_SEC = max(idle_sec, float(idle_sec))
 
     st = ForensicState(
         max_wallets=args.max_wallets,
@@ -1878,34 +2055,65 @@ def watch_static(args):
                 st.ranked[focus][4].get("type"),
                 st.ranked[focus][4].get("key"),
             )
+        # Boot paint once; then wait full idle_sec before free-run.
         next_refresh = time.time() + idle_sec
         paint_state(
             st, focus, live, idle_sec, batch, tag="watch",
             force=True, idle_left=idle_sec,
         )
-        _maybe_start_refresh(st, focus, live, batch)
+        # no RPC at boot
 
+        last_status = 0.0
+        free_run_ticks = 0
         while True:
             try:
                 now = time.time()
                 left = max(0.0, next_refresh - now)
-                time.sleep(min(1.0, left if left > 0 else 1.0))
+                time.sleep(min(1.0, left if left > 0 else IDLE_FREE_RUN_TICK))
                 now = time.time()
                 if now >= next_refresh:
+                    # free-run window
                     st.snapshot(force_gather=True)
                     if pinned_key:
                         focus = _refocus(st.ranked, pinned_key, focus)
+                    # Rotate dossier across ranks so watch doesn't stick on #1.
+                    if FREE_RUN_ROTATE and st.ranked and free_run_ticks > 0:
+                        focus = _advance_free_run_focus(st.ranked, focus)
+                        if st.ranked:
+                            focus = max(0, min(len(st.ranked) - 1, focus))
+                            pinned_key = (
+                                st.ranked[focus][4].get("type"),
+                                st.ranked[focus][4].get("key"),
+                            )
                     _maybe_start_refresh(st, focus, live, batch)
-                    next_refresh = time.time() + idle_sec
+                    try:
+                        st.reload_balances()
+                    except Exception:
+                        pass
+                    if pinned_key:
+                        focus = _refocus(st.ranked, pinned_key, focus)
+                    try:
+                        if st.ranked:
+                            wv.ensure_derived(st.ranked[focus][4])
+                    except Exception:
+                        pass
+                    free_run_ticks += 1
+                    # Keep free-running every IDLE_FREE_RUN_TICK until process ends
+                    # (no interactive touch in this mode).
+                    next_refresh = time.time() + IDLE_FREE_RUN_TICK
                     paint_state(
                         st, focus, live, idle_sec, batch, tag="watch",
-                        force=True, idle_left=idle_sec,
+                        force=True, idle_left=0.0,
                     )
-                else:
-                    paint_state(
-                        st, focus, live, idle_sec, batch, tag="watch",
-                        force=True, idle_left=max(0.0, next_refresh - time.time()),
+                elif (now - last_status) >= COUNTDOWN_UPDATE_SEC:
+                    left_now = max(0.0, next_refresh - time.time())
+                    mins = int(left_now) // 60
+                    secs = int(left_now) % 60
+                    _status_line_inplace(
+                        f"FROZEN · first free-run in {mins:02d}:{secs:02d} "
+                        f"(no keys mode · idle {int(idle_sec)}s)"
                     )
+                    last_status = now
             except KeyboardInterrupt:
                 raise
             except Exception as exc:
@@ -1928,6 +2136,7 @@ def watch_static(args):
         print()
     finally:
         _show_cursor()
+
 
 
 def main():
@@ -1958,7 +2167,7 @@ def main():
     ap.add_argument("--batch", type=int, default=DEFAULT_BATCH)
     ap.add_argument(
         "--idle-sec", type=float, default=DEFAULT_IDLE_REFRESH_SEC,
-        help="seconds of no input before auto-refresh (default 120)",
+        help="seconds of ZERO input before free-run refresh (default 120; touch freezes)",
     )
     ap.add_argument(
         "--refresh-sec", type=float, default=None,

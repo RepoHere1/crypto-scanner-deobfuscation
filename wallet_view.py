@@ -263,6 +263,279 @@ def format_balance(bal):
     return str(bal)
 
 
+# ── USD spot prices (CoinGecko, cached) ─────────────────────────────
+# Native-token balances are chain units. Show ~$USD next to each balance.
+
+PRICE_CACHE_FILE = os.path.join(HOME, ".token_prices.json")
+PRICE_TTL_SEC = 300.0
+_PRICE_LOCK = threading.Lock()
+_PRICE_MEM: dict = {"ts": 0.0, "prices": {}, "source": ""}
+
+CHAIN_CG_ID = {
+    "btc": "bitcoin",
+    "eth": "ethereum",
+    "ltc": "litecoin",
+    "doge": "dogecoin",
+    "matic": "matic-network",
+    "polygon": "matic-network",
+    "sol": "solana",
+    "xrp": "ripple",
+    "avax": "avalanche-2",
+    "bnb": "binancecoin",
+    "bsc": "binancecoin",
+    "arb": "ethereum",
+    "op": "ethereum",
+    "base": "ethereum",
+    "blast": "ethereum",
+    "scrl": "ethereum",
+    "linea": "ethereum",
+    "zksync": "ethereum",
+    "monad": "ethereum",
+    "ftm": "fantom",
+    "cro": "crypto-com-chain",
+    "gno": "gnosis",
+}
+
+CHAIN_TICKER = {
+    "btc": "BTC", "eth": "ETH", "ltc": "LTC", "doge": "DOGE",
+    "matic": "MATIC", "polygon": "MATIC", "sol": "SOL", "xrp": "XRP",
+    "avax": "AVAX", "bnb": "BNB", "bsc": "BNB", "arb": "ETH", "op": "ETH",
+    "base": "ETH", "blast": "ETH", "scrl": "ETH", "linea": "ETH",
+    "zksync": "ETH", "monad": "MON", "ftm": "FTM", "cro": "CRO", "gno": "GNO",
+}
+
+
+def _load_price_disk() -> dict:
+    try:
+        if not os.path.exists(PRICE_CACHE_FILE):
+            return {}
+        with open(PRICE_CACHE_FILE, "r", encoding="utf-8") as fh:
+            data = json.load(fh)
+        if isinstance(data, dict) and isinstance(data.get("prices"), dict):
+            return data
+    except Exception:
+        pass
+    return {}
+
+
+def _save_price_disk(prices: dict, source: str = "coingecko") -> None:
+    try:
+        payload = {
+            "ts": time.time(),
+            "source": source,
+            "prices": prices,
+            "checked_at": datetime.now(timezone.utc)
+            .isoformat()
+            .replace("+00:00", "Z"),
+        }
+        tmp = PRICE_CACHE_FILE + f".tmp.{os.getpid()}"
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump(payload, fh)
+        os.replace(tmp, PRICE_CACHE_FILE)
+    except Exception:
+        pass
+
+
+def _fetch_coingecko_usd(ids: list) -> dict:
+    """Return {cg_id: usd_float}. Empty on failure. Chunked to avoid CG drops."""
+    if not ids:
+        return {}
+    try:
+        import urllib.parse
+        import urllib.request
+
+        uniq = sorted(set(ids))
+        out = {}
+        # CoinGecko free tier occasionally omits ids from large batches —
+        # pull in small chunks so every native token gets a spot.
+        chunk_size = 6
+        for i in range(0, len(uniq), chunk_size):
+            chunk = uniq[i : i + chunk_size]
+            q = urllib.parse.urlencode(
+                {"ids": ",".join(chunk), "vs_currencies": "usd"}
+            )
+            url = f"https://api.coingecko.com/api/v3/simple/price?{q}"
+            req = urllib.request.Request(
+                url,
+                headers={
+                    "User-Agent": "walletx-forensic/1.0",
+                    "Accept": "application/json",
+                },
+            )
+            try:
+                with urllib.request.urlopen(req, timeout=8) as resp:
+                    raw = resp.read().decode("utf-8", errors="ignore")
+                data = json.loads(raw)
+            except Exception:
+                continue
+            for cid, body in (data or {}).items():
+                if isinstance(body, dict) and body.get("usd") is not None:
+                    try:
+                        out[cid] = float(body["usd"])
+                    except (TypeError, ValueError):
+                        pass
+        return out
+    except Exception:
+        return {}
+
+
+def _normalize_price_map(raw: dict) -> dict:
+    """Accept {chain: usd} or {cg_id: usd} → {chain: usd}."""
+    if not raw:
+        return {}
+    out = {}
+    cg_to_chains: dict = {}
+    for ch, cid in CHAIN_CG_ID.items():
+        cg_to_chains.setdefault(cid, []).append(ch)
+    for k, v in raw.items():
+        try:
+            px = float(v)
+        except (TypeError, ValueError):
+            continue
+        kl = str(k).lower()
+        if kl in CHAIN_CG_ID:
+            out[kl] = px
+        elif kl in cg_to_chains:
+            for ch in cg_to_chains[kl]:
+                out[ch] = px
+    return out
+
+
+def get_usd_prices(force: bool = False) -> dict:
+    """Map chain → USD spot. Cached in memory + ~/.token_prices.json (5 min)."""
+    now = time.time()
+    with _PRICE_LOCK:
+        if (
+            not force
+            and _PRICE_MEM.get("prices")
+            and (now - float(_PRICE_MEM.get("ts") or 0)) < PRICE_TTL_SEC
+        ):
+            return dict(_PRICE_MEM["prices"])
+
+        disk = _load_price_disk()
+        disk_ts = float(disk.get("ts") or 0)
+        disk_prices = disk.get("prices") or {}
+        if not force and disk_prices and (now - disk_ts) < PRICE_TTL_SEC:
+            by_chain = _normalize_price_map(disk_prices)
+            _PRICE_MEM["ts"] = disk_ts
+            _PRICE_MEM["prices"] = by_chain
+            _PRICE_MEM["source"] = disk.get("source") or "disk"
+            return dict(by_chain)
+
+        ids = sorted(set(CHAIN_CG_ID.values()))
+        fetched = _fetch_coingecko_usd(ids)
+        if fetched:
+            by_chain = {}
+            for chain, cid in CHAIN_CG_ID.items():
+                if cid in fetched:
+                    by_chain[chain] = float(fetched[cid])
+            _PRICE_MEM["ts"] = now
+            _PRICE_MEM["prices"] = by_chain
+            _PRICE_MEM["source"] = "coingecko"
+            _save_price_disk(fetched, source="coingecko")
+            return dict(by_chain)
+
+        if disk_prices:
+            by_chain = _normalize_price_map(disk_prices)
+            _PRICE_MEM["ts"] = now
+            _PRICE_MEM["prices"] = by_chain
+            _PRICE_MEM["source"] = "stale-disk"
+            return dict(by_chain)
+        if _PRICE_MEM.get("prices"):
+            return dict(_PRICE_MEM["prices"])
+        return {}
+
+
+def chain_usd_price(chain: str, prices=None):
+    if not chain:
+        return None
+    pxmap = prices if prices is not None else get_usd_prices()
+    c = str(chain).lower().strip()
+    v = pxmap.get(c)
+    if v is None:
+        return None
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return None
+
+
+def usd_value(chain: str, amount, prices=None):
+    if not isinstance(amount, (int, float)):
+        return None
+    if amount <= 1e-18:
+        return 0.0
+    px = chain_usd_price(chain, prices)
+    if px is None:
+        return None
+    return float(amount) * float(px)
+
+
+def format_usd(usd, width: int = 0, color: bool = True) -> str:
+    """Compact $ display: $1.23  $12.3k  $1.2M  or '—' if unknown."""
+    if usd is None:
+        s = "—"
+        if color and width:
+            return f"{DIM}{s:>{width}}{RESET}"
+        return f"{DIM}{s}{RESET}" if color else s
+    try:
+        u = float(usd)
+    except (TypeError, ValueError):
+        s = "—"
+        return f"{DIM}{s:>{width}}{RESET}" if color and width else s
+    if abs(u) < 1e-12:
+        s = "$0"
+    elif abs(u) < 0.01:
+        s = f"${u:.4f}"
+    elif abs(u) < 1000:
+        s = f"${u:,.2f}"
+    elif abs(u) < 1_000_000:
+        s = f"${u / 1000:,.2f}k"
+    else:
+        s = f"${u / 1_000_000:,.2f}M"
+    if color:
+        col = GREEN if u > 0 else DIM
+        return f"{col}{s:>{width}}{RESET}" if width else f"{col}{s}{RESET}"
+    return f"{s:>{width}}" if width else s
+
+
+def format_balance_with_usd(chain: str, bal, prices=None) -> str:
+    """Token amount + $USD, e.g. '0.42344431  $1,482.05'."""
+    base = format_balance(bal)
+    if not isinstance(bal, (int, float)) or bal <= 1e-12:
+        return base
+    u = usd_value(chain, bal, prices)
+    if u is None:
+        return f"{base}  {DIM}$?{RESET}"
+    return f"{base}  {format_usd(u, color=True)}"
+
+
+def wallet_usd_total(w, balances, prices=None):
+    """Sum USD across a wallet's derived addresses. None if no prices apply."""
+    pxmap = prices if prices is not None else get_usd_prices()
+    if not pxmap:
+        return None
+    total = 0.0
+    any_priced = False
+    addrs = w.get("addresses") or {}
+    seen = set()
+    for chain, addr in addrs:
+        nk = _norm_addr(chain, addr)
+        if nk in seen:
+            continue
+        seen.add(nk)
+        if _is_noise_address(chain, addr):
+            continue
+        b = bal_get(balances, chain, addr)
+        if not isinstance(b, (int, float)) or b <= 1e-12:
+            continue
+        u = usd_value(chain, b, pxmap)
+        if u is not None:
+            total += u
+            any_priced = True
+    return total if any_priced else None
+
+
 def is_junk_hex(hv: str) -> bool:
     if not hv:
         return True
@@ -731,6 +1004,15 @@ def paint(
         and bal_get(balances, k[0], k[1]) <= 1e-12
     )
 
+    prices = get_usd_prices()
+    total_usd = 0.0
+    any_usd = False
+    for k in nonzero_keys:
+        u = usd_value(k[0], bal_get(balances, k[0], k[1]), prices)
+        if u is not None:
+            total_usd += u
+            any_usd = True
+
     newest = None
     for k in wallet_keys:
         ca = (meta_get(meta, k[0], k[1]) or {}).get("checked_at")
@@ -752,6 +1034,11 @@ def paint(
         f"{len(nonzero_keys):>4} / {zeroed:<5} / {pending}"
     )
     print(f"  Total nonzero (truth):       {GREEN}{total:,.8f}{RESET}")
+    if any_usd:
+        print(
+            f"  Portfolio USD (approx):      {format_usd(total_usd, color=True)}"
+            f"  {DIM}(CoinGecko spot){RESET}"
+        )
     print(
         f"  Updated:                     "
         f"{datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')}"
@@ -796,12 +1083,18 @@ def paint(
     print(f"  {'-'*4}  {'-'*5}  {'-'*8}  {'-'*3}  {'-'*52}")
     for i, w in enumerate(page_wallets, start=start + 1):
         sc, pend, _ = wallet_score(w, balances)
-        nz_s = f"{GREEN}{sc:.6g}{RESET}" if sc > 0 else f"{DIM}0{RESET}"
+        usd = wallet_usd_total(w, balances, prices)
+        if sc > 0 and usd is not None:
+            nz_s = f"{GREEN}{sc:.6g}{RESET} {format_usd(usd, color=True)}"
+        elif sc > 0:
+            nz_s = f"{GREEN}{sc:.6g}{RESET}"
+        else:
+            nz_s = f"{DIM}0{RESET}"
         src = w.get("source") or ""
         if len(src) > 28:
             src = "…" + src[-27:]
         print(
-            f"  {i:>4}  {w.get('type', '?'):<5}  {nz_s:>8}  {pend:>3}  "
+            f"  {i:>4}  {w.get('type', '?'):<5}  {nz_s}  {pend:>3}  "
             f"{_short_key(w.get('key') or '', 40)}  {DIM}{src}{RESET}"
         )
 
@@ -840,10 +1133,12 @@ def paint(
     for idx, w in enumerate(page_wallets, start=start + 1):
         ensure_derived(w)
         sc, pend, chk = wallet_score(w, balances)
+        w_usd = wallet_usd_total(w, balances, prices)
+        usd_bit = f"  usd≈{format_usd(w_usd, color=True)}" if w_usd is not None else ""
         print("-" * 78)
         print(
             f"  [{idx}/{n_wallets}] TYPE={w.get('type')}  "
-            f"bal_sum={sc:.8f}  unresolved={pend}  zero={chk}"
+            f"bal_sum={sc:.8f}{usd_bit}  unresolved={pend}  zero={chk}"
         )
         # FULL key — never truncate (wrap only)
         _k = w.get("key") or ""
@@ -883,8 +1178,8 @@ def paint(
 
         addrs_sorted = sorted(addrs, key=addr_rank)
         show_list = addrs_sorted[:MAX_ADDRS_SHOW]
-        print(f"  {'CHAIN':>8}  {'ADDRESS':<46}  {'BALANCE':>14}")
-        print(f"  {'-'*8}  {'-'*46}  {'-'*14}")
+        print(f"  {'CHAIN':>8}  {'ADDRESS':<46}  {'BALANCE':>14}  {'USD':>10}")
+        print(f"  {'-'*8}  {'-'*46}  {'-'*14}  {'-'*10}")
         for (chain, addr), _ in show_list:
             bal = bal_get(balances, chain, addr)
             mark = (
@@ -892,15 +1187,20 @@ def paint(
                 if isinstance(bal, (int, float)) and bal > 1e-12
                 else "    "
             )
+            usd_s = ""
+            if isinstance(bal, (int, float)) and bal > 1e-12:
+                usd_s = format_usd(usd_value(chain, bal, prices), width=10, color=True)
+            else:
+                usd_s = f"{DIM}{'—':>10}{RESET}"
             # FULL address — never truncate
             if len(addr) <= 46:
                 print(
                     f"{mark}{chain.upper():>8}  "
-                    f"{addr:<46}  {format_balance(bal):>14}"
+                    f"{addr:<46}  {format_balance(bal):>14}  {usd_s}"
                 )
             else:
                 print(f"{mark}{chain.upper():>8}  {addr}")
-                print(f"{'':>10}  {'':<46}  {format_balance(bal):>14}")
+                print(f"{'':>10}  {'':<46}  {format_balance(bal):>14}  {usd_s}")
         rest = len(addrs_sorted) - len(show_list)
         if rest > 0:
             print(
