@@ -1329,10 +1329,10 @@ def _paint_forensic_inner(
         print(f"  {RED}analysis paint: {exc}{RESET}")
 
     print(
-        f"  {BOLD}{'CHAIN':>8}  {'ADDRESS':<42}  {'BALANCE':>16}  "
-        f"{'USD':>10}  {'AGE':>5}  FLAG{RESET}"
+        f"  {BOLD}{'CHAIN':>6}  {'BAL':>12}  {'USD':>9}  "
+        f"{'AGE':>4}  FLAG  ADDRESS{RESET}"
     )
-    print(f"  {'-'*8}  {'-'*42}  {'-'*16}  {'-'*10}  {'-'*5}  {'-'*12}")
+    print(f"  {'-'*6}  {'-'*12}  {'-'*9}  {'-'*4}  {'-'*6}  {'-'*40}")
 
     show_rows = rows if not DETAIL_ADDRS else rows[:DETAIL_ADDRS]
     for r in show_rows:
@@ -1344,37 +1344,32 @@ def _paint_forensic_inner(
         live = "LIVE" if m.get("live") else ("SET" if m.get("settled") else "")
         if r["noise"]:
             flag = f"{DIM}noise{RESET}"
-            bal_s = f"{DIM}{'0':>16}{RESET}"
-            usd_s = f"{DIM}{'—':>10}{RESET}"
-            mark = "  "
+            bal_s = f"{DIM}{'0':>12}{RESET}"
+            usd_s = f"{DIM}{'—':>9}{RESET}"
+            mark = " "
         elif isinstance(bal, (int, float)) and bal > 1e-12:
-            flag = f"{GREEN}*** FUNDED{RESET}"
-            bal_s = f"{GREEN}{bal:>16.10f}{RESET}"
-            usd_s = wv.format_usd(wv.usd_value(chain, bal, prices), width=10, color=True)
-            mark = f"{GREEN}▶{RESET} "
+            # Short flag so phone terminals don't clip "FUNDED" → "FUN"
+            flag = f"{GREEN}FUNDED{RESET}"
+            bal_s = f"{GREEN}{bal:>12.8f}{RESET}"
+            usd_s = wv.format_usd(wv.usd_value(chain, bal, prices), width=9, color=True)
+            mark = f"{GREEN}▶{RESET}"
         elif bal is None:
-            flag = f"{YELLOW}pending{RESET}"
-            bal_s = f"{YELLOW}{'…':>16}{RESET}"
-            usd_s = f"{DIM}{'—':>10}{RESET}"
-            mark = "  "
+            flag = f"{YELLOW}pend{RESET}"
+            bal_s = f"{YELLOW}{'…':>12}{RESET}"
+            usd_s = f"{DIM}{'—':>9}{RESET}"
+            mark = " "
         else:
             flag = f"{DIM}zero{RESET}"
-            bal_s = f"{DIM}{'0':>16}{RESET}"
-            usd_s = f"{DIM}{'—':>10}{RESET}"
-            mark = "  "
+            bal_s = f"{DIM}{'0':>12}{RESET}"
+            usd_s = f"{DIM}{'—':>9}{RESET}"
+            mark = " "
         live_s = f" {DIM}{live}{RESET}" if live else ""
-        ticker = wv.CHAIN_TICKER.get(str(chain).lower(), str(chain).upper()[:4])
-        if len(addr) <= 42:
-            print(
-                f"  {mark}{chain.upper():>6}  {addr:<42}  {bal_s}  "
-                f"{usd_s}  {age:>5}  {flag}{live_s}"
-            )
-        else:
-            print(f"  {mark}{chain.upper():>6}  {addr}")
-            print(
-                f"          {ticker:<6}  {bal_s}  {usd_s}  "
-                f"{age:>5}  {flag}{live_s}"
-            )
+        # Flag + amounts first (always visible), full address on same or next line
+        print(
+            f"  {mark}{chain.upper():>5}  {bal_s}  {usd_s}  "
+            f"{age:>4}  {flag}{live_s}"
+        )
+        print(f"         {addr}")
 
     if DETAIL_ADDRS and len(rows) > DETAIL_ADDRS:
         print(f"  {DIM}  … {len(rows) - DETAIL_ADDRS} more (DETAIL_ADDRS=0 shows all){RESET}")
