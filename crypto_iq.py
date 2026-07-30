@@ -223,6 +223,92 @@ def validate_hex_privkey(hex_key: str, context: str = "") -> Tuple[bool, str, fl
     return True, "ok", score
 
 
+# Public burn / null / hardhat-anvil / pattern addresses that often hold
+# real on-chain balances but are never "findable" secrets. Dashboard truth
+# and hit lists must exclude these so totals stay honest.
+_NOISE_EVM_ADDRS = {
+    # null / burn
+    "0x0000000000000000000000000000000000000000",
+    "0x000000000000000000000000000000000000dead",
+    "0x0000000000000000000000000000000000000001",
+    "0xffffffffffffffffffffffffffffffffffffffff",
+    # sequential / vanity test patterns
+    "0x1234567890123456789012345678901234567890",
+    "0x1111111111111111111111111111111111111111",
+    "0x2222222222222222222222222222222222222222",
+    "0x3333333333333333333333333333333333333333",
+    "0x4444444444444444444444444444444444444444",
+    "0x5555555555555555555555555555555555555555",
+    "0x6666666666666666666666666666666666666666",
+    "0x7777777777777777777777777777777777777777",
+    "0x8888888888888888888888888888888888888888",
+    "0x9999999999999999999999999999999999999999",
+    "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "0xcccccccccccccccccccccccccccccccccccccccc",
+    "0xdddddddddddddddddddddddddddddddddddddddd",
+    "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+    "0xdeaddeaddeaddeaddeaddeaddeaddeaddeaddead",
+    "0xdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
+    # hardhat / anvil default accounts 0-9
+    "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266",
+    "0x70997970c51812dc3a010c7d01b50e0d17dc79c8",
+    "0x3c44cdddb6a900fa2b585dd299e03d12fa4293bc",
+    "0x90f79bf6eb2c4f870365e785982e1f101e93b906",
+    "0x15d34aaf54267db7d7c367839aaf71a00a2c6a65",
+    "0x9965507d1a55bcc2695c58ba16fb37d819b0a4dc",
+    "0x976ea74026e726554db657fa54763abd0c3a0aa9",
+    "0x14dc79964da2c08b23698b3d3cc7ca32193d9955",
+    "0x23618e81e3f5cdf7f54c3d65f7fbc0abf5b21e8f",
+    "0xa0ee7a142d267c1f36714e4a8f75612f20a79720",
+    # privkey = 1 (common unit-test vector)
+    "0x7e5f4552091a69125d5dfcb7b8c2659029395bdf",
+}
+
+_NOISE_BTC_ADDRS = {
+    "1BgGZ9tcN4rm9KBzDn7KprQz87SZ26SAMH",  # privkey=1 P2PKH
+    "1EHNa6Q4Jz2uvNExL497mE43ikXhwF6kZm",
+}
+
+_EVM_LIKE = {
+    "eth", "matic", "avax", "bnb", "base", "arb", "op", "monad",
+    "ftm", "cro", "gno", "scrl", "linea", "blast", "zksync",
+    "polygon", "bsc", "arbitrum", "optimism",
+}
+
+
+def is_noise_address(chain: str, address: str) -> bool:
+    """True if address is a known burn/null/demo/test wallet — not real loot."""
+    if not address or not isinstance(address, str):
+        return True
+    chain_l = (chain or "").lower().strip()
+    addr = address.strip()
+    if not addr:
+        return True
+
+    # EVM-shaped addresses (0x + 40 hex), any EVM-like chain or bare 0x
+    al = addr.lower()
+    if al.startswith("0x") and len(al) == 42 and re.fullmatch(r"0x[0-9a-f]{40}", al):
+        if al in _NOISE_EVM_ADDRS:
+            return True
+        body = al[2:]
+        # all-same nibble / near-null patterns
+        if len(set(body)) == 1:
+            return True
+        if body == "0" * 40 or body == "f" * 40:
+            return True
+        # leading 38 zero nibbles (null-ish contracts)
+        if body[:38] == "0" * 38:
+            return True
+        return False
+
+    if chain_l in ("btc", "bch", "ltc") or (not al.startswith("0x")):
+        if addr in _NOISE_BTC_ADDRS:
+            return True
+
+    return False
+
+
 def filter_hex_keys(candidates: Sequence[str], context: str = "") -> List[Dict[str, Any]]:
     """Filter + rank hex key candidates. Drops invalid; sorts best first."""
     out: List[Dict[str, Any]] = []

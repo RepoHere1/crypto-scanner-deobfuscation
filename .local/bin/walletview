@@ -1,0 +1,2 @@
+#!/data/data/com.termux/files/usr/bin/bash
+exec python3 "$HOME/wallet_view.py" --watch --page-size 8 --page-sec 8 "$@"

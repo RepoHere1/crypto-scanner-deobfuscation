@@ -1,0 +1,2012 @@
+#!/usr/bin/env python3
+"""
+WalletX — Forensic Wallet Examiner (LIVE production, no mocks, no truncation).
+
+Stability / UX:
+  - Does NOT auto-flip pages while you navigate
+  - Auto-refresh ONLY after IDLE_REFRESH_SEC of no input (default 120s)
+  - Touch/key activity resets the idle timer — scroll freely without repaint fights
+  - Full private keys / seeds / WIFs / sources always printed complete (wrapped, never ellipsized)
+  - Highest balance always on top; focus pinned across soft re-ranks
+  - Live RPC is background-only; UI never blocks on it
+  - All paint exceptions caught and shown on-screen
+
+Forensics (live, real data only):
+  - secp256k1 range + entropy + quality scoring via crypto_iq
+  - Full address derivation (BTC/LTC/DOGE + all EVM + SOL when available)
+  - Reverse-link funded ADDR hits back to HEX/WIF/SEED from scanner memory
+  - Compressed pubkey, keccak fingerprint, WIF export, BIP39 word-count check
+  - Export focused dossier to ~/forensic_exports/ (full JSON, no truncation)
+
+Usage:
+    walletx                         # funded-only forensic (stable, idle-refresh 120s)
+    walletforensic                  # all wallets, interactive
+    walletforensic --once --cached  # one snapshot
+    walletforensic --index 2        # jump to rank #3
+    walletforensic --idle-sec 120   # custom idle before auto-refresh
+"""
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+import os
+import select
+import sys
+import termios
+import time
+import traceback
+import tty
+from datetime import datetime, timezone
+from typing import Any, Dict, List, Optional, Tuple
+
+HOME = os.path.expanduser("~")
+sys.path.insert(0, HOME)
+
+import logging
+logging.getLogger().setLevel(logging.WARNING)
+for _name in ("crypto_scanner", "urllib3", "requests"):
+    logging.getLogger(_name).setLevel(logging.WARNING)
+
+import wallet_view as wv  # noqa: E402
+
+try:
+    import crypto_iq as _iq  # noqa: E402
+except Exception:
+    _iq = None
+
+try:
+    import crypto_scanner as _cs  # noqa: E402
+except Exception:
+    _cs = None
+
+try:
+    import base58 as _base58  # noqa: E402
+except Exception:
+    _base58 = None
+
+try:
+    import ecdsa as _ecdsa  # noqa: E402
+except Exception:
+    _ecdsa = None
+
+try:
+    from mnemonic import Mnemonic as _Mnemonic  # noqa: E402
+except Exception:
+    _Mnemonic = None
+
+BOLD = wv.BOLD
+DIM = wv.DIM
+GREEN = wv.GREEN
+YELLOW = wv.YELLOW
+CYAN = wv.CYAN
+RESET = wv.RESET
+RED = "\033[91m"
+MAGENTA = "\033[95m"
+WHITE = "\033[97m"
+BLUE = "\033[94m"
+
+# Idle-only refresh: if user touches screen/keys, timer resets.
+# Only after this many seconds of ZERO input do we gather/repaint/RPC.
+DEFAULT_IDLE_REFRESH_SEC = 120.0
+DEFAULT_TICK_SEC = 2.0          # input poll cadence (does NOT repaint by itself)
+DEFAULT_BATCH = 24
+LEADERBOARD_N = 14
+DETAIL_ADDRS = 0                # 0 = show ALL derived addresses (no truncation)
+GATHER_SEC = 120                # full memory re-scan only on idle refresh
+PAINT_MIN_SEC = 0.0             # paint on demand (nav / idle); never spin
+MEMORY_DEEP_BYTES = 6_000_000  # deeper reverse-link scan for funded addrs
+EXPORT_DIR = os.path.join(HOME, "forensic_exports")
+WRAP_WIDTH = 70                 # visual wrap only — full content always printed
+
+# ── small helpers ──────────────────────────────────────────────────
+
+def _age_str(ts) -> str:
+    try:
+        t = float(ts or 0)
+    except (TypeError, ValueError):
+        return "?"
+    if t <= 0:
+        return "never"
+    age = max(0.0, time.time() - t)
+    if age < 60:
+        return f"{int(age)}s"
+    if age < 3600:
+        return f"{int(age // 60)}m"
+    if age < 86400:
+        return f"{int(age // 3600)}h"
+    return f"{int(age // 86400)}d"
+
+
+def _bar(frac: float, width: int = 16) -> str:
+    frac = max(0.0, min(1.0, float(frac)))
+    filled = int(round(frac * width))
+    return f"{GREEN}{'█' * filled}{DIM}{'░' * (width - filled)}{RESET}"
+
+
+def _hide_cursor():
+    try:
+        sys.stdout.write("\033[?25l")
+        sys.stdout.flush()
+    except Exception:
+        pass
+
+
+def _show_cursor():
+    try:
+        sys.stdout.write("\033[?25h")
+        sys.stdout.flush()
+    except Exception:
+        pass
+
+
+def _safe_clear():
+    try:
+        sys.stdout.write("\033[H\033[J")
+        sys.stdout.flush()
+    except Exception:
+        pass
+
+
+def _print_full(label: str, value: str, indent: str = "  ", color: str = ""):
+    """Print label + FULL value, wrapped for terminal width. NEVER truncates."""
+    val = "" if value is None else str(value)
+    prefix = f"{indent}{BOLD}{label}{RESET} "
+    pad = " " * (len(indent) + len(label) + 1)
+    if not val:
+        print(f"{prefix}{DIM}(empty){RESET}")
+        return
+    first_budget = max(8, WRAP_WIDTH)
+    if len(val) <= first_budget:
+        print(f"{prefix}{color}{val}{RESET if color else ''}")
+        return
+    print(f"{prefix}{color}{val[:first_budget]}{RESET if color else ''}")
+    rest = val[first_budget:]
+    while rest:
+        chunk = rest[: WRAP_WIDTH + 8]
+        rest = rest[WRAP_WIDTH + 8 :]
+        print(f"{pad}{color}{chunk}{RESET if color else ''}")
+
+
+def _leaderboard_label(key: str, max_vis: int = 40) -> str:
+    """Leaderboard row only — visual fit. Full key always in dossier."""
+    k = key or ""
+    if len(k) <= max_vis:
+        return k
+    keep = max(8, (max_vis - 1) // 2)
+    return k[:keep] + "…" + k[-keep:]
+
+
+# ── forensic crypto analysis (LIVE) ────────────────────────────────
+
+def _hex_norm(h: str) -> str:
+    if not h:
+        return ""
+    return str(h).strip().lower().removeprefix("0x")
+
+
+def _priv_bytes_from_hex(h: str) -> Optional[bytes]:
+    hx = _hex_norm(h)
+    if len(hx) != 64:
+        return None
+    try:
+        b = bytes.fromhex(hx)
+    except ValueError:
+        return None
+    if len(b) != 32:
+        return None
+    return b
+
+
+def _compressed_pub_hex(priv: bytes) -> Optional[str]:
+    if _ecdsa is None:
+        return None
+    try:
+        sk = _ecdsa.SigningKey.from_string(priv, curve=_ecdsa.SECP256k1)
+        vk = sk.get_verifying_key()
+        raw = vk.to_string()
+        x, y = raw[:32], raw[32:]
+        prefix = b"\x02" if int.from_bytes(y, "big") % 2 == 0 else b"\x03"
+        return (prefix + x).hex()
+    except Exception:
+        return None
+
+
+def _uncompressed_pub_hex(priv: bytes) -> Optional[str]:
+    if _ecdsa is None:
+        return None
+    try:
+        sk = _ecdsa.SigningKey.from_string(priv, curve=_ecdsa.SECP256k1)
+        vk = sk.get_verifying_key()
+        return "04" + vk.to_string().hex()
+    except Exception:
+        return None
+
+
+def _wif_from_priv(priv: bytes, compressed: bool = True, mainnet: bool = True) -> Optional[str]:
+    if _base58 is None:
+        return None
+    try:
+        ver = b"\x80" if mainnet else b"\xef"
+        payload = ver + priv + (b"\x01" if compressed else b"")
+        return _base58.b58encode_check(payload).decode()
+    except Exception:
+        return None
+
+
+def _keccak_hex(data: bytes) -> Optional[str]:
+    try:
+        if _iq is not None:
+            return _iq.keccak_256(data).hex()
+    except Exception:
+        pass
+    try:
+        if _cs is not None and hasattr(_cs, "keccak_256"):
+            return _cs.keccak_256(data).hex()
+    except Exception:
+        pass
+    try:
+        from Crypto.Hash import keccak  # type: ignore
+        h = keccak.new(digest_bits=256)
+        h.update(data)
+        return h.digest().hex()
+    except Exception:
+        return None
+
+
+def analyze_hex_key(hex_key: str) -> Dict[str, Any]:
+    """Full LIVE forensic dossier for a 64-char hex private key. No mocks."""
+    out: Dict[str, Any] = {
+        "kind": "HEX",
+        "raw": hex_key or "",
+        "hex": _hex_norm(hex_key),
+        "valid": False,
+        "reason": "",
+        "quality": 0.0,
+        "entropy": 0.0,
+        "secp_ok": False,
+        "banned_test": False,
+        "n_int": None,
+        "pub_compressed": None,
+        "pub_uncompressed": None,
+        "wif_compressed": None,
+        "wif_uncompressed": None,
+        "eth_address": None,
+        "addresses": {},
+        "keccak_priv_fp": None,
+        "sha256_priv_fp": None,
+        "backends": {},
+    }
+    hx = out["hex"]
+    if not hx:
+        out["reason"] = "empty"
+        return out
+    if len(hx) != 64:
+        out["reason"] = f"bad_len:{len(hx)}"
+        return out
+
+    if _iq is not None:
+        try:
+            out["backends"] = _iq.backend_info()
+            out["entropy"] = float(_iq.shannon_entropy(hx))
+            ok, reason, score = _iq.validate_hex_privkey(hx)
+            out["valid"] = bool(ok)
+            out["reason"] = str(reason)
+            out["quality"] = float(score)
+            if reason == "banned_test_key":
+                out["banned_test"] = True
+        except Exception as exc:
+            out["reason"] = f"iq_err:{exc}"
+    else:
+        out["reason"] = "crypto_iq_unavailable"
+
+    priv = _priv_bytes_from_hex(hx)
+    if priv is None:
+        out["reason"] = out["reason"] or "parse_fail"
+        return out
+
+    n = int.from_bytes(priv, "big")
+    out["n_int"] = str(n)
+    if _iq is not None:
+        try:
+            sok, sreason = _iq.validate_secp256k1_priv(priv)
+            out["secp_ok"] = bool(sok)
+            if not sok and not out["reason"]:
+                out["reason"] = sreason
+        except Exception:
+            pass
+    else:
+        N = 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141
+        out["secp_ok"] = 0 < n < N
+
+    out["sha256_priv_fp"] = hashlib.sha256(priv).hexdigest()
+    out["keccak_priv_fp"] = _keccak_hex(priv)
+    out["pub_compressed"] = _compressed_pub_hex(priv)
+    out["pub_uncompressed"] = _uncompressed_pub_hex(priv)
+    out["wif_compressed"] = _wif_from_priv(priv, compressed=True)
+    out["wif_uncompressed"] = _wif_from_priv(priv, compressed=False)
+
+    addrs: Dict[str, str] = {}
+    if _cs is not None and out["secp_ok"]:
+        try:
+            raw = _cs.priv_to_addresses(priv) or {}
+            addrs.update({str(k).lower(): str(v) for k, v in raw.items() if v})
+        except Exception:
+            pass
+        # If ETH missing (banned test key), still derive for forensic display
+        if "eth" not in addrs and _ecdsa is not None:
+            try:
+                sk = _ecdsa.SigningKey.from_string(priv, curve=_ecdsa.SECP256k1)
+                pub = sk.get_verifying_key().to_string()
+                kh = _keccak_hex(pub)
+                if kh:
+                    body = kh[-40:]
+                    hashed = _keccak_hex(body.encode("ascii"))
+                    if hashed:
+                        eth = "0x" + "".join(
+                            c.upper() if hashed[i] in "89abcdef" else c.lower()
+                            for i, c in enumerate(body.lower())
+                        )
+                    else:
+                        eth = "0x" + body
+                    addrs["eth"] = eth
+                    for c in ("matic", "avax", "bnb", "base", "arb", "op", "monad"):
+                        addrs.setdefault(c, eth)
+            except Exception:
+                pass
+    out["addresses"] = addrs
+    out["eth_address"] = addrs.get("eth")
+    if out["secp_ok"] and not out["banned_test"]:
+        out["valid"] = out["valid"] or bool(addrs)
+    return out
+
+
+def analyze_wif(wif: str) -> Dict[str, Any]:
+    out: Dict[str, Any] = {
+        "kind": "WIF",
+        "raw": wif or "",
+        "valid": False,
+        "reason": "",
+        "hex": None,
+        "compressed": None,
+        "mainnet": None,
+        "nested": None,
+    }
+    if not wif:
+        out["reason"] = "empty"
+        return out
+    if _iq is not None:
+        try:
+            ok, reason = _iq.validate_wif(wif)
+            out["valid"] = bool(ok)
+            out["reason"] = str(reason)
+        except Exception as exc:
+            out["reason"] = f"iq_err:{exc}"
+    priv = None
+    if _cs is not None:
+        try:
+            priv = _cs.wif_to_priv_bytes(wif)
+        except Exception:
+            priv = None
+    if priv is None and _base58 is not None:
+        try:
+            decoded = _base58.b58decode_check(wif)
+            if len(decoded) in (33, 34):
+                out["mainnet"] = decoded[0] == 0x80
+                out["compressed"] = len(decoded) == 34 and decoded[-1] == 0x01
+                priv = decoded[1:33]
+        except Exception as exc:
+            out["reason"] = out["reason"] or f"b58:{exc}"
+    if priv is None:
+        return out
+    out["hex"] = priv.hex()
+    out["nested"] = analyze_hex_key(priv.hex())
+    out["valid"] = bool(out["nested"].get("secp_ok"))
+    if out["valid"] and not out["reason"]:
+        out["reason"] = "ok"
+    return out
+
+
+def analyze_seed(seed: str) -> Dict[str, Any]:
+    out: Dict[str, Any] = {
+        "kind": "SEED",
+        "raw": seed or "",
+        "valid": False,
+        "reason": "",
+        "word_count": 0,
+        "words": [],
+        "language": None,
+        "nested_hex": None,
+        "addresses": {},
+    }
+    s = (seed or "").strip()
+    if not s:
+        out["reason"] = "empty"
+        return out
+    words = s.split()
+    out["words"] = list(words)
+    out["word_count"] = len(words)
+    if _Mnemonic is not None:
+        try:
+            m = _Mnemonic("english")
+            out["language"] = "english"
+            ok = bool(m.check(s))
+            out["valid"] = ok
+            out["reason"] = "ok" if ok else "bip39_checksum_fail"
+            if ok:
+                seed_bytes = m.to_seed(s)
+                master = seed_bytes[:32]
+                out["nested_hex"] = analyze_hex_key(master.hex())
+                if _cs is not None:
+                    try:
+                        out["addresses"] = _cs.seed_to_addresses(s) or {}
+                    except Exception:
+                        out["addresses"] = (out["nested_hex"] or {}).get("addresses") or {}
+        except Exception as exc:
+            out["reason"] = f"mnemonic_err:{exc}"
+    else:
+        out["reason"] = "mnemonic_lib_unavailable"
+        if out["word_count"] in (12, 15, 18, 21, 24):
+            out["reason"] = "word_count_ok_lib_missing"
+    return out
+
+
+def forensic_bundle_for_wallet(w: dict) -> Dict[str, Any]:
+    """Build complete forensic analysis for a wallet dict (LIVE)."""
+    typ = (w.get("type") or "?").upper()
+    key = w.get("key") or ""
+    bundle: Dict[str, Any] = {
+        "type": typ,
+        "key_full": key,
+        "source_full": w.get("source") or "",
+        "timestamp": w.get("timestamp") or "",
+        "hit_boost": float(w.get("_hit_boost") or 0.0),
+        "linked_hex_full": w.get("_linked_hex") or "",
+        "linked_wif_full": w.get("_linked_wif") or "",
+        "linked_seed_full": w.get("_linked_seed") or "",
+        "analysis": None,
+        "linked_analysis": [],
+        "analyzed_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+    }
+    if typ == "HEX":
+        bundle["analysis"] = analyze_hex_key(key)
+    elif typ == "WIF":
+        bundle["analysis"] = analyze_wif(key)
+    elif typ == "SEED":
+        bundle["analysis"] = analyze_seed(key)
+    elif typ == "ADDR":
+        bundle["analysis"] = {
+            "kind": "ADDR",
+            "raw": key,
+            "chains": list(w.get("_chains") or []),
+            "note": "address-only hit; linked material below if reverse-matched",
+        }
+        if w.get("_linked_hex"):
+            bundle["linked_analysis"].append(analyze_hex_key(w["_linked_hex"]))
+        if w.get("_linked_wif"):
+            bundle["linked_analysis"].append(analyze_wif(w["_linked_wif"]))
+        if w.get("_linked_seed"):
+            bundle["linked_analysis"].append(analyze_seed(w["_linked_seed"]))
+    if typ != "ADDR":
+        if w.get("_linked_hex") and w.get("_linked_hex") != key:
+            bundle["linked_analysis"].append(analyze_hex_key(w["_linked_hex"]))
+        if w.get("_linked_wif") and w.get("_linked_wif") != key:
+            bundle["linked_analysis"].append(analyze_wif(w["_linked_wif"]))
+        if w.get("_linked_seed") and w.get("_linked_seed") != key:
+            bundle["linked_analysis"].append(analyze_seed(w["_linked_seed"]))
+    return bundle
+
+
+def export_dossier(w: dict, balances: dict, meta: dict, rank: int, total_bal: float) -> str:
+    """Write FULL forensic JSON (no truncation) to ~/forensic_exports/."""
+    os.makedirs(EXPORT_DIR, exist_ok=True)
+    rows = wallet_addr_rows(w, balances, meta)
+    bundle = forensic_bundle_for_wallet(w)
+    addr_table = []
+    for r in rows:
+        m = r.get("meta") or {}
+        addr_table.append({
+            "chain": r["chain"],
+            "address": r["address"],
+            "balance": r["balance"],
+            "noise": r["noise"],
+            "from": r.get("from"),
+            "ts": m.get("ts"),
+            "live": m.get("live"),
+            "settled": m.get("settled"),
+            "checked_at": m.get("checked_at"),
+            "error": m.get("error"),
+        })
+    payload = {
+        "exported_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+        "rank": rank,
+        "total_balance": total_bal,
+        "wallet_type": w.get("type"),
+        "key_full": w.get("key"),
+        "source_full": w.get("source"),
+        "timestamp": w.get("timestamp"),
+        "hit_boost": w.get("_hit_boost"),
+        "linked_hex_full": w.get("_linked_hex"),
+        "linked_wif_full": w.get("_linked_wif"),
+        "linked_seed_full": w.get("_linked_seed"),
+        "chains": w.get("_chains"),
+        "addresses": addr_table,
+        "forensic": bundle,
+        "live_production": True,
+        "mock": False,
+    }
+    ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    typ = (w.get("type") or "x").lower()
+    safe = ""
+    rawk = str(w.get("key") or "")[:24]
+    for ch in rawk:
+        safe += ch if ch.isalnum() else "_"
+    path = os.path.join(EXPORT_DIR, f"dossier_r{rank}_{typ}_{safe}_{ts}.json")
+    with open(path, "w", encoding="utf-8") as fh:
+        json.dump(payload, fh, indent=2, ensure_ascii=False, default=str)
+    return path
+
+
+# ── wallet shaping ─────────────────────────────────────────────────
+
+def consolidate_addr_wallets(wallets):
+    """Merge ADDR hits for the same address across chains into one dossier."""
+    out = []
+    by_addr = {}
+    for w in wallets:
+        try:
+            if (w.get("type") or "") != "ADDR":
+                out.append(w)
+                continue
+            key = w.get("key") or ""
+            if ":" in key:
+                chain, addr = key.split(":", 1)
+            else:
+                chain, addr = "?", key
+            chain = (chain or "?").lower()
+            addr = addr or ""
+            body = addr.lower() if addr.startswith("0x") else addr
+            if not body:
+                out.append(w)
+                continue
+            if body not in by_addr:
+                nw = {
+                    "type": "ADDR",
+                    "key": addr if addr.startswith("0x") else f"{chain}:{addr}",
+                    "addresses": {},
+                    "timestamp": w.get("timestamp") or "",
+                    "source": w.get("source") or "",
+                    "_derived": True,
+                    "_hit_boost": float(w.get("_hit_boost") or 0.0),
+                    "_chains": set(),
+                }
+                by_addr[body] = nw
+                out.append(nw)
+            nw = by_addr[body]
+            for (c, a), info in (w.get("addresses") or {}).items():
+                nw["addresses"][(c, a)] = info
+                nw["_chains"].add(c)
+            nw["addresses"][(chain, addr)] = {
+                "chain": chain, "address": addr, "from": "hit",
+            }
+            nw["_chains"].add(chain)
+            nw["_hit_boost"] = max(
+                float(nw.get("_hit_boost") or 0.0),
+                float(w.get("_hit_boost") or 0.0),
+            )
+            ts = w.get("timestamp") or ""
+            if ts and ts > (nw.get("timestamp") or ""):
+                nw["timestamp"] = ts
+            src = w.get("source") or ""
+            if src and (
+                not nw.get("source")
+                or nw.get("source") in ("balance_hit", "wallet_view_live")
+            ):
+                nw["source"] = src
+            if addr.startswith("0x"):
+                nw["key"] = addr
+            elif len(nw.get("_chains") or []) > 1:
+                nw["key"] = f"{addr} ({len(nw['_chains'])} chains)"
+            else:
+                nw["key"] = f"{chain}:{addr}"
+            for lk in ("_linked_hex", "_linked_wif", "_linked_seed"):
+                if w.get(lk) and not nw.get(lk):
+                    nw[lk] = w[lk]
+        except Exception:
+            out.append(w)
+    for w in out:
+        ch = w.get("_chains")
+        if isinstance(ch, set):
+            w["_chains"] = sorted(ch)
+    return out
+
+
+def attach_memory_meta(wallets, max_bytes: int = MEMORY_DEEP_BYTES):
+    """Attach source_uri + reverse-link key material from scanner memory (LIVE)."""
+    path = wv.MEMORY_FILE
+    if not os.path.exists(path):
+        return wallets
+
+    want = {}
+    hex_wallets = []
+    for w in wallets:
+        typ = (w.get("type") or "")
+        if typ == "HEX":
+            hex_wallets.append(w)
+        if typ != "ADDR":
+            continue
+        key = w.get("key") or ""
+        body = key.lower() if key.startswith("0x") else key
+        if ":" in body:
+            body = body.split(":", 1)[-1]
+        body = body.lower()
+        if body:
+            want[body] = w
+
+    try:
+        with open(path, "rb") as f:
+            size = os.path.getsize(path)
+            if size > max_bytes:
+                f.seek(-max_bytes, 2)
+                data = f.read()
+                nl = data.find(bytes([10]))
+                if nl >= 0:
+                    data = data[nl + 1 :]
+            else:
+                data = f.read()
+        text = data.decode("utf-8", errors="ignore")
+    except Exception:
+        return wallets
+
+    for line in text.splitlines():
+        try:
+            low = line.lower()
+            hit_bodies = [b for b in want if b in low] if want else []
+            if "hex_keys" not in low and "seed_phrases" not in low and "wifs" not in low:
+                if not hit_bodies:
+                    continue
+            try:
+                rec = json.loads(line)
+            except Exception:
+                continue
+            src = rec.get("source_uri") or rec.get("source") or ""
+            ts = rec.get("ts") or rec.get("timestamp") or ""
+            findings = rec.get("findings") or {}
+            wallet = findings.get("wallet") or {}
+            hexes = [str(h) for h in (wallet.get("hex_keys") or []) if h]
+            wifs = [str(x) for x in (wallet.get("wifs") or []) if x]
+            seeds = [str(s) for s in (wallet.get("seed_phrases") or []) if s]
+
+            for body in hit_bodies:
+                w = want[body]
+                if src and (
+                    not w.get("source")
+                    or w.get("source") in ("balance_hit", "wallet_view_live")
+                ):
+                    w["source"] = src
+                if ts and str(ts) > str(w.get("timestamp") or ""):
+                    w["timestamp"] = ts
+                if hexes:
+                    if not w.get("_linked_hex"):
+                        w["_linked_hex"] = hexes[0]
+                    prev = w.get("_linked_hexes") or []
+                    for h in hexes:
+                        if h not in prev:
+                            prev.append(h)
+                    w["_linked_hexes"] = prev
+                if wifs:
+                    if not w.get("_linked_wif"):
+                        w["_linked_wif"] = wifs[0]
+                    prev = w.get("_linked_wifs") or []
+                    for x in wifs:
+                        if x not in prev:
+                            prev.append(x)
+                    w["_linked_wifs"] = prev
+                if seeds:
+                    if not w.get("_linked_seed"):
+                        w["_linked_seed"] = seeds[0]
+                    prev = w.get("_linked_seeds") or []
+                    for s in seeds:
+                        if s not in prev:
+                            prev.append(s)
+                    w["_linked_seeds"] = prev
+
+            # Co-occurrence only inside this loop (fast).
+            # Full reverse-derive is done once after the file scan, capped.
+        except Exception:
+            continue
+
+    # Reverse-link: derive from in-scope HEX wallets first (already gathered)
+    still = [w for w in want.values() if not w.get("_linked_hex")]
+    if still and hex_wallets and _cs is not None:
+        for w in hex_wallets:
+            if not still:
+                break
+            try:
+                wv.ensure_derived(w)
+            except Exception:
+                continue
+            hx = w.get("key") or ""
+            for (chain, addr) in (w.get("addresses") or {}):
+                body = (addr or "").lower()
+                bare = body[2:] if body.startswith("0x") else body
+                target = want.get(body) or want.get(bare) or want.get("0x" + bare)
+                if target is None or target.get("_linked_hex"):
+                    continue
+                target["_linked_hex"] = hx
+                target["_link_method"] = "wallet_derive_match"
+                if w.get("source") and (
+                    not target.get("source")
+                    or target.get("source") in ("balance_hit", "wallet_view_live")
+                ):
+                    target["source"] = w.get("source")
+        still = [w for w in want.values() if not w.get("_linked_hex")]
+
+    # Optional capped reverse-derive from co-located linked hex candidates only
+    if still and _cs is not None:
+        candidates = []
+        seen_h = set()
+        for w in want.values():
+            for h in ([w.get("_linked_hex")] + list(w.get("_linked_hexes") or [])):
+                if not h:
+                    continue
+                hx = _hex_norm(h)
+                if len(hx) != 64 or hx in seen_h:
+                    continue
+                seen_h.add(hx)
+                candidates.append(hx)
+        # also try a small sample of hex_wallets keys
+        for w in hex_wallets[:200]:
+            hx = _hex_norm(w.get("key") or "")
+            if len(hx) == 64 and hx not in seen_h:
+                seen_h.add(hx)
+                candidates.append(hx)
+        for hx in candidates[:400]:
+            if not still:
+                break
+            try:
+                if wv.is_junk_hex(hx):
+                    continue
+                derived = _cs.priv_to_addresses(bytes.fromhex(hx)) or {}
+            except Exception:
+                continue
+            for _chain, addr in derived.items():
+                if not addr:
+                    continue
+                body = addr.lower()
+                bare = body[2:] if body.startswith("0x") else body
+                target = want.get(body) or want.get(bare) or want.get("0x" + bare)
+                if target is None or target.get("_linked_hex"):
+                    continue
+                target["_linked_hex"] = hx
+                target["_link_method"] = "derive_match"
+            still = [w for w in want.values() if not w.get("_linked_hex")]
+    return wallets
+
+
+def rank_wallets(wallets, balances, funded_only: bool = False):
+    scored = []
+    for w in wallets:
+        try:
+            sc, pend, chk = wv.wallet_score(w, balances)
+            boost = float(w.get("_hit_boost") or 0.0)
+            total = sc if sc > 0 else boost
+            if funded_only and total <= 1e-12:
+                continue
+            if funded_only and (w.get("type") or "") == "ADDR":
+                rows = wallet_addr_rows(w, balances, {})
+                real = [
+                    r for r in rows
+                    if not r["noise"]
+                    and isinstance(r["balance"], (int, float))
+                    and r["balance"] > 1e-12
+                ]
+                if not real and boost <= 1e-12:
+                    continue
+                if real:
+                    total = sum(float(r["balance"]) for r in real)
+            scored.append((float(total), int(pend), int(chk), w.get("timestamp") or "", w))
+        except Exception:
+            continue
+    scored.sort(key=lambda t: (t[0], t[3]), reverse=True)
+    return scored
+
+
+def ensure_top_derived(ranked, balances, n: int = 60):
+    for i in range(min(n, len(ranked))):
+        try:
+            total, pend, chk, ts, w = ranked[i]
+            wv.ensure_derived(w)
+            typ = (w.get("type") or "").upper()
+            if typ == "HEX" and _cs is not None:
+                try:
+                    hx = _hex_norm(w.get("key") or "")
+                    if len(hx) == 64 and not wv.is_junk_hex(hx):
+                        raw = _cs.priv_to_addresses(bytes.fromhex(hx)) or {}
+                        for chain, addr in raw.items():
+                            if addr:
+                                w.setdefault("addresses", {})[(chain, addr)] = {
+                                    "chain": chain, "address": addr, "from": "hex",
+                                }
+                except Exception:
+                    pass
+            sc, pend2, chk2 = wv.wallet_score(w, balances)
+            boost = float(w.get("_hit_boost") or 0.0)
+            ranked[i] = (sc if sc > 0 else boost, pend2, chk2, ts, w)
+        except Exception:
+            continue
+    ranked.sort(key=lambda t: (t[0], t[3]), reverse=True)
+    return ranked
+
+
+def rescore_ranked(ranked, balances):
+    out = []
+    for _total, _p, _c, ts, w in ranked:
+        try:
+            sc, pend, chk = wv.wallet_score(w, balances)
+            boost = float(w.get("_hit_boost") or 0.0)
+            if (w.get("type") or "") == "ADDR":
+                rows = wallet_addr_rows(w, balances, {})
+                real_sum = sum(
+                    float(r["balance"])
+                    for r in rows
+                    if not r["noise"]
+                    and isinstance(r["balance"], (int, float))
+                    and r["balance"] > 1e-12
+                )
+                if real_sum > 0:
+                    sc = real_sum
+            out.append((sc if sc > 0 else boost, pend, chk, ts, w))
+        except Exception:
+            out.append((0.0, 0, 0, ts, w))
+    out.sort(key=lambda t: (t[0], t[3]), reverse=True)
+    return out
+
+
+def wallet_addr_rows(w, balances, meta):
+    try:
+        wv.ensure_derived(w)
+    except Exception:
+        pass
+    rows = []
+    seen = set()
+    for (chain, addr), info in list((w.get("addresses") or {}).items()):
+        try:
+            nk = wv._norm_addr(chain, addr)
+            if nk in seen:
+                continue
+            seen.add(nk)
+            bal = wv.bal_get(balances, chain, addr)
+            m = wv.meta_get(meta, chain, addr) or {}
+            noise = wv._is_noise_address(chain, addr)
+            rows.append({
+                "chain": chain,
+                "address": addr,
+                "balance": bal,
+                "meta": m,
+                "noise": noise,
+                "from": (info or {}).get("from") or w.get("type") or "?",
+            })
+        except Exception:
+            continue
+
+    def rank(r):
+        b = r["balance"]
+        if r["noise"]:
+            return (3, 0.0)
+        if isinstance(b, (int, float)) and b > 1e-12:
+            return (0, -float(b))
+        if b is None:
+            return (1, 0.0)
+        return (2, 0.0)
+
+    rows.sort(key=rank)
+    return rows
+
+
+def collect_refresh_keys(ranked, balances, meta, focus_idx: int, batch: int):
+    keys = []
+    seen = set()
+
+    def add_wallet(w):
+        try:
+            wv.ensure_derived(w)
+        except Exception:
+            return
+        for chain, addr in (w.get("addresses") or {}):
+            k = (chain, addr)
+            if k not in seen:
+                seen.add(k)
+                keys.append(k)
+
+    try:
+        if 0 <= focus_idx < len(ranked):
+            add_wallet(ranked[focus_idx][4])
+        for _, _, _, _, w in ranked[:LEADERBOARD_N]:
+            add_wallet(w)
+        return wv.pick_refresh_targets(keys, balances, meta, batch=batch)
+    except Exception:
+        return []
+
+
+# ── paint ──────────────────────────────────────────────────────────
+
+def _print_analysis_block(analysis: dict, title: str = "FORENSIC ANALYSIS"):
+    if not analysis:
+        return
+    print(f"  {BOLD}{BLUE}{title}{RESET}  {DIM}(live · production · no mock){RESET}")
+    kind = analysis.get("kind") or "?"
+    print(f"  {BOLD}KIND{RESET}      {kind}")
+
+    if kind == "HEX":
+        _print_full("HEX", analysis.get("hex") or analysis.get("raw") or "", color=YELLOW)
+        valid = analysis.get("valid")
+        banned = analysis.get("banned_test")
+        secp = analysis.get("secp_ok")
+        vcol = GREEN if valid and not banned else (RED if banned else YELLOW)
+        print(
+            f"  {BOLD}VALID{RESET}     {vcol}{valid}{RESET}  "
+            f"reason={analysis.get('reason')!s}  "
+            f"secp256k1={secp}  banned_test={banned}"
+        )
+        print(
+            f"  {BOLD}QUALITY{RESET}   {float(analysis.get('quality') or 0):.6f}  "
+            f"entropy={float(analysis.get('entropy') or 0):.6f}"
+        )
+        if analysis.get("n_int") is not None:
+            _print_full("N_INT", str(analysis.get("n_int")))
+        if analysis.get("pub_compressed"):
+            _print_full("PUB_C", analysis["pub_compressed"])
+        if analysis.get("pub_uncompressed"):
+            _print_full("PUB_U", analysis["pub_uncompressed"])
+        if analysis.get("wif_compressed"):
+            _print_full("WIF_C", analysis["wif_compressed"], color=YELLOW)
+        if analysis.get("wif_uncompressed"):
+            _print_full("WIF_U", analysis["wif_uncompressed"], color=YELLOW)
+        if analysis.get("eth_address"):
+            _print_full("ETH", analysis["eth_address"], color=GREEN)
+        if analysis.get("sha256_priv_fp"):
+            _print_full("SHA256", analysis["sha256_priv_fp"])
+        if analysis.get("keccak_priv_fp"):
+            _print_full("KECCAK", analysis["keccak_priv_fp"])
+        addrs = analysis.get("addresses") or {}
+        if addrs:
+            print(f"  {BOLD}DERIVED{RESET}   {len(addrs)} chains (full):")
+            for chain in sorted(addrs.keys()):
+                print(f"            {chain.upper():8}  {addrs[chain]}")
+        be = analysis.get("backends") or {}
+        if be:
+            print(f"  {BOLD}BACKEND{RESET}   {be}")
+
+    elif kind == "WIF":
+        _print_full("WIF", analysis.get("raw") or "", color=YELLOW)
+        print(
+            f"  {BOLD}VALID{RESET}     {analysis.get('valid')}  "
+            f"reason={analysis.get('reason')!s}  "
+            f"compressed={analysis.get('compressed')}  mainnet={analysis.get('mainnet')}"
+        )
+        if analysis.get("hex"):
+            _print_full("HEX", analysis["hex"], color=YELLOW)
+        nested = analysis.get("nested")
+        if nested:
+            _print_analysis_block(nested, title="WIF → HEX ANALYSIS")
+
+    elif kind == "SEED":
+        _print_full("SEED", analysis.get("raw") or "", color=YELLOW)
+        print(
+            f"  {BOLD}VALID{RESET}     {analysis.get('valid')}  "
+            f"reason={analysis.get('reason')!s}  "
+            f"words={analysis.get('word_count')}  lang={analysis.get('language')}"
+        )
+        words = analysis.get("words") or []
+        if words:
+            print(f"  {BOLD}WORDS{RESET}     (complete list):")
+            for i, word in enumerate(words, 1):
+                print(f"            {i:02d}. {word}")
+        if analysis.get("nested_hex"):
+            _print_analysis_block(analysis["nested_hex"], title="SEED → MASTER HEX")
+        addrs = analysis.get("addresses") or {}
+        if addrs:
+            print(f"  {BOLD}DERIVED{RESET}   {len(addrs)} chains (full):")
+            for chain in sorted(addrs.keys()):
+                print(f"            {chain.upper():8}  {addrs[chain]}")
+
+    elif kind == "ADDR":
+        _print_full("ADDR", analysis.get("raw") or "")
+        chains = analysis.get("chains") or []
+        if chains:
+            print(f"  {BOLD}CHAINS{RESET}    {', '.join(str(c).upper() for c in chains)}")
+        if analysis.get("note"):
+            print(f"  {DIM}{analysis['note']}{RESET}")
+    print()
+
+
+def paint_forensic(
+    ranked,
+    balances,
+    meta,
+    focus: int = 0,
+    funded_only: bool = False,
+    status_line: str = "",
+    live_note: str = "",
+    error_line: str = "",
+    idle_left: float = -1.0,
+    idle_sec: float = DEFAULT_IDLE_REFRESH_SEC,
+):
+    try:
+        return _paint_forensic_inner(
+            ranked, balances, meta, focus, funded_only,
+            status_line, live_note, error_line, idle_left, idle_sec,
+        )
+    except Exception as exc:
+        _safe_clear()
+        print("=" * 78)
+        print(f"  {RED}FORENSIC PAINT ERROR{RESET}: {exc}")
+        print(f"  {DIM}{traceback.format_exc(limit=8)}{RESET}")
+        print("-" * 78)
+        sys.stdout.flush()
+        return {"n": len(ranked or []), "focus": focus, "page_keys": [], "err": str(exc)}
+
+
+def _paint_forensic_inner(
+    ranked, balances, meta, focus, funded_only,
+    status_line, live_note, error_line, idle_left, idle_sec,
+):
+    n = len(ranked or [])
+    if n == 0:
+        _safe_clear()
+        print("=" * 78)
+        print(" " * 14 + f"{BOLD}{MAGENTA}WALLETX FORENSIC EXAMINER{RESET}")
+        print("=" * 78)
+        print()
+        print("  No wallets to examine yet.")
+        print("  Wait for scanner findings, or drop --funded-only.")
+        if error_line:
+            print(f"  {RED}{error_line}{RESET}")
+        if status_line:
+            print(f"  {DIM}{status_line}{RESET}")
+        print("-" * 78)
+        print(
+            f"  {DIM}q quit · r force-reload · f toggle funded · "
+            f"idle-refresh {int(idle_sec)}s{RESET}"
+        )
+        sys.stdout.flush()
+        return {"n": 0, "focus": 0, "page_keys": []}
+
+    focus = max(0, min(n - 1, int(focus)))
+    total_bal, pend, chk, ts, w = ranked[focus]
+    rows = wallet_addr_rows(w, balances, meta)
+    page_keys = [(r["chain"], r["address"]) for r in rows if not r["noise"]]
+
+    funded_n = sum(1 for t, *_ in ranked if t > 1e-12)
+    grand = sum(t for t, *_ in ranked if t > 1e-12)
+    top_bal = ranked[0][0] if ranked else 0.0
+
+    try:
+        with wv._refresh_lock:
+            rs = dict(wv._refresh_state)
+    except Exception:
+        rs = {}
+
+    try:
+        bundle = forensic_bundle_for_wallet(w)
+    except Exception as exc:
+        bundle = {"error": str(exc)}
+
+    _safe_clear()
+    print("=" * 78)
+    print(
+        " " * 10
+        + f"{BOLD}{MAGENTA}WALLETX FORENSIC EXAMINER{RESET}  "
+        + f"{DIM}(static · idle-refresh · no truncation){RESET}"
+    )
+    print("=" * 78)
+    print(
+        f"  Ranked by {GREEN}highest live balance{RESET}  ·  "
+        f"{'FUNDED ONLY' if funded_only else 'all wallets'}  ·  "
+        f"examining {CYAN}#{focus + 1}/{n}{RESET}"
+    )
+    print(
+        f"  Funded: {GREEN}{funded_n}{RESET}   "
+        f"Portfolio: {GREEN}{grand:,.10f}{RESET}   "
+        f"Keys: {n}   "
+        f"{datetime.now(timezone.utc).strftime('%H:%M:%S')}Z"
+    )
+    if idle_left >= 0:
+        if idle_left > 0:
+            mins = int(idle_left) // 60
+            secs = int(idle_left) % 60
+            print(
+                f"  {CYAN}Idle refresh in {mins:02d}:{secs:02d}{RESET}  "
+                f"{DIM}(touch/keys reset timer · default {int(idle_sec)}s){RESET}"
+            )
+        else:
+            print(f"  {YELLOW}Idle refresh due — reloading…{RESET}")
+    if rs.get("running"):
+        print(
+            f"  {CYAN}Live RPC: {rs.get('done', 0)}/{rs.get('total', 0)}  "
+            f"{rs.get('last_msg', '')}{RESET}"
+        )
+    elif live_note:
+        print(f"  {DIM}{live_note}{RESET}")
+    if status_line:
+        print(f"  {DIM}{status_line}{RESET}")
+    if error_line:
+        print(f"  {RED}! {error_line}{RESET}")
+    print()
+
+    print(f"  {BOLD}LEADERBOARD — highest balance on top{RESET}")
+    print(f"  {'#':>4}  {'TYPE':<5}  {'BALANCE':>16}  {'BAR':<18}  KEY / ADDRESS")
+    print(f"  {'-'*4}  {'-'*5}  {'-'*16}  {'-'*18}  {'-'*28}")
+    lb_n = min(LEADERBOARD_N, n)
+    for i in range(lb_n):
+        sc, _pnd, _ck, _ts, ww = ranked[i]
+        marker = f"{CYAN}▶{RESET}" if i == focus else " "
+        typ = (ww.get("type") or "?")[:5]
+        if sc > 1e-12:
+            bal_s = f"{GREEN}{sc:>16.10f}{RESET}"
+        elif sc > 0:
+            bal_s = f"{YELLOW}{sc:>16.10f}{RESET}"
+        else:
+            bal_s = f"{DIM}{'0':>16}{RESET}"
+        frac = (sc / top_bal) if top_bal > 0 else 0.0
+        show = _leaderboard_label(ww.get("key") or "", 36)
+        print(f"  {marker}{i + 1:>3}  {typ:<5}  {bal_s}  {_bar(frac, 16)}  {show}")
+    if n > lb_n:
+        print(f"  {DIM}  … +{n - lb_n} more  (n/p or 1-9 / g N){RESET}")
+    print()
+
+    print("─" * 78)
+    funded_tag = (
+        f"· {GREEN}FUNDED{RESET}" if total_bal > 1e-12 else f"· {DIM}empty{RESET}"
+    )
+    print(
+        f"  {BOLD}{WHITE}FORENSIC DOSSIER{RESET}  "
+        f"— rank {CYAN}#{focus + 1}{RESET} of {n}  {funded_tag}"
+    )
+    print("─" * 78)
+
+    typ = w.get("type") or "?"
+    key = w.get("key") or ""
+    src = w.get("source") or ""
+    found_ts = w.get("timestamp") or ""
+
+    print(f"  {BOLD}TYPE{RESET}      {typ}")
+    chains_meta = w.get("_chains") or []
+    if chains_meta and len(chains_meta) > 1:
+        print(
+            f"  {BOLD}CHAINS{RESET}    {', '.join(c.upper() for c in chains_meta)}  "
+            f"{DIM}(same address, multi-chain){RESET}"
+        )
+
+    _print_full("KEY", key, color=YELLOW if typ in ("HEX", "WIF", "SEED") else "")
+    print(f"  {BOLD}KEY_LEN{RESET}   {len(key)} chars  {DIM}(complete above){RESET}")
+
+    if src:
+        _print_full("SOURCE", src)
+    else:
+        print(f"  {BOLD}SOURCE{RESET}    {DIM}(unknown){RESET}")
+
+    print(f"  {BOLD}FOUND{RESET}     {found_ts or (DIM + 'n/a' + RESET)}")
+    print(
+        f"  {BOLD}BALANCE{RESET}   {GREEN}{total_bal:,.12f}{RESET}  "
+        f"(unresolved={pend}  zeroed={chk}  chains={len(rows)})"
+    )
+    if w.get("_hit_boost"):
+        print(
+            f"  {BOLD}HIT BOOST{RESET} {YELLOW}{float(w['_hit_boost']):.12f}{RESET}  "
+            f"{DIM}(balances_hit / nonzero cache){RESET}"
+        )
+    if w.get("_link_method"):
+        print(f"  {BOLD}LINK VIA{RESET}  {w['_link_method']}")
+
+    if w.get("_linked_hex"):
+        _print_full("LINKED HEX", w["_linked_hex"], color=YELLOW)
+    for i, h in enumerate(w.get("_linked_hexes") or []):
+        if h and h != w.get("_linked_hex"):
+            _print_full(f"LINKED HEX[{i}]", h, color=YELLOW)
+    if w.get("_linked_wif"):
+        _print_full("LINKED WIF", w["_linked_wif"], color=YELLOW)
+    for i, x in enumerate(w.get("_linked_wifs") or []):
+        if x and x != w.get("_linked_wif"):
+            _print_full(f"LINKED WIF[{i}]", x, color=YELLOW)
+    if w.get("_linked_seed"):
+        _print_full("LINKED SEED", w["_linked_seed"], color=YELLOW)
+    for i, s in enumerate(w.get("_linked_seeds") or []):
+        if s and s != w.get("_linked_seed"):
+            _print_full(f"LINKED SEED[{i}]", s, color=YELLOW)
+    print()
+
+    try:
+        if bundle.get("analysis"):
+            _print_analysis_block(bundle["analysis"])
+        for i, la in enumerate(bundle.get("linked_analysis") or []):
+            _print_analysis_block(la, title=f"LINKED MATERIAL ANALYSIS [{i}]")
+        if bundle.get("error"):
+            print(f"  {RED}analysis error: {bundle['error']}{RESET}")
+    except Exception as exc:
+        print(f"  {RED}analysis paint: {exc}{RESET}")
+
+    print(
+        f"  {BOLD}{'CHAIN':>8}  {'ADDRESS':<44}  {'BALANCE':>18}  "
+        f"{'AGE':>5}  FLAG{RESET}"
+    )
+    print(f"  {'-'*8}  {'-'*44}  {'-'*18}  {'-'*5}  {'-'*12}")
+
+    show_rows = rows if not DETAIL_ADDRS else rows[:DETAIL_ADDRS]
+    for r in show_rows:
+        chain = r["chain"]
+        addr = r["address"]
+        bal = r["balance"]
+        m = r["meta"] or {}
+        age = _age_str(m.get("ts"))
+        live = "LIVE" if m.get("live") else ("SET" if m.get("settled") else "")
+        if r["noise"]:
+            flag = f"{DIM}noise{RESET}"
+            bal_s = f"{DIM}{'0':>18}{RESET}"
+            mark = "  "
+        elif isinstance(bal, (int, float)) and bal > 1e-12:
+            flag = f"{GREEN}*** FUNDED{RESET}"
+            bal_s = f"{GREEN}{bal:>18.12f}{RESET}"
+            mark = f"{GREEN}▶{RESET} "
+        elif bal is None:
+            flag = f"{YELLOW}pending{RESET}"
+            bal_s = f"{YELLOW}{'…':>18}{RESET}"
+            mark = "  "
+        else:
+            flag = f"{DIM}zero{RESET}"
+            bal_s = f"{DIM}{'0':>18}{RESET}"
+            mark = "  "
+        live_s = f" {DIM}{live}{RESET}" if live else ""
+        if len(addr) <= 44:
+            print(
+                f"  {mark}{chain.upper():>6}  {addr:<44}  {bal_s}  "
+                f"{age:>5}  {flag}{live_s}"
+            )
+        else:
+            print(f"  {mark}{chain.upper():>6}  {addr}")
+            print(f"          {bal_s}  {age:>5}  {flag}{live_s}")
+
+    if DETAIL_ADDRS and len(rows) > DETAIL_ADDRS:
+        print(f"  {DIM}  … {len(rows) - DETAIL_ADDRS} more (DETAIL_ADDRS=0 shows all){RESET}")
+    if not rows:
+        print(f"  {DIM}  (no derived addresses){RESET}")
+
+    print()
+    print("─" * 78)
+    print(
+        f"  {BOLD}KEYS{RESET}  "
+        f"{CYAN}n{RESET}/→ next  {CYAN}p{RESET}/← prev  "
+        f"{CYAN}g{RESET} jump  {CYAN}t{RESET} top  "
+        f"{CYAN}f{RESET} funded  {CYAN}r{RESET} reload  "
+        f"{CYAN}e{RESET} export  {CYAN}a{RESET} analyze  "
+        f"{CYAN}q{RESET} quit"
+    )
+    print(
+        f"  {DIM}idle-refresh {int(idle_sec)}s after no touch  ·  "
+        f"keys always full  ·  live production only  ·  "
+        f"exports → ~/forensic_exports/{RESET}"
+    )
+    print("-" * 78)
+    sys.stdout.flush()
+    return {
+        "n": n,
+        "focus": focus,
+        "page_keys": page_keys,
+        "funded_n": funded_n,
+        "grand": grand,
+        "bundle": bundle,
+    }
+
+
+# ── IO / state ─────────────────────────────────────────────────────
+
+def _stdin_key(timeout: float = 0.0):
+    if not sys.stdin.isatty():
+        return None
+    try:
+        r, _, _ = select.select([sys.stdin], [], [], max(0.0, timeout))
+        if not r:
+            return None
+        ch = sys.stdin.read(1)
+        return ch
+    except Exception:
+        return None
+
+
+def _drain_stdin():
+    """Consume bursty key/paste input so we don't process a flood after paint."""
+    if not sys.stdin.isatty():
+        return 0
+    n = 0
+    while True:
+        ch = _stdin_key(0.0)
+        if ch is None:
+            break
+        n += 1
+        if n > 64:
+            break
+    return n
+
+
+def _with_cbreak(fn):
+    if not sys.stdin.isatty():
+        return fn()
+    fd = sys.stdin.fileno()
+    old = termios.tcgetattr(fd)
+    try:
+        tty.setcbreak(fd)
+        _hide_cursor()
+        return fn()
+    finally:
+        try:
+            termios.tcsetattr(fd, termios.TCSADRAIN, old)
+        except Exception:
+            pass
+        _show_cursor()
+
+
+def _refocus(ranked, target_key, fallback: int) -> int:
+    if not ranked:
+        return 0
+    if target_key:
+        for i, row in enumerate(ranked):
+            w = row[4]
+            if (w.get("type"), w.get("key")) == target_key:
+                return i
+    return max(0, min(len(ranked) - 1, int(fallback)))
+
+
+def _prompt_jump(cur, nmax):
+    fd = sys.stdin.fileno()
+    try:
+        old = termios.tcgetattr(fd)
+    except Exception:
+        old = None
+    try:
+        if old is not None:
+            cooked = termios.tcgetattr(fd)
+            cooked[3] = cooked[3] | termios.ECHO | termios.ICANON
+            termios.tcsetattr(fd, termios.TCSADRAIN, cooked)
+        _show_cursor()
+        sys.stdout.write(
+            f"\n  {CYAN}Jump to rank (1–{nmax}, now {cur + 1}): {RESET}"
+        )
+        sys.stdout.flush()
+        line = sys.stdin.readline()
+        if not line:
+            return None
+        line = line.strip()
+        if not line:
+            return None
+        return max(0, int(line) - 1)
+    except Exception:
+        return None
+    finally:
+        _hide_cursor()
+        if old is not None:
+            try:
+                tty.setcbreak(fd)
+            except Exception:
+                pass
+
+
+def visible_fingerprint(ranked, focus: int, funded_only: bool, rs_sig: str = "") -> str:
+    try:
+        n = len(ranked or [])
+        if n == 0:
+            return f"empty|{funded_only}|{rs_sig}"
+        focus = max(0, min(n - 1, int(focus)))
+        top = []
+        for i, row in enumerate(ranked[:LEADERBOARD_N]):
+            sc, pend, chk, _ts, w = row
+            top.append(f"{i}:{w.get('type')}:{w.get('key') or ''}:{sc:.12f}")
+        fw = ranked[focus][4]
+        fsc = ranked[focus][0]
+        return "|".join([
+            f"n={n}",
+            f"fo={int(funded_only)}",
+            f"fi={focus}",
+            f"fsc={fsc:.12f}",
+            f"fkey={fw.get('type')}:{fw.get('key') or ''}",
+            f"rs={rs_sig}",
+            "^".join(top),
+        ])
+    except Exception as exc:
+        return f"err:{exc}"
+
+
+class ForensicState:
+    """Caches heavy gathers; idle-refresh drives full reload."""
+
+    def __init__(self, max_wallets: int = 0, funded_only: bool = False):
+        self.max_wallets = max_wallets
+        self.funded_only = funded_only
+        self.wallets = []
+        self.ranked = []
+        self.balances = {}
+        self.meta = {}
+        self.last_gather = 0.0
+        self.last_bal = 0.0
+        self._bal_mtime = None
+        self.last_paint = 0.0
+        self._last_rpc_sig = ""
+        self._last_fp = ""
+        self.last_error = ""
+        self.gather_ms = 0
+        self.bal_ms = 0
+        self.n_cycle = 0
+        self.last_export = ""
+
+    def full_gather(self, force: bool = False):
+        now = time.time()
+        if not force and self.wallets and (now - self.last_gather) < GATHER_SEC:
+            return
+        t0 = time.time()
+        try:
+            raw = wv.gather_wallets(max_wallets=self.max_wallets)
+            shaped = consolidate_addr_wallets(raw)
+            shaped = attach_memory_meta(shaped, max_bytes=MEMORY_DEEP_BYTES)
+            self.wallets = shaped
+            self.last_gather = time.time()
+            self.gather_ms = int((time.time() - t0) * 1000)
+        except Exception as exc:
+            self.last_error = f"gather: {exc}"
+
+    def reload_balances(self) -> bool:
+        t0 = time.time()
+        try:
+            path = wv.CACHE_FILE
+            mtime = os.path.getmtime(path) if os.path.exists(path) else None
+            if (
+                mtime is not None
+                and self._bal_mtime is not None
+                and mtime == self._bal_mtime
+                and self.balances
+            ):
+                self.bal_ms = 0
+                return False
+            self.balances, self.meta = wv.load_balances()
+            self._bal_mtime = mtime
+            self.last_bal = time.time()
+            self.bal_ms = int((time.time() - t0) * 1000)
+            return True
+        except Exception as exc:
+            self.last_error = f"balances: {exc}"
+            return False
+
+    def rebuild_ranked(self):
+        try:
+            ranked = rank_wallets(self.wallets, self.balances, funded_only=False)
+            ranked = ensure_top_derived(ranked, self.balances, n=80)
+            ranked = rescore_ranked(ranked, self.balances)
+            if self.funded_only:
+                ranked = [row for row in ranked if row[0] > 1e-12]
+            self.ranked = ranked
+        except Exception as exc:
+            self.last_error = f"rank: {exc}"
+
+    def soft_rescore(self):
+        try:
+            if not self.ranked:
+                self.rebuild_ranked()
+                return
+            base = [(0.0, 0, 0, ts, w) for *_x, ts, w in self.ranked]
+            scored = rescore_ranked(base, self.balances)
+            if self.funded_only:
+                scored = [row for row in scored if row[0] > 1e-12]
+            self.ranked = scored
+        except Exception as exc:
+            self.last_error = f"rescore: {exc}"
+
+    def snapshot(self, force_gather: bool = False):
+        self.n_cycle += 1
+        self.full_gather(force=force_gather)
+        self.reload_balances()
+        if force_gather or not self.ranked:
+            self.rebuild_ranked()
+        else:
+            self.soft_rescore()
+        return self.ranked, self.balances, self.meta
+
+
+def load_ranked(max_wallets: int, funded_only: bool, derive_top: int = 50):
+    st = ForensicState(max_wallets=max_wallets, funded_only=funded_only)
+    st.snapshot(force_gather=True)
+    return st.ranked, st.balances, st.meta, st.gather_ms + st.bal_ms
+
+
+def _maybe_start_refresh(st: ForensicState, focus: int, live: bool, batch: int):
+    if not live or not st.ranked:
+        return
+    try:
+        with wv._refresh_lock:
+            if wv._refresh_state.get("running"):
+                return
+        targets = collect_refresh_keys(
+            st.ranked, st.balances, st.meta, focus, batch=batch
+        )
+        if targets:
+            wv.background_refresh(targets)
+    except Exception as exc:
+        st.last_error = f"refresh: {exc}"
+
+
+def _status(st: ForensicState, focus: int, idle_sec: float, batch: int, tag: str) -> str:
+    return (
+        f"{tag} #{st.n_cycle} · rank {focus + 1}/{len(st.ranked)} · "
+        f"idle {int(idle_sec)}s · rpc {batch} · "
+        f"gather {st.gather_ms}ms · bal {st.bal_ms}ms"
+    )
+
+
+def _live_note(st: ForensicState, live: bool) -> str:
+    try:
+        with wv._refresh_lock:
+            rs = dict(wv._refresh_state)
+    except Exception:
+        rs = {}
+    if rs.get("running"):
+        return (
+            f"live {rs.get('done', 0)}/{rs.get('total', 0)} "
+            f"{rs.get('last_msg', '')}"
+        )
+    if not live:
+        return "cache only"
+    return "live armed · idle-refresh only"
+
+
+def paint_state(
+    st, focus, live, idle_sec, batch, tag="forensic",
+    force=False, idle_left: float = -1.0,
+):
+    now = time.time()
+    note = _live_note(st, live)
+    fp = visible_fingerprint(st.ranked, focus, st.funded_only, rs_sig="")
+    if not force and fp == st._last_fp and (now - st.last_paint) < 30.0:
+        return None
+    info = paint_forensic(
+        st.ranked,
+        st.balances,
+        st.meta,
+        focus=focus,
+        funded_only=st.funded_only,
+        status_line=_status(st, focus, idle_sec, batch, tag),
+        live_note=note,
+        error_line=st.last_error,
+        idle_left=idle_left,
+        idle_sec=idle_sec,
+    )
+    st.last_paint = time.time()
+    st._last_fp = fp
+    return info
+
+
+def cycle_once(focus, funded_only, live, batch, max_wallets, block_refresh, status_line=""):
+    st = ForensicState(max_wallets=max_wallets, funded_only=funded_only)
+    st.snapshot(force_gather=True)
+    focus = max(0, min(max(0, len(st.ranked) - 1), focus))
+    if st.ranked:
+        try:
+            wv.ensure_derived(st.ranked[focus][4])
+        except Exception:
+            pass
+
+    paint_forensic(
+        st.ranked, st.balances, st.meta,
+        focus=focus, funded_only=funded_only,
+        status_line=f"{status_line} · gather {st.gather_ms}ms bal {st.bal_ms}ms",
+        live_note=("cache only" if not live else "live"),
+        error_line=st.last_error,
+        idle_left=-1,
+        idle_sec=DEFAULT_IDLE_REFRESH_SEC,
+    )
+
+    if not live:
+        return {"focus": focus, "n": len(st.ranked)}
+
+    _maybe_start_refresh(st, focus, live, batch)
+    if not block_refresh:
+        return {"focus": focus, "n": len(st.ranked)}
+
+    t_end = time.time() + 45
+    target_key = None
+    if st.ranked:
+        target_key = (st.ranked[focus][4].get("type"), st.ranked[focus][4].get("key"))
+    while time.time() < t_end:
+        with wv._refresh_lock:
+            running = bool(wv._refresh_state.get("running"))
+        if not running:
+            break
+        time.sleep(1.5)
+        st.reload_balances()
+        st.soft_rescore()
+        focus = _refocus(st.ranked, target_key, focus)
+        paint_forensic(
+            st.ranked, st.balances, st.meta,
+            focus=focus, funded_only=funded_only,
+            status_line="once · waiting live batch",
+            live_note=_live_note(st, True),
+            error_line=st.last_error,
+        )
+    st.reload_balances()
+    st.soft_rescore()
+    focus = _refocus(st.ranked, target_key, focus)
+    paint_forensic(
+        st.ranked, st.balances, st.meta,
+        focus=focus, funded_only=funded_only,
+        status_line="once · done",
+        live_note=_live_note(st, True),
+        error_line=st.last_error,
+    )
+    return {"focus": focus, "n": len(st.ranked)}
+
+
+def interactive_loop(args):
+    focus = max(0, int(args.index))
+    live = not args.cached
+    batch = max(1, int(args.batch))
+    idle_sec = max(15.0, float(getattr(args, "idle_sec", DEFAULT_IDLE_REFRESH_SEC)))
+    poll_sec = max(0.15, float(getattr(args, "tick_sec", DEFAULT_TICK_SEC)))
+    global GATHER_SEC
+    GATHER_SEC = max(30.0, idle_sec)
+
+    st = ForensicState(
+        max_wallets=args.max_wallets,
+        funded_only=bool(args.funded_only),
+    )
+    pinned_key = None
+
+    def run_safe():
+        nonlocal focus, pinned_key
+        try:
+            st.snapshot(force_gather=True)
+        except Exception as exc:
+            st.last_error = f"boot: {exc}"
+        if st.ranked:
+            focus = max(0, min(len(st.ranked) - 1, focus))
+            pinned_key = (
+                st.ranked[focus][4].get("type"),
+                st.ranked[focus][4].get("key"),
+            )
+        last_input = time.time()
+        paint_state(
+            st, focus, live, idle_sec, batch, tag="walletx",
+            force=True, idle_left=idle_sec,
+        )
+        _maybe_start_refresh(st, focus, live, batch)
+
+        last_countdown_paint = time.time()
+
+        while True:
+            try:
+                now = time.time()
+                idle_for = now - last_input
+                idle_left = max(0.0, idle_sec - idle_for)
+                timeout = min(poll_sec, max(0.05, idle_left if idle_left > 0 else poll_sec))
+                key = _stdin_key(timeout=timeout)
+                now = time.time()
+                force_paint = False
+                did_nav = False
+
+                if key is not None:
+                    last_input = now
+                    if key in ("q", "Q", "\x03"):
+                        print()
+                        return
+                    if key in ("n", "N", "j", "J", " ", "\r", "\n"):
+                        focus += 1
+                        pinned_key = None
+                        did_nav = True
+                    elif key in ("p", "P", "k", "K", "b", "B"):
+                        focus = max(0, focus - 1)
+                        pinned_key = None
+                        did_nav = True
+                    elif key in ("t", "T", "h", "H"):
+                        focus = 0
+                        pinned_key = None
+                        did_nav = True
+                    elif key in ("f", "F"):
+                        st.funded_only = not st.funded_only
+                        focus = 0
+                        pinned_key = None
+                        st.rebuild_ranked()
+                        did_nav = True
+                    elif key in ("r", "R"):
+                        st.snapshot(force_gather=True)
+                        force_paint = True
+                        last_input = time.time()
+                        _maybe_start_refresh(st, focus, live, batch)
+                    elif key in ("e", "E"):
+                        if st.ranked:
+                            focus = max(0, min(len(st.ranked) - 1, focus))
+                            tw = st.ranked[focus][4]
+                            tbal = st.ranked[focus][0]
+                            try:
+                                path = export_dossier(
+                                    tw, st.balances, st.meta, focus + 1, tbal
+                                )
+                                st.last_export = path
+                                st.last_error = f"exported → {path}"
+                            except Exception as exc:
+                                st.last_error = f"export: {exc}"
+                            force_paint = True
+                    elif key in ("a", "A"):
+                        force_paint = True
+                    elif key in "123456789":
+                        focus = int(key) - 1
+                        pinned_key = None
+                        did_nav = True
+                    elif key in ("g", "G", "#"):
+                        dest = _prompt_jump(focus, len(st.ranked) if st.ranked else 1)
+                        last_input = time.time()
+                        if dest is not None:
+                            focus = max(0, dest)
+                            pinned_key = None
+                            did_nav = True
+                    elif key == "\x1b":
+                        k2 = _stdin_key(0.06)
+                        if k2 == "[":
+                            k3 = _stdin_key(0.06)
+                            if k3 in ("C", "B"):
+                                focus += 1
+                                pinned_key = None
+                                did_nav = True
+                            elif k3 in ("D", "A"):
+                                focus = max(0, focus - 1)
+                                pinned_key = None
+                                did_nav = True
+                            elif k3 == "5":
+                                _stdin_key(0.02)
+                                focus = max(0, focus - LEADERBOARD_N)
+                                pinned_key = None
+                                did_nav = True
+                            elif k3 == "6":
+                                _stdin_key(0.02)
+                                focus += LEADERBOARD_N
+                                pinned_key = None
+                                did_nav = True
+                        elif k2 is None:
+                            print()
+                            return
+                    _drain_stdin()
+
+                # IDLE REFRESH only after idle_sec with zero input
+                idle_for = time.time() - last_input
+                if idle_for >= idle_sec:
+                    st.snapshot(force_gather=True)
+                    if pinned_key:
+                        focus = _refocus(st.ranked, pinned_key, focus)
+                    force_paint = True
+                    last_input = time.time()
+                    _maybe_start_refresh(st, focus, live, batch)
+
+                if pinned_key:
+                    focus = _refocus(st.ranked, pinned_key, focus)
+                elif st.ranked:
+                    focus = max(0, min(len(st.ranked) - 1, focus))
+
+                if did_nav and st.ranked:
+                    focus = max(0, min(len(st.ranked) - 1, focus))
+                    try:
+                        wv.ensure_derived(st.ranked[focus][4])
+                    except Exception:
+                        pass
+                    pinned_key = (
+                        st.ranked[focus][4].get("type"),
+                        st.ranked[focus][4].get("key"),
+                    )
+                    force_paint = True
+
+                idle_left_now = max(0.0, idle_sec - (time.time() - last_input))
+
+                # Update idle clock occasionally only — never fight the user.
+                # Full data reload happens solely when idle_for >= idle_sec.
+                need_countdown = (
+                    not did_nav
+                    and not force_paint
+                    and (time.time() - last_countdown_paint) >= 15.0
+                    and idle_left_now > 0
+                )
+                if force_paint or did_nav:
+                    paint_state(
+                        st, focus, live, idle_sec, batch,
+                        tag="walletx", force=True,
+                        idle_left=idle_left_now,
+                    )
+                    last_countdown_paint = time.time()
+                elif need_countdown:
+                    paint_state(
+                        st, focus, live, idle_sec, batch,
+                        tag="walletx", force=True,
+                        idle_left=idle_left_now,
+                    )
+                    last_countdown_paint = time.time()
+
+            except KeyboardInterrupt:
+                print()
+                return
+            except Exception as exc:
+                st.last_error = f"loop: {exc}"
+                try:
+                    paint_forensic(
+                        st.ranked, st.balances, st.meta,
+                        focus=focus, funded_only=st.funded_only,
+                        status_line="recovered from error",
+                        live_note=_live_note(st, live),
+                        error_line=st.last_error,
+                        idle_left=max(0.0, idle_sec - (time.time() - last_input)),
+                        idle_sec=idle_sec,
+                    )
+                    st.last_paint = time.time()
+                except Exception:
+                    _safe_clear()
+                    print(f"{RED}FATAL:{RESET} {exc}")
+                    print(traceback.format_exc(limit=8))
+                    sys.stdout.flush()
+                    time.sleep(2)
+                time.sleep(0.3)
+
+    try:
+        _with_cbreak(run_safe)
+    except KeyboardInterrupt:
+        print()
+    finally:
+        _show_cursor()
+
+
+def watch_static(args):
+    """Non-interactive stable watch — refresh only on idle interval."""
+    focus = max(0, int(args.index))
+    live = not args.cached
+    batch = max(1, int(args.batch))
+    idle_sec = max(15.0, float(getattr(args, "idle_sec", DEFAULT_IDLE_REFRESH_SEC)))
+    global GATHER_SEC
+    GATHER_SEC = max(30.0, idle_sec)
+
+    st = ForensicState(
+        max_wallets=args.max_wallets,
+        funded_only=bool(args.funded_only),
+    )
+    pinned_key = None
+    _hide_cursor()
+    try:
+        st.snapshot(force_gather=True)
+        if st.ranked:
+            focus = max(0, min(len(st.ranked) - 1, focus))
+            pinned_key = (
+                st.ranked[focus][4].get("type"),
+                st.ranked[focus][4].get("key"),
+            )
+        next_refresh = time.time() + idle_sec
+        paint_state(
+            st, focus, live, idle_sec, batch, tag="watch",
+            force=True, idle_left=idle_sec,
+        )
+        _maybe_start_refresh(st, focus, live, batch)
+
+        while True:
+            try:
+                now = time.time()
+                left = max(0.0, next_refresh - now)
+                time.sleep(min(1.0, left if left > 0 else 1.0))
+                now = time.time()
+                if now >= next_refresh:
+                    st.snapshot(force_gather=True)
+                    if pinned_key:
+                        focus = _refocus(st.ranked, pinned_key, focus)
+                    _maybe_start_refresh(st, focus, live, batch)
+                    next_refresh = time.time() + idle_sec
+                    paint_state(
+                        st, focus, live, idle_sec, batch, tag="watch",
+                        force=True, idle_left=idle_sec,
+                    )
+                else:
+                    paint_state(
+                        st, focus, live, idle_sec, batch, tag="watch",
+                        force=True, idle_left=max(0.0, next_refresh - time.time()),
+                    )
+            except KeyboardInterrupt:
+                raise
+            except Exception as exc:
+                st.last_error = f"watch: {exc}"
+                try:
+                    paint_forensic(
+                        st.ranked, st.balances, st.meta,
+                        focus=focus, funded_only=st.funded_only,
+                        status_line="watch recovered",
+                        live_note=_live_note(st, live),
+                        error_line=st.last_error,
+                        idle_left=max(0.0, next_refresh - time.time()),
+                        idle_sec=idle_sec,
+                    )
+                    st.last_paint = time.time()
+                except Exception:
+                    pass
+                time.sleep(1.0)
+    except KeyboardInterrupt:
+        print()
+    finally:
+        _show_cursor()
+
+
+def main():
+    ap = argparse.ArgumentParser(
+        description=(
+            "WalletX forensic examiner — static, balance-ranked, idle-refresh. "
+            "Full keys always. LIVE production only. Does NOT replace walletview."
+        )
+    )
+    ap.add_argument(
+        "-w", "--watch", action="store_true",
+        help="static watch (no keys; refresh on idle interval)",
+    )
+    ap.add_argument("--once", action="store_true", help="single paint and exit")
+    ap.add_argument(
+        "--interactive", "-I", action="store_true",
+        help="keyboard nav (default on tty)",
+    )
+    ap.add_argument("--cached", action="store_true", help="no live RPC")
+    ap.add_argument(
+        "--index", type=int, default=0,
+        help="0-based rank (0 = highest balance)",
+    )
+    ap.add_argument(
+        "--funded-only", action="store_true",
+        help="only nonzero-balance wallets",
+    )
+    ap.add_argument("--batch", type=int, default=DEFAULT_BATCH)
+    ap.add_argument(
+        "--idle-sec", type=float, default=DEFAULT_IDLE_REFRESH_SEC,
+        help="seconds of no input before auto-refresh (default 120)",
+    )
+    ap.add_argument(
+        "--refresh-sec", type=float, default=None,
+        help="alias for --idle-sec (back-compat)",
+    )
+    ap.add_argument(
+        "--tick-sec", type=float, default=DEFAULT_TICK_SEC,
+        help="input poll cadence seconds (default 2.0; does not repaint alone)",
+    )
+    ap.add_argument("--max-wallets", type=int, default=0)
+    ap.add_argument(
+        "--interval", type=int, default=0, help=argparse.SUPPRESS
+    )
+    args = ap.parse_args()
+
+    if args.refresh_sec is not None:
+        args.idle_sec = float(args.refresh_sec)
+    if args.interval and args.interval > 0:
+        args.idle_sec = float(args.interval)
+
+    try:
+        if args.once:
+            cycle_once(
+                focus=max(0, args.index),
+                funded_only=bool(args.funded_only),
+                live=not args.cached,
+                batch=max(1, args.batch),
+                max_wallets=args.max_wallets,
+                block_refresh=False,
+                status_line="once",
+            )
+            if not args.cached:
+                time.sleep(0.3)
+            return
+
+        if args.watch and not args.interactive:
+            watch_static(args)
+            return
+
+        if args.interactive or (sys.stdin.isatty() and not args.watch):
+            interactive_loop(args)
+        else:
+            watch_static(args)
+    except KeyboardInterrupt:
+        print()
+    finally:
+        _show_cursor()
+
+
+if __name__ == "__main__":
+    main()

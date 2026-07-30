@@ -646,6 +646,8 @@ def priv_to_addresses(priv: bytes) -> Dict[str, str]:
             addresses["avax"] = eth_addr
             addresses["bnb"] = eth_addr
             addresses["base"] = eth_addr
+            addresses["arb"] = eth_addr
+            addresses["op"] = eth_addr
             addresses["monad"] = eth_addr
         sol_addr = hex_to_sol_address(priv.hex())
         if sol_addr:
@@ -1632,6 +1634,15 @@ def balance_worker(q: queue_module.Queue, stop_event: threading.Event):
             throttle_cpu_ram(0.0)
             bal = get_balance(chain, address)
             if bal and bal.get("balance") is not None and bal["balance"] > 1e-12:
+                # Ignore burn/null/hardhat demo wallets — not real loot.
+                try:
+                    from crypto_iq import is_noise_address
+                    if is_noise_address(chain, address) or is_noise_address(
+                        bal.get("chain") or chain, bal.get("address") or address
+                    ):
+                        continue
+                except Exception:
+                    pass
                 global BALANCE_HITS_COUNT
                 with BALANCE_HITS_LOCK:
                     BALANCE_HITS_COUNT += 1

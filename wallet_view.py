@@ -79,7 +79,7 @@ MEMORY_TAIL_BYTES = 3_000_000
 STALE_OK_SEC = 900
 DEFAULT_PAGE_SIZE = 8
 DEFAULT_PAGE_SEC = 8
-MAX_ADDRS_SHOW = 14
+MAX_ADDRS_SHOW = 64
 DERIVE_CACHE: dict = {}
 
 JUNK_HEX_EXACT = {
@@ -148,6 +148,28 @@ def load_jsonl_tail(path: str, max_bytes: int = 0):
     except Exception:
         pass
     return records
+
+
+def _is_noise_address(chain: str, addr: str) -> bool:
+    """Burn/null/hardhat/demo — never count as real nonzero loot."""
+    try:
+        from crypto_iq import is_noise_address
+        return bool(is_noise_address(chain, addr))
+    except Exception:
+        a = (addr or "").strip().lower()
+        if a.startswith("0x") and len(a) == 42:
+            body = a[2:]
+            if body == "0" * 40 or body == "f" * 40 or len(set(body)) == 1:
+                return True
+            noise = {
+                "0x000000000000000000000000000000000000dead",
+                "0x1234567890123456789012345678901234567890",
+                "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266",
+                "0x70997970c51812dc3a010c7d01b50e0d17dc79c8",
+                "0x7e5f4552091a69125d5dfcb7b8c2659029395bdf",
+            }
+            return a in noise
+        return False
 
 
 def _norm_addr(chain: str, addr: str) -> tuple:
@@ -338,6 +360,8 @@ def _inject_hit_wallets(wallets: dict):
                     chain = (rec.get("chain") or "?").lower()
                     addr = rec.get("address") or ""
                     if not addr:
+                        continue
+                    if _is_noise_address(chain, addr):
                         continue
                     hit_rows.append((float(bal), chain, addr, rec))
         except Exception:
@@ -680,7 +704,7 @@ def paint(
 
     wallet_keys = list(all_keys)
     for (chain, addr), bal in balances.items():
-        if isinstance(bal, (int, float)) and bal > 1e-12:
+        if isinstance(bal, (int, float)) and bal > 1e-12 and not _is_noise_address(chain, addr):
             k = (chain, addr)
             if k not in wallet_keys:
                 wallet_keys.append(k)
@@ -688,6 +712,8 @@ def paint(
     nonzero_keys = []
     nz_seen = set()
     for k in wallet_keys:
+        if _is_noise_address(k[0], k[1]):
+            continue
         b = bal_get(balances, k[0], k[1])
         if isinstance(b, (int, float)) and b > 1e-12:
             nk = _norm_addr(k[0], k[1])
@@ -819,10 +845,27 @@ def paint(
             f"  [{idx}/{n_wallets}] TYPE={w.get('type')}  "
             f"bal_sum={sc:.8f}  unresolved={pend}  zero={chk}"
         )
-        print(f"  KEY:  {w.get('key')}")
+        # FULL key — never truncate (wrap only)
+        _k = w.get("key") or ""
+        if len(_k) <= 72:
+            print(f"  KEY:  {_k}")
+        else:
+            print(f"  KEY:  {_k[:72]}")
+            _rest = _k[72:]
+            while _rest:
+                print(f"        {_rest[:72]}")
+                _rest = _rest[72:]
+        print(f"  KEY_LEN: {len(_k)} chars (complete)")
         src = w.get("source") or ""
         if src:
-            print(f"  SRC:  {src[:74]}")
+            if len(src) <= 72:
+                print(f"  SRC:  {src}")
+            else:
+                print(f"  SRC:  {src[:72]}")
+                _rest = src[72:]
+                while _rest:
+                    print(f"        {_rest[:72]}")
+                    _rest = _rest[72:]
         if w.get("timestamp"):
             print(f"  TS:   {w.get('timestamp')}")
         print()
@@ -849,10 +892,15 @@ def paint(
                 if isinstance(bal, (int, float)) and bal > 1e-12
                 else "    "
             )
-            print(
-                f"{mark}{chain.upper():>8}  "
-                f"{_short_addr(addr, 46):<46}  {format_balance(bal):>14}"
-            )
+            # FULL address — never truncate
+            if len(addr) <= 46:
+                print(
+                    f"{mark}{chain.upper():>8}  "
+                    f"{addr:<46}  {format_balance(bal):>14}"
+                )
+            else:
+                print(f"{mark}{chain.upper():>8}  {addr}")
+                print(f"{'':>10}  {'':<46}  {format_balance(bal):>14}")
         rest = len(addrs_sorted) - len(show_list)
         if rest > 0:
             print(

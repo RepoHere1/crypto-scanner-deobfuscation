@@ -425,6 +425,45 @@ EVM_CHAINS = {
 }
 
 
+def _is_noise_address(chain, addr):
+    """Burn/null/hardhat/demo addresses must not count as real nonzero loot."""
+    try:
+        from crypto_iq import is_noise_address
+        return bool(is_noise_address(chain, addr))
+    except Exception:
+        # local fallback if crypto_iq unavailable
+        a = (addr or "").strip().lower()
+        if not a:
+            return True
+        if a.startswith("0x") and len(a) == 42:
+            body = a[2:]
+            if body == "0" * 40 or body == "f" * 40:
+                return True
+            if len(set(body)) == 1:
+                return True
+            if body[:38] == "0" * 38:
+                return True
+            noise = {
+                "0x000000000000000000000000000000000000dead",
+                "0x1234567890123456789012345678901234567890",
+                "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266",
+                "0x70997970c51812dc3a010c7d01b50e0d17dc79c8",
+                "0x3c44cdddb6a900fa2b585dd299e03d12fa4293bc",
+                "0x90f79bf6eb2c4f870365e785982e1f101e93b906",
+                "0x15d34aaf54267db7d7c367839aaf71a00a2c6a65",
+                "0x9965507d1a55bcc2695c58ba16fb37d819b0a4dc",
+                "0x976ea74026e726554db657fa54763abd0c3a0aa9",
+                "0x14dc79964da2c08b23698b3d3cc7ca32193d9955",
+                "0x23618e81e3f5cdf7f54c3d65f7fbc0abf5b21e8f",
+                "0xa0ee7a142d267c1f36714e4a8f75612f20a79720",
+                "0x7e5f4552091a69125d5dfcb7b8c2659029395bdf",
+                "0xdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
+                "0xdeaddeaddeaddeaddeaddeaddeaddeaddeaddead",
+            }
+            return a in noise
+        return False
+
+
 def _norm_addr(chain, addr):
     """Normalize (chain, addr) so EVM casing does not split the same wallet."""
     chain = (chain or "?").lower()
@@ -465,7 +504,13 @@ def summarize_balances():
                 if bal is None and (rec.get("settled") or rec.get("invalid")):
                     bal = 0.0
                 # keep display address from newest record
-                latest[key] = {"balance": bal, "address": addr, "checked_at": rec.get("checked_at"), "ts": ts}
+                latest[key] = {
+                    "balance": bal,
+                    "address": addr,
+                    "checked_at": rec.get("checked_at"),
+                    "ts": ts,
+                    "noise": _is_noise_address(chain, addr),
+                }
                 ca = rec.get("checked_at")
                 if ca and (newest_check is None or ca > newest_check):
                     newest_check = ca
@@ -474,6 +519,9 @@ def summarize_balances():
         for (chain, _naddr), info in latest.items():
             bal = info["balance"]
             flat[(chain, info["address"])] = bal
+            # truthful totals: skip burn/null/hardhat demo wallets
+            if info.get("noise"):
+                continue
             if isinstance(bal, (int, float)) and bal > 1e-12:
                 totals[chain] += float(bal)
         return totals, flat, newest_check
@@ -503,6 +551,8 @@ def nonzero_hits():
                     chain = (rec.get("chain") or "?").lower()
                     addr = rec.get("address") or ""
                     if not addr:
+                        continue
+                    if _is_noise_address(chain, addr):
                         continue
                     nk = _norm_addr(chain, addr)
                     prev = best.get(nk)
@@ -574,6 +624,8 @@ def wallet_truth_summary(max_wallets=6):
                     addr = rec.get("address") or ""
                     if not addr:
                         continue
+                    if _is_noise_address(chain, addr):
+                        continue
                     nk = _norm_addr(chain, addr)
                     ts = float(rec.get("ts") or 0)
                     prev = balances.get(nk)
@@ -604,6 +656,8 @@ def wallet_truth_summary(max_wallets=6):
                     chain = (rec.get("chain") or "?").lower()
                     addr = rec.get("address") or ""
                     if not addr:
+                        continue
+                    if _is_noise_address(chain, addr):
                         continue
                     nk = _norm_addr(chain, addr)
                     ts = float(rec.get("ts") or 0)
@@ -826,10 +880,16 @@ def render(spinner_char=""):
     lines.append(thin)
     if latest:
         total_addrs = len(latest)
-        nonzero = sum(1 for bal in latest.values() if isinstance(bal, (int, float)) and bal > 1e-12)
-        pending = sum(1 for bal in latest.values() if bal is None)
+        nonzero = 0
+        pending = 0
+        for (chain, addr), bal in latest.items():
+            if bal is None:
+                pending += 1
+                continue
+            if isinstance(bal, (int, float)) and bal > 1e-12 and not _is_noise_address(chain, addr):
+                nonzero += 1
         lines.append(f"  Addresses checked : {total_addrs:,}")
-        lines.append(f"  Non-zero balances : {nonzero}")
+        lines.append(f"  Non-zero balances : {nonzero}  {DIM}(excl. burn/demo){RESET}")
         if pending:
             lines.append(f"  Pending / failed  : {pending}")
         if newest_check:
@@ -860,7 +920,7 @@ def render(spinner_char=""):
     wt = wallet_truth_summary()
     if wt is not None:
         nz_n = wt.get("nonzero_count", len(wt.get("nonzero") or []))
-        lines.append(f"{BOLD}  WALLET TRUTH (CACHE + HITS, DEDUPED){RESET}")
+        lines.append(f"{BOLD}  WALLET TRUTH (CACHE + HITS, DEDUPED, NO NOISE){RESET}")
         lines.append(thin)
         lines.append(
             f"  Unique keys (last ~2MB mem): {wt['wallets']:,}  "
@@ -891,7 +951,7 @@ def render(spinner_char=""):
         lines.append("")
 
     if hits:
-        lines.append(f"{BOLD}  NONZERO BALANCE HITS ({len(hits)} unique){RESET}")
+        lines.append(f"{BOLD}  NONZERO BALANCE HITS ({len(hits)} unique, real){RESET}")
         lines.append(thin)
         for rec in hits[:8]:
             chain = rec.get("chain", "?")

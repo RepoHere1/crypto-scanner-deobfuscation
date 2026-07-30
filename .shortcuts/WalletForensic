@@ -1,0 +1,7 @@
+#!/data/data/com.termux/files/usr/bin/bash
+# WalletX forensic examiner — idle-refresh 120s, full keys, live only
+clear
+python3 "$HOME/wallet_forensic.py" --funded-only --idle-sec 120 --tick-sec 2 --batch 24
+echo ""
+read -n 1 -s -r -p "Tap any key to close..." || true
+echo ""

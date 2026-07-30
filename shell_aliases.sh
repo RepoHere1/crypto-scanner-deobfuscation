@@ -31,3 +31,11 @@ alias stackwatch='python3 "$HOME/watch2.py" -i 5'
 alias keepgo='python3 "$HOME/keepalive.py" --daemon'
 alias keepstatus='python3 "$HOME/keepalive.py" --status'
 alias keepstop='python3 "$HOME/keepalive.py" --stop'
+
+# Forensic static examiner (does NOT replace walletview rotator)
+alias walletforensic='python3 "$HOME/wallet_forensic.py" --idle-sec 120 --tick-sec 2 --batch 24'
+alias wforensic='python3 "$HOME/wallet_forensic.py" --idle-sec 120 --tick-sec 2 --batch 24'
+alias walletx='python3 "$HOME/wallet_forensic.py" --funded-only --idle-sec 120 --tick-sec 2 --batch 24'
+alias wforensic1='python3 "$HOME/wallet_forensic.py" --once --cached --funded-only'
+alias walletxdump='python3 "$HOME/wallet_forensic.py" --once --cached --funded-only'
+alias walletxexport='ls -lt "$HOME/forensic_exports" 2>/dev/null | head -20'

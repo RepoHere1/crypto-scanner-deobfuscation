@@ -392,6 +392,13 @@ def scrub_balance_hits(path: Path, apply: bool) -> Counter:
             if not isinstance(bal, (int, float)) or bal <= 1e-12:
                 stats["dust"] += 1
                 continue
+            try:
+                from crypto_iq import is_noise_address
+                if is_noise_address(chain, addr):
+                    stats["noise"] += 1
+                    continue
+            except Exception:
+                pass
             addr_key = addr.lower() if addr.startswith("0x") else addr
             k = f"{chain}:{addr_key}"
             prev = best.get(k)
@@ -401,7 +408,7 @@ def scrub_balance_hits(path: Path, apply: bool) -> Counter:
             ):
                 best[k] = rec
     stats["out"] = len(best)
-    print(f"[hits] in={stats['in']} dust={stats['dust']} unique_nonzero={stats['out']} apply={apply}")
+    print(f"[hits] in={stats['in']} dust={stats['dust']} noise={stats['noise']} unique_nonzero={stats['out']} apply={apply}")
     if apply:
         bak = path.with_suffix(path.suffix + f".bak_denoise_{int(time.time())}")
         shutil.copy2(path, bak)
