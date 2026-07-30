@@ -81,3 +81,7 @@ denoise_run.log
 balance_cache.jsonl.lock
 balance_cache.jsonl.tmp*
 balance_cache.jsonl.tmp
+
+# Daily email reporter (local state / logs — never secrets in git)
+.daily_report_state.json
+daily_funded_report.log

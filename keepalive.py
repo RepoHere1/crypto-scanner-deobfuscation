@@ -44,12 +44,16 @@ CHECK_EVERY = 45
 TARGET_REFRESH_EVERY = 6 * 3600
 PASTE_REFRESH_EVERY = 12 * 3600
 LEARN_EVERY = 4 * 3600
+# Daily funded email: poll this often; the report script itself enforces
+# once-per-day + noon window so we only actually SMTP near REPORT_HOUR.
+DAILY_REPORT_EVERY = 10 * 60
 MIN_RESTART_GAP = 20
 
 _last_start: dict[str, float] = {}
 _last_target = 0.0
 _last_paste = 0.0
 _last_learn = 0.0
+_last_daily_report = 0.0
 _stop = False
 _log_stdout = True
 
@@ -278,6 +282,46 @@ def maybe_learn() -> None:
         log(f"learn_crawl error: {exc}")
 
 
+def maybe_daily_funded_report() -> None:
+    """Once near local noon, email full funded findings (keys + balances).
+
+    Spawns daily_funded_report.py which enforces the once-per-day + hour window
+    itself. Keepalive only polls so a reboot near noon still catches the window.
+    """
+    global _last_daily_report
+    now = time.time()
+    if now - _last_daily_report < DAILY_REPORT_EVERY:
+        return
+    report = HOME / "daily_funded_report.py"
+    if not report.exists():
+        return
+    _last_daily_report = now
+    # Skip spawn entirely outside a generous noon-ish band to save work.
+    # The child still re-checks the exact window + once-a-day lock.
+    try:
+        hour = int(os.environ.get("REPORT_HOUR") or "12")
+    except ValueError:
+        hour = 12
+    local_hour = time.localtime(now).tm_hour
+    # Allow 11,12,13 local so slow devices / late boots still fire.
+    if local_hour not in {hour, (hour - 1) % 24, (hour + 1) % 24}:
+        return
+    log("daily funded report — checking send window")
+    try:
+        logf = HOME / "daily_funded_report.log"
+        with logf.open("a", encoding="utf-8") as lf:
+            subprocess.Popen(
+                [sys.executable, str(report)],
+                cwd=str(HOME),
+                stdout=lf,
+                stderr=subprocess.STDOUT,
+                start_new_session=True,
+                env=os.environ.copy(),
+            )
+    except Exception as exc:
+        log(f"daily_funded_report spawn error: {exc}")
+
+
 def _wifi_ok(timeout: float = 4.0) -> bool:
     for url in (
         "https://www.google.com/generate_204",
@@ -312,7 +356,7 @@ def _handle_signal(signum, frame):
 
 
 def run_loop() -> int:
-    global _last_target, _last_paste, _last_learn
+    global _last_target, _last_paste, _last_learn, _last_daily_report
     _load_env()
     _wake_lock()
     signal.signal(signal.SIGTERM, _handle_signal)
@@ -320,11 +364,13 @@ def run_loop() -> int:
     _write_pid(KEEPALIVE_PID, os.getpid())
     log(f"keepalive START pid={os.getpid()} check_every={CHECK_EVERY}s")
     log(f"alchemy={'yes' if os.environ.get('ALCHEMY_API_KEY') else 'no'} "
-        f"gh_token={'yes' if os.environ.get('GITHUB_TOKEN') else 'no'}")
+        f"gh_token={'yes' if os.environ.get('GITHUB_TOKEN') else 'no'} "
+        f"smtp={'yes' if os.environ.get('SMTP_USER') else 'no'}")
     now = time.time()
     _last_target = now
     _last_paste = now
     _last_learn = now - LEARN_EVERY + 600
+    _last_daily_report = 0.0
 
     while not _stop:
         try:
@@ -337,8 +383,9 @@ def run_loop() -> int:
                 maybe_refresh_targets()
                 maybe_paste_box()
                 maybe_learn()
-            if int(time.time()) % 1800 < CHECK_EVERY:
-                _wake_lock()
+                maybe_daily_funded_report()
+            # Re-assert wake lock every loop so Android cannot quietly drop it
+            _wake_lock()
         except Exception as exc:
             log(f"loop error: {exc}")
         left = CHECK_EVERY
