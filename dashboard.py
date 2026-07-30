@@ -1019,7 +1019,109 @@ class Spinner:
 
 
 def clear_screen():
-    sys.stdout.write("\033[H\033[2J\033[3J")
+    """Hard clear + home cursor. Also drop scrollback so Termux shows top."""
+    try:
+        sys.stdout.write("\033[H\033[2J\033[3J")
+        sys.stdout.flush()
+    except Exception:
+        pass
+
+
+def home_cursor():
+    """Force viewport/cursor to top-left (walk-by: RUNNING always visible)."""
+    try:
+        sys.stdout.write("\033[H\033[1;1H")
+        sys.stdout.flush()
+    except Exception:
+        pass
+
+
+def _visible_len(s: str) -> int:
+    """Length of string without ANSI CSI sequences."""
+    out = []
+    i = 0
+    n = len(s)
+    while i < n:
+        if s[i] == "\033" and i + 1 < n and s[i + 1] == "[":
+            i += 2
+            while i < n and not (64 <= ord(s[i]) <= 126):
+                i += 1
+            i += 1
+            continue
+        out.append(s[i])
+        i += 1
+    return len(out)
+
+
+def fit_frame(text: str, rows: int = 0, cols: int = 0) -> str:
+    """Clip dashboard to the live terminal so refresh never scrolls past top.
+
+    PROCESSES / RUNNING stay on screen because they are the first lines of
+    render(). Extra body is dropped with a one-line notice.
+    """
+    try:
+        tcols, trows = shutil.get_terminal_size((80, 24))
+    except Exception:
+        tcols, trows = 80, 24
+    if cols <= 0:
+        cols = max(40, tcols)
+    if rows <= 0:
+        rows = max(12, trows)
+
+    # Leave one blank row so the last line isn't eaten by a wrap/prompt.
+    budget = max(8, rows - 1)
+    raw_lines = text.splitlines()
+    body = []
+    used = 0
+    clipped = False
+    for line in raw_lines:
+        # How many terminal rows this line will occupy when soft-wrapped.
+        vis = max(1, _visible_len(line))
+        need = max(1, (vis + cols - 1) // cols)
+        # If this line won't fit with room for a notice, stop and notice.
+        if used + need > budget - 1 and body:
+            clipped = True
+            break
+        if used + need > budget:
+            clipped = True
+            break
+        body.append(line)
+        used += need
+
+    if clipped:
+        notice = (
+            f"{DIM}  … +more clipped — top pinned (RUNNING status) "
+            f"· full: python3 ~/dashboard.py{RESET}"
+        )
+        # Ensure notice fits in remaining budget.
+        while used >= budget and body:
+            last = body.pop()
+            used -= max(1, (_visible_len(last) + cols - 1) // cols)
+        if used < budget:
+            body.append(notice)
+            used += 1
+
+    while used < budget:
+        body.append("")
+        used += 1
+    return "\n".join(body)
+
+
+def paint_dashboard(spinner_char: str = "", once: bool = False) -> None:
+    """Clear, paint (height-capped in watch mode), force cursor to top."""
+    text = safe_render(spinner_char)
+    clear_screen()
+    if once:
+        sys.stdout.write(text)
+        if not text.endswith("\n"):
+            sys.stdout.write("\n")
+    else:
+        frame = fit_frame(text)
+        sys.stdout.write(frame)
+        if not frame.endswith("\n"):
+            sys.stdout.write("\n")
+        # After paint, jump view back to row 1 so walk-by sees RUNNING.
+        home_cursor()
     sys.stdout.flush()
 
 
@@ -1027,45 +1129,48 @@ def watch(interval=15):
     spinner = Spinner()
     spinner.start()
 
-    # Track user interaction to pause refresh cycles.
-    # When the user presses a key (scrolls/interacts), we stop the normal
-    # refresh loop, wait for them to finish, then wait a full minute before
-    # resuming the 15-second refresh cycle.
+    # Non-blocking stdin; drain keys but do NOT pause refresh on scroll —
+    # walk-by needs continuous top-pinned status.
     _stdin_fd = sys.stdin.fileno()
     _orig_flags = None
     try:
         import termios
+
         _orig_flags = termios.tcgetattr(_stdin_fd)
         new_flags = termios.tcgetattr(_stdin_fd)
-        new_flags[3] &= ~termios.ICANON  # disable canonical mode
-        new_flags[6][termios.VMIN] = 0   # non-blocking read
-        new_flags[6][termios.VTIME] = 0  # no timeout
+        new_flags[3] &= ~termios.ICANON
+        new_flags[3] &= ~termios.ECHO
+        new_flags[6][termios.VMIN] = 0
+        new_flags[6][termios.VTIME] = 0
         termios.tcsetattr(_stdin_fd, termios.TCSANOW, new_flags)
-    except (ImportError, termios.error, AttributeError):
-        pass  # not a TTY or termios unavailable
+    except Exception:
+        _orig_flags = None
 
-    user_active = False
-    user_active_at = 0.0
-    cooled_down = False
-
-    def _check_user_input():
-        """Return True if the user pressed a key."""
+    def _drain_stdin():
         try:
             import select
-            if select.select([sys.stdin], [], [], 0)[0]:
+
+            while select.select([sys.stdin], [], [], 0)[0]:
                 ch = sys.stdin.read(1)
-                return bool(ch)
+                if not ch:
+                    break
         except Exception:
             pass
-        return False
 
     def on_sigint(_sig, _frame):
         spinner.stop()
         if _orig_flags is not None:
             try:
+                import termios
+
                 termios.tcsetattr(_stdin_fd, termios.TCSANOW, _orig_flags)
             except Exception:
                 pass
+        try:
+            sys.stdout.write("\033[?25h")
+            sys.stdout.flush()
+        except Exception:
+            pass
         clear_screen()
         print(safe_render(" "))
         print("\nDashboard stopped.")
@@ -1074,39 +1179,37 @@ def watch(interval=15):
     signal.signal(signal.SIGINT, on_sigint)
 
     try:
+        sys.stdout.write("\033[?25l")
+        sys.stdout.flush()
+    except Exception:
+        pass
+
+    try:
         while True:
-            # Check for user keypress (scroll / interaction)
-            if _check_user_input():
-                user_active = True
-                user_active_at = time.time()
+            _drain_stdin()
+            # Every refresh: clear + paint capped frame + home to top.
+            paint_dashboard(spinner.char, once=False)
 
-            # If user was active, wait for them to finish then a full minute cooldown
-            if user_active:
-                elapsed_since_active = time.time() - user_active_at
-                # Give the user 1 second after last keypress, then 60s cooldown
-                if elapsed_since_active >= 61:
-                    user_active = False
-                    cooled_down = True
-                    user_active_at = 0.0
-                # Still animating the spinner while waiting
-                clear_screen()
-                print(f"  {BOLD}Dashboard paused — interaction detected{RESET}")
-                print(f"  Resuming auto-refresh in {max(0, 61 - int(elapsed_since_active))}s...")
-                print(f"  (Press Ctrl+C to stop)")
-                time.sleep(1)
-                continue
-
-            # Normal refresh cycle
-            clear_screen()
-            print(safe_render(spinner.char))
-
-            # Sleep in small slices so we can still detect user input
-            remaining = interval
-            while remaining > 0 and not user_active:
-                time.sleep(min(1, remaining))
-                remaining -= 1
+            remaining = float(max(1, int(interval)))
+            while remaining > 0:
+                time.sleep(min(0.5, remaining))
+                remaining -= 0.5
+                _drain_stdin()
     except KeyboardInterrupt:
         on_sigint(None, None)
+    finally:
+        if _orig_flags is not None:
+            try:
+                import termios
+
+                termios.tcsetattr(_stdin_fd, termios.TCSANOW, _orig_flags)
+            except Exception:
+                pass
+        try:
+            sys.stdout.write("\033[?25h")
+            sys.stdout.flush()
+        except Exception:
+            pass
 
 
 def safe_render(spinner_char=""):
@@ -1130,7 +1233,7 @@ def main():
     if args.watch:
         watch(args.interval)
     else:
-        print(safe_render())
+        paint_dashboard(once=True)
 
 
 if __name__ == "__main__":
