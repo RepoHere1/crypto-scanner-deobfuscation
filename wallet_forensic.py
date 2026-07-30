@@ -6,6 +6,8 @@ Stability / UX:
   - Does NOT auto-flip pages while you navigate
   - Auto-refresh ONLY after IDLE_REFRESH_SEC of no input (default 120s)
   - Free-run rotates dossier focus across all ranks (not stuck on #1)
+  - Refresh always pins FORENSIC DOSSIER rank #N of M at top of screen
+  - Rank / Funded / Portfolio facts are live-rescored from balance cache every paint
   - Touch/key activity resets the idle timer — scroll freely without repaint fights
   - Full private keys / seeds / WIFs / sources always printed complete (wrapped, never ellipsized)
   - Highest balance always on top; focus pinned across soft re-ranks while you navigate
@@ -147,11 +149,104 @@ def _show_cursor():
 
 
 def _safe_clear():
+    """Hard clear + drop scrollback so Termux lands at top of frame."""
     try:
-        sys.stdout.write("\033[H\033[J")
+        sys.stdout.write("\033[H\033[2J\033[3J")
         sys.stdout.flush()
     except Exception:
         pass
+
+
+def _home_cursor():
+    """Force viewport to top-left after paint (walk-by: rank #N always visible)."""
+    try:
+        sys.stdout.write("\033[H\033[1;1H")
+        sys.stdout.flush()
+    except Exception:
+        pass
+
+
+def _visible_len(s: str) -> int:
+    out = []
+    i = 0
+    n = len(s or "")
+    while i < n:
+        if s[i] == "\033" and i + 1 < n and s[i + 1] == "[":
+            i += 2
+            while i < n and not (64 <= ord(s[i]) <= 126):
+                i += 1
+            i += 1
+            continue
+        out.append(s[i])
+        i += 1
+    return len(out)
+
+
+def _term_size():
+    try:
+        import shutil
+        c, r = shutil.get_terminal_size((80, 24))
+        return max(40, int(c)), max(12, int(r))
+    except Exception:
+        return 80, 24
+
+
+def _fit_frame(lines: list, rows: int = 0, cols: int = 0) -> str:
+    """Clip paint lines to terminal height. First lines (dossier rank) stay."""
+    tcols, trows = _term_size()
+    if cols <= 0:
+        cols = tcols
+    if rows <= 0:
+        rows = trows
+    budget = max(8, rows - 1)
+    body = []
+    used = 0
+    clipped = False
+    for line in lines:
+        vis = max(1, _visible_len(line))
+        need = max(1, (vis + cols - 1) // cols)
+        if used + need > budget - 1 and body:
+            clipped = True
+            break
+        if used + need > budget:
+            clipped = True
+            break
+        body.append(line)
+        used += need
+    if clipped:
+        notice = (
+            f"{DIM}  … +more clipped — top pinned (rank #) · "
+            f"n/p scroll dossiers · a full analyze{RESET}"
+        )
+        while used >= budget and body:
+            last = body.pop()
+            used -= max(1, (_visible_len(last) + cols - 1) // cols)
+        if used < budget:
+            body.append(notice)
+            used += 1
+    while used < budget:
+        body.append("")
+        used += 1
+    return "\n".join(body)
+
+
+def _emit_frame(lines: list, pin_top: bool = True) -> None:
+    """Clear, write height-capped frame, home cursor to top."""
+    _safe_clear()
+    frame = _fit_frame(lines) if pin_top else "\n".join(lines)
+    try:
+        sys.stdout.write(frame)
+        if not frame.endswith("\n"):
+            sys.stdout.write("\n")
+        if pin_top:
+            _home_cursor()
+        sys.stdout.flush()
+    except Exception:
+        try:
+            print("\n".join(lines))
+            sys.stdout.flush()
+        except Exception:
+            pass
 
 
 def _print_full(label: str, value: str, indent: str = "  ", color: str = ""):
@@ -1088,55 +1183,185 @@ def paint_forensic(
     error_line: str = "",
     idle_left: float = -1.0,
     idle_sec: float = DEFAULT_IDLE_REFRESH_SEC,
+    pin_top: bool = True,
 ):
     try:
         return _paint_forensic_inner(
             ranked, balances, meta, focus, funded_only,
             status_line, live_note, error_line, idle_left, idle_sec,
+            pin_top=pin_top,
         )
     except Exception as exc:
-        _safe_clear()
-        print("=" * 78)
-        print(f"  {RED}FORENSIC PAINT ERROR{RESET}: {exc}")
-        print(f"  {DIM}{traceback.format_exc(limit=8)}{RESET}")
-        print("-" * 78)
-        sys.stdout.flush()
+        lines = [
+            "=" * 78,
+            f"  {RED}FORENSIC PAINT ERROR{RESET}: {exc}",
+            f"  {DIM}{traceback.format_exc(limit=6)}{RESET}",
+            "-" * 78,
+        ]
+        _emit_frame(lines, pin_top=True)
         return {"n": len(ranked or []), "focus": focus, "page_keys": [], "err": str(exc)}
+
+
+def _live_facts(ranked, balances, meta, focus: int, funded_only: bool):
+    """Hard-wire live production facts from current cache — never trust stale totals.
+
+    Re-scores every row against the balance cache so "rank #N of M" and Funded/
+    Portfolio numbers always match what is on disk right now.
+    """
+    raw = list(ranked or [])
+    # Fresh score from balances (production cache), drop empties if funded_only.
+    live_rows = []
+    for _sc, _p, _c, ts, w in raw:
+        try:
+            sc, pend, chk = wv.wallet_score(w, balances)
+            boost = float(w.get("_hit_boost") or 0.0)
+            if (w.get("type") or "") == "ADDR":
+                rows = wallet_addr_rows(w, balances, meta)
+                real_sum = sum(
+                    float(r["balance"])
+                    for r in rows
+                    if not r["noise"]
+                    and isinstance(r["balance"], (int, float))
+                    and r["balance"] > 1e-12
+                )
+                if real_sum > 0:
+                    sc = real_sum
+            total = sc if sc > 0 else boost
+            if funded_only and total <= 1e-12:
+                continue
+            live_rows.append((float(total), int(pend), int(chk), ts, w))
+        except Exception:
+            continue
+    live_rows.sort(key=lambda t: (t[0], t[3]), reverse=True)
+    n = len(live_rows)
+    if n == 0:
+        return {
+            "ranked": [],
+            "n": 0,
+            "focus": 0,
+            "funded_n": 0,
+            "grand": 0.0,
+            "total_bal": 0.0,
+            "pend": 0,
+            "chk": 0,
+            "w": None,
+            "rows": [],
+            "page_keys": [],
+            "top_bal": 0.0,
+        }
+    # Clamp focus into live list; try to keep same wallet if still present.
+    focus = max(0, min(n - 1, int(focus)))
+    if 0 <= focus < len(raw):
+        want = (raw[focus][4].get("type"), raw[focus][4].get("key"))
+        for i, row in enumerate(live_rows):
+            if (row[4].get("type"), row[4].get("key")) == want:
+                focus = i
+                break
+    total_bal, pend, chk, _ts, w = live_rows[focus]
+    rows = wallet_addr_rows(w, balances, meta)
+    # Live chain-sum for the focused wallet (authoritative funded flag).
+    live_sum = 0.0
+    live_pend = 0
+    live_zero = 0
+    for r in rows:
+        if r["noise"]:
+            continue
+        b = r["balance"]
+        if isinstance(b, (int, float)) and b > 1e-12:
+            live_sum += float(b)
+        elif b is None:
+            live_pend += 1
+        else:
+            live_zero += 1
+    if live_sum > 0:
+        total_bal = live_sum
+        # keep ranked row in sync for this paint
+        tb, p, c, ts, ww = live_rows[focus]
+        live_rows[focus] = (total_bal, live_pend, live_zero, ts, ww)
+    else:
+        pend, chk = live_pend, live_zero
+    funded_n = sum(1 for t, *_ in live_rows if t > 1e-12)
+    grand = sum(t for t, *_ in live_rows if t > 1e-12)
+    top_bal = live_rows[0][0] if live_rows else 0.0
+    page_keys = [(r["chain"], r["address"]) for r in rows if not r["noise"]]
+    return {
+        "ranked": live_rows,
+        "n": n,
+        "focus": focus,
+        "funded_n": funded_n,
+        "grand": grand,
+        "total_bal": float(total_bal),
+        "pend": int(pend),
+        "chk": int(chk),
+        "w": w,
+        "rows": rows,
+        "page_keys": page_keys,
+        "top_bal": float(top_bal),
+    }
+
+
+def _line_full(label: str, value: str, color: str = "") -> list:
+    """Same as _print_full but returns lines (never truncates key material)."""
+    val = "" if value is None else str(value)
+    indent = "  "
+    prefix_plain_len = len(indent) + len(label) + 1
+    pad = " " * prefix_plain_len
+    head = f"{indent}{BOLD}{label}{RESET} "
+    if not val:
+        return [f"{head}{DIM}(empty){RESET}"]
+    first_budget = max(8, WRAP_WIDTH)
+    out = []
+    if len(val) <= first_budget:
+        out.append(f"{head}{color}{val}{RESET if color else ''}")
+        return out
+    out.append(f"{head}{color}{val[:first_budget]}{RESET if color else ''}")
+    rest = val[first_budget:]
+    while rest:
+        chunk = rest[: WRAP_WIDTH + 8]
+        rest = rest[WRAP_WIDTH + 8 :]
+        out.append(f"{pad}{color}{chunk}{RESET if color else ''}")
+    return out
 
 
 def _paint_forensic_inner(
     ranked, balances, meta, focus, funded_only,
     status_line, live_note, error_line, idle_left, idle_sec,
+    pin_top: bool = True,
 ):
-    n = len(ranked or [])
-    if n == 0:
-        _safe_clear()
-        print("=" * 78)
-        print(" " * 14 + f"{BOLD}{MAGENTA}WALLETX FORENSIC EXAMINER{RESET}")
-        print("=" * 78)
-        print()
-        print("  No wallets to examine yet.")
-        print("  Wait for scanner findings, or drop --funded-only.")
+    facts = _live_facts(ranked, balances, meta, focus, funded_only)
+    ranked = facts["ranked"]
+    n = facts["n"]
+    focus = facts["focus"]
+    funded_n = facts["funded_n"]
+    grand = facts["grand"]
+    total_bal = facts["total_bal"]
+    pend = facts["pend"]
+    chk = facts["chk"]
+    w = facts["w"]
+    rows = facts["rows"]
+    page_keys = facts["page_keys"]
+    top_bal = facts["top_bal"]
+
+    if n == 0 or w is None:
+        lines = [
+            "=" * 78,
+            " " * 14 + f"{BOLD}{MAGENTA}WALLETX FORENSIC EXAMINER{RESET}",
+            "=" * 78,
+            "",
+            "  No wallets to examine yet.",
+            "  Wait for scanner findings, or drop --funded-only.",
+        ]
         if error_line:
-            print(f"  {RED}{error_line}{RESET}")
+            lines.append(f"  {RED}{error_line}{RESET}")
         if status_line:
-            print(f"  {DIM}{status_line}{RESET}")
-        print("-" * 78)
-        print(
+            lines.append(f"  {DIM}{status_line}{RESET}")
+        lines.append("-" * 78)
+        lines.append(
             f"  {DIM}q quit · r force-reload · f toggle funded · "
             f"idle-refresh {int(idle_sec)}s{RESET}"
         )
-        sys.stdout.flush()
-        return {"n": 0, "focus": 0, "page_keys": []}
-
-    focus = max(0, min(n - 1, int(focus)))
-    total_bal, pend, chk, ts, w = ranked[focus]
-    rows = wallet_addr_rows(w, balances, meta)
-    page_keys = [(r["chain"], r["address"]) for r in rows if not r["noise"]]
-
-    funded_n = sum(1 for t, *_ in ranked if t > 1e-12)
-    grand = sum(t for t, *_ in ranked if t > 1e-12)
-    top_bal = ranked[0][0] if ranked else 0.0
+        _emit_frame(lines, pin_top=pin_top)
+        return {"n": 0, "focus": 0, "page_keys": [], "funded_n": 0, "grand": 0.0}
 
     try:
         with wv._refresh_lock:
@@ -1149,13 +1374,11 @@ def _paint_forensic_inner(
     except Exception as exc:
         bundle = {"error": str(exc)}
 
-    # Spot USD prices (cached 5 min via CoinGecko) for visual $ next to balances
     try:
         prices = wv.get_usd_prices()
     except Exception:
         prices = {}
 
-    # Portfolio USD across all ranked wallets (priced chains only)
     portfolio_usd = 0.0
     portfolio_usd_any = False
     for row in ranked:
@@ -1172,169 +1395,111 @@ def _paint_forensic_inner(
     except Exception:
         focus_usd = None
 
-    _safe_clear()
-    print("=" * 78)
-    print(
-        " " * 10
-        + f"{BOLD}{MAGENTA}WALLETX FORENSIC EXAMINER{RESET}  "
-        + f"{DIM}(static · idle-refresh · no truncation){RESET}"
+    # LIVE hard facts — single source of truth for the header the user walks by.
+    rank_no = focus + 1
+    funded_tag = (
+        f"· {GREEN}FUNDED{RESET}" if total_bal > 1e-12 else f"· {DIM}empty{RESET}"
     )
-    print("=" * 78)
-    print(
-        f"  Ranked by {GREEN}highest live balance{RESET}  ·  "
-        f"{'FUNDED ONLY' if funded_only else 'all wallets'}  ·  "
-        f"examining {CYAN}#{focus + 1}/{n}{RESET}"
+    mode = "FUNDED ONLY" if funded_only else "all wallets"
+    now_z = datetime.now(timezone.utc).strftime("%H:%M:%S") + "Z"
+
+    lines = []
+    # ═══ TOP PIN: dossier rank first so refresh always lands on #N of M ═══
+    lines.append("=" * 78)
+    lines.append(
+        f"  {BOLD}{WHITE}FORENSIC DOSSIER{RESET}  "
+        f"— rank {CYAN}#{rank_no}{RESET} of {CYAN}{n}{RESET}  {funded_tag}  "
+        f"{DIM}LIVE{RESET}"
     )
-    print(
-        f"  Funded: {GREEN}{funded_n}{RESET}   "
-        f"Portfolio: {GREEN}{grand:,.10f}{RESET}"
-        + (
-            f"  {wv.format_usd(portfolio_usd, color=True)}"
-            if portfolio_usd_any
-            else ""
-        )
-        + f"   Keys: {n}   "
-        f"{datetime.now(timezone.utc).strftime('%H:%M:%S')}Z"
+    lines.append(
+        f"  {DIM}examining {CYAN}#{rank_no}/{n}{RESET}  ·  "
+        f"{mode}  ·  live production  ·  {now_z}{RESET}"
+    )
+    lines.append("=" * 78)
+
+    # Compact live stats strip (always current)
+    usd_port = (
+        f"  {wv.format_usd(portfolio_usd, color=True)}" if portfolio_usd_any else ""
+    )
+    lines.append(
+        f"  Funded: {GREEN}{funded_n}{RESET}/{n}   "
+        f"Portfolio: {GREEN}{grand:,.8f}{RESET}{usd_port}   "
+        f"Keys: {n}"
     )
     if idle_left >= 0:
         if idle_left > 0:
             mins = int(idle_left) // 60
             secs = int(idle_left) % 60
-            print(
-                f"  {GREEN}FROZEN{RESET}  {CYAN}free-run in {mins:02d}:{secs:02d}{RESET}  "
-                f"{DIM}(any touch/key resets · no reload until {int(idle_sec)}s silence){RESET}"
+            lines.append(
+                f"  {GREEN}FROZEN{RESET}  free-run in {CYAN}{mins:02d}:{secs:02d}{RESET}  "
+                f"{DIM}(touch resets){RESET}"
             )
         else:
-            print(
-                f"  {YELLOW}FREE-RUN active — refreshing + rotating ranks "
-                f"(touch freezes again){RESET}"
+            lines.append(
+                f"  {YELLOW}FREE-RUN{RESET}  rotating ranks + live RPC  "
+                f"{DIM}(touch freezes){RESET}"
             )
     if rs.get("running"):
-        print(
+        lines.append(
             f"  {CYAN}Live RPC: {rs.get('done', 0)}/{rs.get('total', 0)}  "
             f"{rs.get('last_msg', '')}{RESET}"
         )
     elif live_note:
-        print(f"  {DIM}{live_note}{RESET}")
+        lines.append(f"  {DIM}{live_note}{RESET}")
     if status_line:
-        print(f"  {DIM}{status_line}{RESET}")
+        lines.append(f"  {DIM}{status_line}{RESET}")
     if error_line:
-        print(f"  {RED}! {error_line}{RESET}")
-    print()
+        lines.append(f"  {RED}! {error_line}{RESET}")
 
-    print(f"  {BOLD}LEADERBOARD — highest balance on top{RESET}")
-    print(
-        f"  {'#':>4}  {'TYPE':<5}  {'BALANCE':>16}  {'USD':>10}  "
-        f"{'BAR':<14}  KEY / ADDRESS"
-    )
-    print(f"  {'-'*4}  {'-'*5}  {'-'*16}  {'-'*10}  {'-'*14}  {'-'*28}")
-    lb_n = min(LEADERBOARD_N, n)
-    for i in range(lb_n):
-        sc, _pnd, _ck, _ts, ww = ranked[i]
-        marker = f"{CYAN}▶{RESET}" if i == focus else " "
-        typ = (ww.get("type") or "?")[:5]
-        if sc > 1e-12:
-            bal_s = f"{GREEN}{sc:>16.10f}{RESET}"
-        elif sc > 0:
-            bal_s = f"{YELLOW}{sc:>16.10f}{RESET}"
-        else:
-            bal_s = f"{DIM}{'0':>16}{RESET}"
-        try:
-            row_usd = wv.wallet_usd_total(ww, balances, prices)
-        except Exception:
-            row_usd = None
-        usd_s = wv.format_usd(row_usd, width=10, color=True)
-        frac = (sc / top_bal) if top_bal > 0 else 0.0
-        show = _leaderboard_label(ww.get("key") or "", 28)
-        print(
-            f"  {marker}{i + 1:>3}  {typ:<5}  {bal_s}  {usd_s}  "
-            f"{_bar(frac, 12)}  {show}"
-        )
-    if n > lb_n:
-        print(f"  {DIM}  … +{n - lb_n} more  (n/p or 1-9 / g N){RESET}")
-    print()
-
-    print("─" * 78)
-    funded_tag = (
-        f"· {GREEN}FUNDED{RESET}" if total_bal > 1e-12 else f"· {DIM}empty{RESET}"
-    )
-    print(
-        f"  {BOLD}{WHITE}FORENSIC DOSSIER{RESET}  "
-        f"— rank {CYAN}#{focus + 1}{RESET} of {n}  {funded_tag}"
-    )
-    print("─" * 78)
-
+    # Focus wallet core facts (always on-screen with rank header)
     typ = w.get("type") or "?"
     key = w.get("key") or ""
     src = w.get("source") or ""
     found_ts = w.get("timestamp") or ""
-
-    print(f"  {BOLD}TYPE{RESET}      {typ}")
+    lines.append("─" * 78)
+    lines.append(f"  {BOLD}TYPE{RESET}      {typ}")
     chains_meta = w.get("_chains") or []
     if chains_meta and len(chains_meta) > 1:
-        print(
+        lines.append(
             f"  {BOLD}CHAINS{RESET}    {', '.join(c.upper() for c in chains_meta)}  "
-            f"{DIM}(same address, multi-chain){RESET}"
+            f"{DIM}(multi-chain){RESET}"
         )
-
-    _print_full("KEY", key, color=YELLOW if typ in ("HEX", "WIF", "SEED") else "")
-    print(f"  {BOLD}KEY_LEN{RESET}   {len(key)} chars  {DIM}(complete above){RESET}")
-
+    lines.extend(
+        _line_full("KEY", key, color=YELLOW if typ in ("HEX", "WIF", "SEED") else "")
+    )
+    lines.append(f"  {BOLD}KEY_LEN{RESET}   {len(key)} chars  {DIM}(complete){RESET}")
     if src:
-        _print_full("SOURCE", src)
+        lines.extend(_line_full("SOURCE", src))
     else:
-        print(f"  {BOLD}SOURCE{RESET}    {DIM}(unknown){RESET}")
-
-    print(f"  {BOLD}FOUND{RESET}     {found_ts or (DIM + 'n/a' + RESET)}")
-    usd_bit = ""
-    if focus_usd is not None:
-        usd_bit = f"  ≈ {wv.format_usd(focus_usd, color=True)}"
-    print(
+        lines.append(f"  {BOLD}SOURCE{RESET}    {DIM}(unknown){RESET}")
+    lines.append(f"  {BOLD}FOUND{RESET}     {found_ts or (DIM + 'n/a' + RESET)}")
+    usd_bit = f"  ≈ {wv.format_usd(focus_usd, color=True)}" if focus_usd is not None else ""
+    lines.append(
         f"  {BOLD}BALANCE{RESET}   {GREEN}{total_bal:,.12f}{RESET}{usd_bit}  "
         f"(unresolved={pend}  zeroed={chk}  chains={len(rows)})"
     )
     if w.get("_hit_boost"):
-        print(
-            f"  {BOLD}HIT BOOST{RESET} {YELLOW}{float(w['_hit_boost']):.12f}{RESET}  "
-            f"{DIM}(balances_hit / nonzero cache){RESET}"
+        lines.append(
+            f"  {BOLD}HIT BOOST{RESET} {YELLOW}{float(w['_hit_boost']):.12f}{RESET}"
         )
     if w.get("_link_method"):
-        print(f"  {BOLD}LINK VIA{RESET}  {w['_link_method']}")
-
+        lines.append(f"  {BOLD}LINK VIA{RESET}  {w['_link_method']}")
     if w.get("_linked_hex"):
-        _print_full("LINKED HEX", w["_linked_hex"], color=YELLOW)
-    for i, h in enumerate(w.get("_linked_hexes") or []):
-        if h and h != w.get("_linked_hex"):
-            _print_full(f"LINKED HEX[{i}]", h, color=YELLOW)
+        lines.extend(_line_full("LINKED HEX", w["_linked_hex"], color=YELLOW))
     if w.get("_linked_wif"):
-        _print_full("LINKED WIF", w["_linked_wif"], color=YELLOW)
-    for i, x in enumerate(w.get("_linked_wifs") or []):
-        if x and x != w.get("_linked_wif"):
-            _print_full(f"LINKED WIF[{i}]", x, color=YELLOW)
+        lines.extend(_line_full("LINKED WIF", w["_linked_wif"], color=YELLOW))
     if w.get("_linked_seed"):
-        _print_full("LINKED SEED", w["_linked_seed"], color=YELLOW)
-    for i, s in enumerate(w.get("_linked_seeds") or []):
-        if s and s != w.get("_linked_seed"):
-            _print_full(f"LINKED SEED[{i}]", s, color=YELLOW)
-    print()
+        lines.extend(_line_full("LINKED SEED", w["_linked_seed"], color=YELLOW))
 
-    try:
-        if bundle.get("analysis"):
-            _print_analysis_block(bundle["analysis"])
-        for i, la in enumerate(bundle.get("linked_analysis") or []):
-            _print_analysis_block(la, title=f"LINKED MATERIAL ANALYSIS [{i}]")
-        if bundle.get("error"):
-            print(f"  {RED}analysis error: {bundle['error']}{RESET}")
-    except Exception as exc:
-        print(f"  {RED}analysis paint: {exc}{RESET}")
-
-    print(
+    # Chain balances (compact — always live from cache)
+    lines.append("")
+    lines.append(
         f"  {BOLD}{'CHAIN':>6}  {'BAL':>12}  {'USD':>9}  "
-        f"{'AGE':>4}  FLAG  ADDRESS{RESET}"
+        f"{'AGE':>4}  FLAG{RESET}"
     )
-    print(f"  {'-'*6}  {'-'*12}  {'-'*9}  {'-'*4}  {'-'*6}  {'-'*40}")
-
+    lines.append(f"  {'-'*6}  {'-'*12}  {'-'*9}  {'-'*4}  {'-'*6}")
     show_rows = rows if not DETAIL_ADDRS else rows[:DETAIL_ADDRS]
+    # Prefer funded rows first already sorted; cap for screen if many
     for r in show_rows:
         chain = r["chain"]
         addr = r["address"]
@@ -1348,7 +1513,6 @@ def _paint_forensic_inner(
             usd_s = f"{DIM}{'—':>9}{RESET}"
             mark = " "
         elif isinstance(bal, (int, float)) and bal > 1e-12:
-            # Short flag so phone terminals don't clip "FUNDED" → "FUN"
             flag = f"{GREEN}FUNDED{RESET}"
             bal_s = f"{GREEN}{bal:>12.8f}{RESET}"
             usd_s = wv.format_usd(wv.usd_value(chain, bal, prices), width=9, color=True)
@@ -1364,35 +1528,63 @@ def _paint_forensic_inner(
             usd_s = f"{DIM}{'—':>9}{RESET}"
             mark = " "
         live_s = f" {DIM}{live}{RESET}" if live else ""
-        # Flag + amounts first (always visible), full address on same or next line
-        print(
+        lines.append(
             f"  {mark}{chain.upper():>5}  {bal_s}  {usd_s}  "
             f"{age:>4}  {flag}{live_s}"
         )
-        print(f"         {addr}")
-
-    if DETAIL_ADDRS and len(rows) > DETAIL_ADDRS:
-        print(f"  {DIM}  … {len(rows) - DETAIL_ADDRS} more (DETAIL_ADDRS=0 shows all){RESET}")
+        lines.append(f"         {addr}")
     if not rows:
-        print(f"  {DIM}  (no derived addresses){RESET}")
+        lines.append(f"  {DIM}  (no derived addresses){RESET}")
 
-    print()
-    print("─" * 78)
-    print(
+    # Compact leaderboard under the dossier (secondary — may clip on short screens)
+    lines.append("")
+    lines.append(f"  {BOLD}LEADERBOARD{RESET}  {DIM}(live · highest balance){RESET}")
+    lb_n = min(LEADERBOARD_N, n)
+    # Show a window around focus so current rank is in the mini-board
+    if n <= lb_n:
+        lb_start, lb_end = 0, n
+    else:
+        half = lb_n // 2
+        lb_start = max(0, min(n - lb_n, focus - half))
+        lb_end = lb_start + lb_n
+    for i in range(lb_start, lb_end):
+        sc, _pnd, _ck, _ts, ww = ranked[i]
+        marker = f"{CYAN}▶{RESET}" if i == focus else " "
+        typ_s = (ww.get("type") or "?")[:4]
+        if sc > 1e-12:
+            bal_s = f"{GREEN}{sc:>12.8f}{RESET}"
+        else:
+            bal_s = f"{DIM}{'0':>12}{RESET}"
+        try:
+            row_usd = wv.wallet_usd_total(ww, balances, prices)
+        except Exception:
+            row_usd = None
+        usd_s = wv.format_usd(row_usd, width=9, color=True)
+        show = _leaderboard_label(ww.get("key") or "", 22)
+        lines.append(
+            f"  {marker}{i + 1:>3}/{n:<3}  {typ_s:<4}  {bal_s}  {usd_s}  {show}"
+        )
+    if lb_start > 0 or lb_end < n:
+        lines.append(
+            f"  {DIM}  showing #{lb_start + 1}–#{lb_end} of {n}  "
+            f"(n/p move focus){RESET}"
+        )
+
+    lines.append("─" * 78)
+    lines.append(
         f"  {BOLD}KEYS{RESET}  "
         f"{CYAN}n{RESET}/→ next  {CYAN}p{RESET}/← prev  "
         f"{CYAN}g{RESET} jump  {CYAN}t{RESET} top  "
         f"{CYAN}f{RESET} funded  {CYAN}r{RESET} reload  "
-        f"{CYAN}e{RESET} export  {CYAN}a{RESET} analyze  "
-        f"{CYAN}q{RESET} quit"
+        f"{CYAN}e{RESET} export  {CYAN}q{RESET} quit"
     )
-    print(
-        f"  {DIM}FROZEN until {int(idle_sec)}s silence then free-run  ·  "
-        f"keys always full  ·  live production only  ·  "
-        f"exports → ~/forensic_exports/{RESET}"
+    lines.append(
+        f"  {DIM}LIVE facts rescore every paint  ·  top pinned on refresh  ·  "
+        f"rank #{rank_no} of {n} hard-wired{RESET}"
     )
-    print("-" * 78)
-    sys.stdout.flush()
+    lines.append("-" * 78)
+
+    _emit_frame(lines, pin_top=pin_top)
     return {
         "n": n,
         "focus": focus,
@@ -1400,6 +1592,8 @@ def _paint_forensic_inner(
         "funded_n": funded_n,
         "grand": grand,
         "bundle": bundle,
+        "ranked_live": ranked,
+        "total_bal": total_bal,
     }
 
 
@@ -1581,17 +1775,22 @@ class ForensicState:
 
     def rebuild_ranked(self):
         try:
+            # Always score against the freshest balance cache (production).
+            self.reload_balances()
             ranked = rank_wallets(self.wallets, self.balances, funded_only=False)
             ranked = ensure_top_derived(ranked, self.balances, n=80)
             ranked = rescore_ranked(ranked, self.balances)
             if self.funded_only:
                 ranked = [row for row in ranked if row[0] > 1e-12]
             self.ranked = ranked
+            self._facts_ts = time.time()
         except Exception as exc:
             self.last_error = f"rank: {exc}"
 
     def soft_rescore(self):
+        """Re-score in place from live cache. Falls back to full rebuild if empty."""
         try:
+            self.reload_balances()
             if not self.ranked:
                 self.rebuild_ranked()
                 return
@@ -1599,7 +1798,12 @@ class ForensicState:
             scored = rescore_ranked(base, self.balances)
             if self.funded_only:
                 scored = [row for row in scored if row[0] > 1e-12]
+            # If soft path dropped everyone (stale scores), do a full rebuild.
+            if not scored and self.wallets:
+                self.rebuild_ranked()
+                return
             self.ranked = scored
+            self._facts_ts = time.time()
         except Exception as exc:
             self.last_error = f"rescore: {exc}"
 
@@ -1607,11 +1811,15 @@ class ForensicState:
         self.n_cycle += 1
         self.full_gather(force=force_gather)
         self.reload_balances()
+        # Free-run / force always full rebuild so N and ranks stay live.
         if force_gather or not self.ranked:
             self.rebuild_ranked()
         else:
             self.soft_rescore()
         return self.ranked, self.balances, self.meta
+
+    def live_count(self) -> int:
+        return len(self.ranked or [])
 
 
 def load_ranked(max_wallets: int, funded_only: bool, derive_top: int = 50):
@@ -1637,10 +1845,12 @@ def _maybe_start_refresh(st: ForensicState, focus: int, live: bool, batch: int):
 
 
 def _status(st: ForensicState, focus: int, idle_sec: float, batch: int, tag: str) -> str:
+    n = len(st.ranked or [])
+    focus = max(0, min(max(0, n - 1), int(focus))) if n else 0
     return (
-        f"{tag} #{st.n_cycle} · rank {focus + 1}/{len(st.ranked)} · "
+        f"{tag} #{st.n_cycle} · rank {focus + 1}/{n} · "
         f"idle {int(idle_sec)}s · rpc {batch} · "
-        f"gather {st.gather_ms}ms · bal {st.bal_ms}ms"
+        f"gather {st.gather_ms}ms · bal {st.bal_ms}ms · LIVE"
     )
 
 
@@ -1652,12 +1862,12 @@ def _live_note(st: ForensicState, live: bool) -> str:
         rs = {}
     if rs.get("running"):
         return (
-            f"live {rs.get('done', 0)}/{rs.get('total', 0)} "
+            f"live RPC {rs.get('done', 0)}/{rs.get('total', 0)} "
             f"{rs.get('last_msg', '')}"
         )
     if not live:
-        return "cache only"
-    return "live armed · idle-refresh only"
+        return "cache only (still live-rescored facts)"
+    return "live production · idle-refresh armed"
 
 
 def paint_state(
@@ -1665,10 +1875,19 @@ def paint_state(
     force=False, idle_left: float = -1.0,
 ):
     now = time.time()
+    # Pull freshest balances before every forced paint so N/rank stay true.
+    if force:
+        try:
+            st.reload_balances()
+            st.soft_rescore()
+        except Exception:
+            pass
     note = _live_note(st, live)
     fp = visible_fingerprint(st.ranked, focus, st.funded_only, rs_sig="")
     if not force and fp == st._last_fp and (now - st.last_paint) < 30.0:
         return None
+    n = len(st.ranked or [])
+    focus = max(0, min(max(0, n - 1), int(focus))) if n else 0
     info = paint_forensic(
         st.ranked,
         st.balances,
@@ -1680,9 +1899,24 @@ def paint_state(
         error_line=st.last_error,
         idle_left=idle_left,
         idle_sec=idle_sec,
+        pin_top=True,
     )
+    # Write back hard-wired live ranked list + corrected focus from paint.
+    if info:
+        live_ranked = info.get("ranked_live")
+        if live_ranked is not None:
+            st.ranked = live_ranked
+        if "focus" in info:
+            focus = int(info["focus"])
+        st._last_fp = visible_fingerprint(
+            st.ranked, focus, st.funded_only, rs_sig=""
+        )
+    else:
+        st._last_fp = fp
     st.last_paint = time.time()
-    st._last_fp = fp
+    if info is not None:
+        info["focus"] = focus
+        info["n"] = len(st.ranked or [])
     return info
 
 
@@ -1696,15 +1930,20 @@ def cycle_once(focus, funded_only, live, batch, max_wallets, block_refresh, stat
         except Exception:
             pass
 
-    paint_forensic(
+    info = paint_forensic(
         st.ranked, st.balances, st.meta,
         focus=focus, funded_only=funded_only,
         status_line=f"{status_line} · gather {st.gather_ms}ms bal {st.bal_ms}ms",
-        live_note=("cache only" if not live else "live"),
+        live_note=("cache only" if not live else "live production"),
         error_line=st.last_error,
         idle_left=-1,
         idle_sec=DEFAULT_IDLE_REFRESH_SEC,
+        pin_top=True,
     )
+    if info:
+        if info.get("ranked_live") is not None:
+            st.ranked = info["ranked_live"]
+        focus = int(info.get("focus", focus))
 
     if not live:
         return {"focus": focus, "n": len(st.ranked)}
@@ -1726,23 +1965,33 @@ def cycle_once(focus, funded_only, live, batch, max_wallets, block_refresh, stat
         st.reload_balances()
         st.soft_rescore()
         focus = _refocus(st.ranked, target_key, focus)
-        paint_forensic(
+        info = paint_forensic(
             st.ranked, st.balances, st.meta,
             focus=focus, funded_only=funded_only,
             status_line="once · waiting live batch",
             live_note=_live_note(st, True),
             error_line=st.last_error,
+            pin_top=True,
         )
+        if info:
+            if info.get("ranked_live") is not None:
+                st.ranked = info["ranked_live"]
+            focus = int(info.get("focus", focus))
     st.reload_balances()
     st.soft_rescore()
     focus = _refocus(st.ranked, target_key, focus)
-    paint_forensic(
+    info = paint_forensic(
         st.ranked, st.balances, st.meta,
         focus=focus, funded_only=funded_only,
         status_line="once · done",
         live_note=_live_note(st, True),
         error_line=st.last_error,
+        pin_top=True,
     )
+    if info:
+        if info.get("ranked_live") is not None:
+            st.ranked = info["ranked_live"]
+        focus = int(info.get("focus", focus))
     return {"focus": focus, "n": len(st.ranked)}
 
 
@@ -1976,11 +2225,18 @@ def interactive_loop(args):
                 # FULL screen paint ONLY on: user nav / explicit r|e|a / free-run tick.
                 # NEVER while user is mid-session freezing (idle_left > 0 and no nav).
                 if force_paint or did_nav:
-                    paint_state(
+                    info = paint_state(
                         st, focus, live, idle_sec, batch,
                         tag="walletx", force=True,
                         idle_left=idle_left_now,
                     )
+                    if info and "focus" in info:
+                        focus = int(info["focus"])
+                        if st.ranked and 0 <= focus < len(st.ranked):
+                            pinned_key = (
+                                st.ranked[focus][4].get("type"),
+                                st.ranked[focus][4].get("key"),
+                            )
                     last_countdown_tick = time.time()
                 elif (
                     idle_left_now > 0
@@ -2096,10 +2352,17 @@ def watch_static(args):
                     # Keep free-running every IDLE_FREE_RUN_TICK until process ends
                     # (no interactive touch in this mode).
                     next_refresh = time.time() + IDLE_FREE_RUN_TICK
-                    paint_state(
+                    info = paint_state(
                         st, focus, live, idle_sec, batch, tag="watch",
                         force=True, idle_left=0.0,
                     )
+                    if info and "focus" in info:
+                        focus = int(info["focus"])
+                        if st.ranked and 0 <= focus < len(st.ranked):
+                            pinned_key = (
+                                st.ranked[focus][4].get("type"),
+                                st.ranked[focus][4].get("key"),
+                            )
                 elif (now - last_status) >= COUNTDOWN_UPDATE_SEC:
                     left_now = max(0.0, next_refresh - time.time())
                     mins = int(left_now) // 60
