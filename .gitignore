@@ -85,3 +85,11 @@ balance_cache.jsonl.tmp
 # Daily email reporter (local state / logs — never secrets in git)
 .daily_report_state.json
 daily_funded_report.log
+
+# Feed smooth runtime
+.feed_smooth.lock
+backups/paste/
+inbox/
+feed_smooth_run.out
+walletx_stream.log
+forensic_exports/

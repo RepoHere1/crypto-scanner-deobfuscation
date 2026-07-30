@@ -182,7 +182,8 @@ class AdaptiveThrottler:
         self._wait_for_wifi_before_launch()
         
         # Command to run the mass scan with adaptive control
-        # -j scaled by free RAM (was hard-coded 2; phone has headroom)
+        # Keep jobs low on phones — 4 concurrent trufflehog clones was pegging
+        # CPU with crypto_scanner and getting Termux LMK'd.
         try:
             mem_mb = 0.0
             with open("/proc/meminfo") as _mf:
@@ -193,12 +194,18 @@ class AdaptiveThrottler:
         except Exception:
             mem_mb = 0.0
         if mem_mb >= 6000:
-            mass_jobs = "4"
-        elif mem_mb >= 3000:
-            mass_jobs = "3"
-        else:
             mass_jobs = "2"
+        elif mem_mb >= 3000:
+            mass_jobs = "2"
+        else:
+            mass_jobs = "1"
         mass_jobs = os.environ.get("MASS_SCAN_JOBS", mass_jobs)
+        # Hard ceiling — never more than 3 on this device class
+        try:
+            if int(mass_jobs) > 3:
+                mass_jobs = "3"
+        except ValueError:
+            mass_jobs = "2"
         cmd = [
             sys.executable,
             os.path.expanduser("~/.local/lib/trufflehog-tools/mass_scan.py"),
@@ -209,6 +216,12 @@ class AdaptiveThrottler:
         
         print("[*] Launching mass scan with adaptive throttle:", " ".join(cmd))
         
+        # Ensure child is niced too
+        env = os.environ.copy()
+        env.setdefault("MASS_SCAN_JOBS", str(mass_jobs))
+        env.setdefault("BALANCE_WORKERS", env.get("BALANCE_WORKERS", "6"))
+        env.setdefault("SCAN_FROM_END", env.get("SCAN_FROM_END", "0"))
+
         proc = subprocess.Popen(
             cmd,
             cwd=HOME,
@@ -216,7 +229,13 @@ class AdaptiveThrottler:
             stderr=subprocess.STDOUT,
             text=True,
             bufsize=1,
+            env=env,
         )
+        try:
+            os.setpriority(os.PRIO_PROCESS, proc.pid, 10)
+        except Exception:
+            pass
+
         
         def cleanup(signum=None, frame=None):
             print("[!] Caught signal, terminating child...")

@@ -32,6 +32,16 @@ FAKE_RE = re.compile(
     re.I,
 )
 
+NOISE_URI_RE = re.compile(
+    r"(build/contracts|contracts-foundry/out|node_modules|go\.sum|baselines/reference|"
+    r"package-lock|yarn\.lock|mock|fixture|libsecp256k1)",
+    re.I,
+)
+SIGNAL_URI_RE = re.compile(
+    r"(\.env|secrets?|wallet|keystore|mnemonic|private|deploy|hardhat|scripts/upgrade|peggy)",
+    re.I,
+)
+
 GITHUB_URL_RE = re.compile(
     r"https?://(?:www\.)?github\.com/([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+)"
 )
@@ -159,9 +169,19 @@ class TargetIntelligence:
         # keyword bonus is tiny and only additive after real signal exists
         uri_l = (row.get("uri") or "").lower()
         if keys + bals > 0:
-            for kw in ("wallet", "crypto", "bitcoin", "ethereum", "mnemonic", "keystore", "web3"):
+            for kw in ("wallet", "crypto", "bitcoin", "ethereum", "mnemonic", "keystore", "web3",
+                       "hardhat", "peggy", "bridge", "deploy", ".env", "secret"):
                 if kw in uri_l:
-                    score += 0.02
+                    score += 0.03
+        # Demote bytecode/lockfile noise; promote secret-path URIs
+        if NOISE_URI_RE.search(uri_l) and bals == 0:
+            score *= 0.35
+        if SIGNAL_URI_RE.search(uri_l):
+            score += 0.08
+        if plat == "filesystem" and bals == 0 and keys > 0:
+            score *= 0.85
+        if plat == "github" and bals > 0:
+            score += 0.5
         row["score"] = max(score, 0.0)
         return row["score"]
 

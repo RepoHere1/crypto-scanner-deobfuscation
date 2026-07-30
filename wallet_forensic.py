@@ -4,7 +4,9 @@ WalletX — Forensic Wallet Examiner (LIVE production, no mocks, no truncation).
 
 Stability / UX:
   - Does NOT auto-flip pages while you navigate
-  - Auto-refresh ONLY after IDLE_REFRESH_SEC of no input (default 120s)
+  - Auto-refresh after IDLE_REFRESH_SEC of no input (default 120s) for free-run rotate
+  - LIVE STREAM: new funded hits / keys auto-ingest from balances_hit + memory + cache
+    without restart — leaderboard grows as findings arrive (focus stays pinned)
   - Free-run rotates dossier focus across all ranks (not stuck on #1)
   - Refresh always pins FORENSIC DOSSIER rank #N of M at top of screen
   - Rank / Funded / Portfolio facts are live-rescored from balance cache every paint
@@ -104,6 +106,9 @@ IDLE_FREE_RUN_TICK = 8.0        # while fully idle, refresh cadence (seconds)
 FREE_RUN_ROTATE = True          # cycle dossier focus across leaderboard while free-running
 COUNTDOWN_UPDATE_SEC = 30.0    # status-line only tick (no full clear) during freeze
 MEMORY_DEEP_BYTES = 6_000_000  # deeper reverse-link scan for funded addrs
+# Live stream: poll source files so new funded+key findings appear without restart.
+STREAM_POLL_SEC = float(os.environ.get("WALLETX_STREAM_SEC", "2.5"))
+STREAM_FORCE_GATHER = True  # full gather when hits/memory/cache mtime changes
 EXPORT_DIR = os.path.join(HOME, "forensic_exports")
 WRAP_WIDTH = 70                 # visual wrap only — full content always printed
 
@@ -1715,7 +1720,19 @@ def visible_fingerprint(ranked, focus: int, funded_only: bool, rs_sig: str = "")
 
 
 class ForensicState:
-    """Caches heavy gathers; idle-refresh drives full reload."""
+    """Caches heavy gathers; live file mtimes drive auto-ingest of new findings."""
+
+    # Sources that mint new funded wallets / keys for the leaderboard.
+    _WATCH_PATHS = (
+        # balances_hit grows when crypto_scanner finds nonzero balances
+        lambda: getattr(wv, "HITS_FILE", os.path.join(HOME, "balances_hit.jsonl")),
+        # balance_cache updates on every RPC settle
+        lambda: getattr(wv, "CACHE_FILE", os.path.join(HOME, "balance_cache.jsonl")),
+        # scanner memory carries HEX/WIF/SEED + reverse-link material
+        lambda: getattr(wv, "MEMORY_FILE", os.path.join(HOME, "crypto_scanner_memory.jsonl")),
+        # high-confidence stream (if present)
+        lambda: os.path.join(HOME, "high_confidence_hits.jsonl"),
+    )
 
     def __init__(self, max_wallets: int = 0, funded_only: bool = False):
         self.max_wallets = max_wallets
@@ -1735,6 +1752,114 @@ class ForensicState:
         self.bal_ms = 0
         self.n_cycle = 0
         self.last_export = ""
+        # Live stream bookkeeping
+        self._src_sig = ""
+        self._src_sizes = {}
+        self.last_stream_check = 0.0
+        self.last_stream_ingest = 0.0
+        self.stream_events = 0
+        self.stream_note = ""
+        self.prev_ranked_n = 0
+
+    def _source_signature(self):
+        """(sig_string, sizes_dict) from watched file mtime+size."""
+        parts = []
+        sizes = {}
+        for getter in self._WATCH_PATHS:
+            try:
+                path = getter() if callable(getter) else getter
+            except Exception:
+                continue
+            if not path:
+                continue
+            try:
+                st = os.stat(path)
+                mt = int(st.st_mtime_ns if hasattr(st, "st_mtime_ns") else st.st_mtime * 1e9)
+                sz = int(st.st_size)
+            except OSError:
+                mt, sz = 0, 0
+            parts.append(f"{os.path.basename(path)}:{mt}:{sz}")
+            sizes[path] = sz
+        return "|".join(parts), sizes
+
+    def sources_changed(self) -> bool:
+        sig, sizes = self._source_signature()
+        if not self._src_sig:
+            self._src_sig = sig
+            self._src_sizes = sizes
+            return False
+        if sig != self._src_sig:
+            return True
+        return False
+
+    def mark_sources_seen(self) -> None:
+        self._src_sig, self._src_sizes = self._source_signature()
+
+    def poll_live_stream(self, min_interval: float = None):
+        """If hits/memory/cache grew, re-gather + re-rank.
+
+        Returns dict:
+          changed (bool), new_funded (int), note (str)
+        Safe to call every tick — rate-limited by STREAM_POLL_SEC.
+        """
+        if min_interval is None:
+            min_interval = STREAM_POLL_SEC
+        now = time.time()
+        if (now - self.last_stream_check) < max(0.4, float(min_interval)):
+            return {"changed": False, "new_funded": 0, "note": ""}
+        self.last_stream_check = now
+
+        if not self.sources_changed() and self.ranked:
+            # Still pull balance mtime cheaply — funded scores can move without
+            # a brand-new hits line if cache settles.
+            bal_changed = False
+            try:
+                bal_changed = self.reload_balances()
+            except Exception:
+                bal_changed = False
+            if bal_changed:
+                before_n = len(self.ranked or [])
+                before_keys = {
+                    (r[4].get("type"), r[4].get("key")) for r in (self.ranked or [])
+                }
+                self.soft_rescore()
+                after_keys = {
+                    (r[4].get("type"), r[4].get("key")) for r in (self.ranked or [])
+                }
+                added = len(after_keys - before_keys)
+                if added or len(self.ranked or []) != before_n:
+                    self.stream_events += 1
+                    self.last_stream_ingest = time.time()
+                    note = f"stream +{added} funded (cache settle) · N={len(self.ranked or [])}"
+                    self.stream_note = note
+                    return {"changed": True, "new_funded": added, "note": note}
+            return {"changed": False, "new_funded": 0, "note": ""}
+
+        before_n = len(self.ranked or [])
+        before_keys = {
+            (r[4].get("type"), r[4].get("key")) for r in (self.ranked or [])
+        }
+        # Full ingest — new keys or funded ADDR hits arrived.
+        self.n_cycle += 1
+        self.full_gather(force=True)
+        self.reload_balances()
+        self.rebuild_ranked()
+        self.mark_sources_seen()
+        after_keys = {
+            (r[4].get("type"), r[4].get("key")) for r in (self.ranked or [])
+        }
+        added = len(after_keys - before_keys)
+        after_n = len(self.ranked or [])
+        self.stream_events += 1
+        self.last_stream_ingest = time.time()
+        delta_n = after_n - before_n
+        note = (
+            f"stream ingest #{self.stream_events} · "
+            f"N {before_n}→{after_n} ({delta_n:+d}) · new={added}"
+        )
+        self.stream_note = note
+        self.prev_ranked_n = after_n
+        return {"changed": True, "new_funded": added, "note": note}
 
     def full_gather(self, force: bool = False):
         now = time.time()
@@ -1748,6 +1873,7 @@ class ForensicState:
             self.wallets = shaped
             self.last_gather = time.time()
             self.gather_ms = int((time.time() - t0) * 1000)
+            self.mark_sources_seen()
         except Exception as exc:
             self.last_error = f"gather: {exc}"
 
@@ -1816,6 +1942,7 @@ class ForensicState:
             self.rebuild_ranked()
         else:
             self.soft_rescore()
+        self.mark_sources_seen()
         return self.ranked, self.balances, self.meta
 
     def live_count(self) -> int:
@@ -1847,10 +1974,20 @@ def _maybe_start_refresh(st: ForensicState, focus: int, live: bool, batch: int):
 def _status(st: ForensicState, focus: int, idle_sec: float, batch: int, tag: str) -> str:
     n = len(st.ranked or [])
     focus = max(0, min(max(0, n - 1), int(focus))) if n else 0
+    stream_bit = ""
+    if getattr(st, "stream_events", 0):
+        age = ""
+        try:
+            dt = time.time() - float(st.last_stream_ingest or 0)
+            if dt < 120:
+                age = f" {int(dt)}s ago"
+        except Exception:
+            pass
+        stream_bit = f" · stream#{st.stream_events}{age}"
     return (
         f"{tag} #{st.n_cycle} · rank {focus + 1}/{n} · "
         f"idle {int(idle_sec)}s · rpc {batch} · "
-        f"gather {st.gather_ms}ms · bal {st.bal_ms}ms · LIVE"
+        f"gather {st.gather_ms}ms · bal {st.bal_ms}ms · LIVE{stream_bit}"
     )
 
 
@@ -1860,14 +1997,26 @@ def _live_note(st: ForensicState, live: bool) -> str:
             rs = dict(wv._refresh_state)
     except Exception:
         rs = {}
+    bits = []
     if rs.get("running"):
-        return (
+        bits.append(
             f"live RPC {rs.get('done', 0)}/{rs.get('total', 0)} "
             f"{rs.get('last_msg', '')}"
         )
+    note = (getattr(st, "stream_note", "") or "").strip()
+    if note:
+        # keep last stream event visible briefly
+        try:
+            age = time.time() - float(st.last_stream_ingest or 0)
+        except Exception:
+            age = 999
+        if age < 90:
+            bits.append(note)
     if not live:
-        return "cache only (still live-rescored facts)"
-    return "live production · idle-refresh armed"
+        bits.append("cache only (still live-rescored facts)")
+    elif not bits:
+        bits.append(f"live stream · poll {STREAM_POLL_SEC:.1f}s · auto-ingest armed")
+    return " · ".join(bits)
 
 
 def paint_state(
@@ -2166,6 +2315,34 @@ def interactive_loop(args):
                     last_input = time.time()
                     free_run = False
 
+                # ── LIVE STREAM: pick up new funded hits / keys without restart ──
+                # Runs even while "frozen" for keys so the leaderboard grows as
+                # crypto_scanner writes balances_hit / memory. Focus stays pinned.
+                stream_hit = False
+                if not user_touched:
+                    try:
+                        sres = st.poll_live_stream(min_interval=STREAM_POLL_SEC)
+                    except Exception as exc:
+                        sres = {"changed": False, "new_funded": 0, "note": ""}
+                        st.last_error = f"stream: {exc}"
+                    if sres.get("changed"):
+                        stream_hit = True
+                        force_paint = True
+                        if pinned_key:
+                            focus = _refocus(st.ranked, pinned_key, focus)
+                        elif st.ranked:
+                            focus = max(0, min(len(st.ranked) - 1, focus))
+                        # Kick background RPC for newly appeared funded wallets
+                        try:
+                            _maybe_start_refresh(st, focus, live, batch)
+                        except Exception:
+                            pass
+                        try:
+                            if st.ranked:
+                                wv.ensure_derived(st.ranked[focus][4])
+                        except Exception:
+                            pass
+
                 # ── FREE-RUN only after full idle_sec with ZERO input ──
                 idle_for = time.time() - last_input
                 if (not user_touched) and idle_for >= idle_sec:
@@ -2320,8 +2497,48 @@ def watch_static(args):
             try:
                 now = time.time()
                 left = max(0.0, next_refresh - now)
-                time.sleep(min(1.0, left if left > 0 else IDLE_FREE_RUN_TICK))
+                # Wake often enough to catch new funded hits streaming in.
+                sleep_for = min(
+                    STREAM_POLL_SEC,
+                    1.0 if left > 0 else IDLE_FREE_RUN_TICK,
+                    left if left > 0 else IDLE_FREE_RUN_TICK,
+                )
+                time.sleep(max(0.2, sleep_for))
                 now = time.time()
+
+                # Live stream ingest (new balances_hit / memory / cache) — anytime.
+                stream_hit = False
+                try:
+                    sres = st.poll_live_stream(min_interval=STREAM_POLL_SEC)
+                except Exception as exc:
+                    sres = {"changed": False}
+                    st.last_error = f"stream: {exc}"
+                if sres.get("changed"):
+                    stream_hit = True
+                    if pinned_key:
+                        focus = _refocus(st.ranked, pinned_key, focus)
+                    try:
+                        _maybe_start_refresh(st, focus, live, batch)
+                    except Exception:
+                        pass
+                    try:
+                        if st.ranked:
+                            wv.ensure_derived(st.ranked[focus][4])
+                    except Exception:
+                        pass
+                    info = paint_state(
+                        st, focus, live, idle_sec, batch, tag="watch",
+                        force=True, idle_left=max(0.0, next_refresh - time.time()),
+                    )
+                    if info and "focus" in info:
+                        focus = int(info["focus"])
+                        if st.ranked and 0 <= focus < len(st.ranked):
+                            pinned_key = (
+                                st.ranked[focus][4].get("type"),
+                                st.ranked[focus][4].get("key"),
+                            )
+                    last_status = time.time()
+
                 if now >= next_refresh:
                     # free-run window
                     st.snapshot(force_gather=True)

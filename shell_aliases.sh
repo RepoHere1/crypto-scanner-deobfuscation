@@ -33,9 +33,15 @@ alias keepstatus='python3 "$HOME/keepalive.py" --status'
 alias keepstop='python3 "$HOME/keepalive.py" --stop'
 
 # Forensic static examiner (does NOT replace walletview rotator)
-alias walletforensic='python3 "$HOME/wallet_forensic.py" --idle-sec 120 --tick-sec 2 --batch 24'
-alias wforensic='python3 "$HOME/wallet_forensic.py" --idle-sec 120 --tick-sec 2 --batch 24'
-alias walletx='python3 "$HOME/wallet_forensic.py" --funded-only --idle-sec 120 --tick-sec 2 --batch 24'
+alias walletforensic='python3 "$HOME/wallet_forensic.py" --idle-sec 120 --tick-sec 0.35 --batch 24'
+alias wforensic='python3 "$HOME/wallet_forensic.py" --idle-sec 120 --tick-sec 0.35 --batch 24'
+alias walletx='python3 "$HOME/wallet_forensic.py" --funded-only --idle-sec 120 --tick-sec 0.35 --batch 24'
 alias wforensic1='python3 "$HOME/wallet_forensic.py" --once --cached --funded-only'
 alias walletxdump='python3 "$HOME/wallet_forensic.py" --once --cached --funded-only'
 alias walletxexport='ls -lt "$HOME/forensic_exports" 2>/dev/null | head -20'
+
+# Smooth URL feed (backup + clean + IQ-rank + reload mass_scan)
+alias feed='python3 "$HOME/feed_smooth.py" --restart'
+alias feedstatus='python3 "$HOME/feed_smooth.py" --status'
+alias feedurls='bash "$HOME/feed_urls.sh"'
+alias inbox='mkdir -p "$HOME/inbox" && echo "drop files in $HOME/inbox then: feed"'
