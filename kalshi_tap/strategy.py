@@ -115,11 +115,19 @@ class BetStrategy:
 
         A single bet wins when its side resolves correctly. Payout = 1/price.
         This catches high-probability bets that don't have a good pair partner.
+        Short-expiry bets (<2h) require higher probability — less time to be right.
         """
         self._refresh()
         cp = self._cal_prob(bet)
         price = bet.market_price
         payout = 1.0 / price if price > 0 else 1.0
+
+        # Time-decay: short-expiry bets need HIGHER probability
+        tte_hours = getattr(bet, 'tte_hours', 24)
+        if tte_hours < 2:
+            cp *= 0.85  # Penalty for near-expiry uncertainty
+        elif tte_hours < 4:
+            cp *= 0.92
 
         # Single bets need HIGHER probability — no hedge partner to fall back on
         min_prob = 0.65 if self._mode == StrategyMode.COLD else 0.55
