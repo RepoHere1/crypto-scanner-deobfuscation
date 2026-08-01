@@ -242,13 +242,27 @@ class OutcomeResolver:
         conn.execute("PRAGMA journal_mode=WAL")
 
         # Get all unique tickers from unresolved recommendations
-        tickers = self._unresolved_tickers(conn)
-        if not tickers:
-            logger.info("No unresolved recommendations to check")
+        all_tickers = self._unresolved_tickers(conn)
+        if not all_tickers:
             conn.close()
             return 0
 
-        logger.info("Checking outcomes for %d tickers...", len(tickers))
+        # Skip tickers checked recently (avoid re-checking stale old-analysis tickers)
+        now = time.time()
+        if not hasattr(self, '_ticker_checked_at'):
+            self._ticker_checked_at: dict[str, float] = {}
+        tickers = [t for t in all_tickers
+                   if now - self._ticker_checked_at.get(t, 0) > 300]
+        if not tickers:
+            conn.close()
+            return 0
+
+        # Mark as checked
+        for t in tickers:
+            self._ticker_checked_at[t] = now
+
+        logger.info("Checking outcomes for %d tickers (%d skipped, checked recently)...",
+                   len(tickers), len(all_tickers) - len(tickers))
 
         # Fetch outcomes from Kalshi, respecting rate limits
         outcomes: dict[str, str] = {}

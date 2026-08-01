@@ -539,9 +539,44 @@ class Autopilot:
 
 
 # ---------------------------------------------------------------------------
-# Dashboard formatter — clean readable text, no ANSI, no emoji spam
-# ---------------------------------------------------------------------------
+# Dashboard formatter - colors, icons, bold top summary (light-terminal safe)
+_ESC=chr(27);R=_ESC+"[0m";B=_ESC+"[1m";D=_ESC+"[2m";G=_ESC+"[32m";RD=_ESC+"[31m";YL=_ESC+"[33m";BL=_ESC+"[34m";MG=_ESC+"[35m";CY=_ESC+"[36m"
 
+def format_autopilot_dashboard(pilot,status,last_pair,price_usd,volatility,series="BTC"):
+    bal=status["balance"];pnl=status["total_pnl"];pct=(bal/pilot.cfg.starting_balance-1)*100
+    s=status["stats"];wt=pilot.stats["wins"]+pilot.stats["losses"]
+    wr=(pilot.stats["wins"]/wt*100)if wt>0 else 0.0
+    bc=G if bal>=pilot.cfg.starting_balance else(YL if bal>=pilot.cfg.starting_balance*0.75 else RD)
+    pc=G if pnl>=0 else RD
+    strat=""
+    if pilot._strategy:
+        ss=pilot._strategy.status();strat=f"  {MG}STRAT{R} {ss['mode']} {CY}{ss['samples']}cal{R}"
+    lines=[f"{D}{'='*66}{R}",
+        f"  {B}KALSHI-AUTO v3{R}  {BL}${price_usd:,.0f}{R} {series}  {CY}vol {volatility*100:.0f}%{R}  {MG}scan #{s['scans']:04d}{R}{strat}",
+        f"  {bc}{B}${bal:,.2f}{R}  {pc}P&L {pnl:+,.2f} ({pct:+.1f}%){R}  WR {wr:.0f}% ({wt} legs)  DD {1-bal/pilot.cfg.starting_balance if bal<pilot.cfg.starting_balance else 0:.0%}",
+        f"  open {status['open_count']}  settled {status['settled_count']}  new {status['placed_this_scan']}",
+        f"{D}{'='*66}{R}"]
+    if status["stopped"]:lines.append(f"  {RD}{B}STOPPED: {status['stopped_reason']}{R}")
+    if last_pair:
+        a=last_pair.bet_a;b=last_pair.bet_b;same=f" {RD}SAME-DIR{R}"if a.direction==b.direction else""
+        lines.append(f"  {YL}top{same}{R}: {a.side.upper()} {BL}${a.strike:,.0f}{R}@{YL}{a.price_cents}c{R} x {b.side.upper()} {BL}${b.strike:,.0f}{R}@{YL}{b.price_cents}c{R}")
+        lines.append(f"    score={MG}{last_pair.hedge_score:.4f}{R}  P(>=1)={CY}{last_pair.joint_win_prob:.0%}{R}  min={G}${last_pair.min_payout:.0f}{R} max=${last_pair.max_payout:.0f} {G}{last_pair.payout_ratio:.0f}x{R}")
+    op=pilot.get_open_positions()
+    if op:
+        lines.append(f"  OPEN ({len(op)}):")
+        for p in op[-8:]:
+            if p.pair_type=="sniper":lines.append(f"    #{p.pos_id} {MG}SNIPER{R} {p.side_a.upper()} ${p.strike_a:,.0f} @{int(p.price_a*100)}c x{p.contracts_a} | ${p.cost_a:.2f}")
+            else:lines.append(f"    #{p.pos_id} {p.side_a.upper()} ${p.strike_a:,.0f} @{int(p.price_a*100)}c + {p.side_b.upper()} ${p.strike_b:,.0f} @{int(p.price_b*100)}c | ${p.total_cost:.2f}")
+    rc=pilot.get_recent_settlements(8)
+    if rc:
+        lines.append(f"  SETTLED ({len(rc)}):")
+        for p in rc:
+            oa=f"{G}WIN{R}"if p.outcome_a=="won"else f"{RD}LOSE{R}"
+            ps=f"{G}+${p.pnl:.2f}{R}"if p.pnl>=0 else f"{RD}-${abs(p.pnl):.2f}{R}"
+            if p.pair_type=="sniper":lines.append(f"    #{p.pos_id} {p.side_a.upper()} ${p.strike_a:,.0f} {oa} | {ps}")
+            else:ob=f"{G}WIN{R}"if p.outcome_b=="won"else f"{RD}LOSE{R}";lines.append(f"    #{p.pos_id} {oa}/{ob} {p.side_a.upper()} ${p.strike_a:,.0f}+{p.side_b.upper()} ${p.strike_b:,.0f} | {ps}")
+    lines.append(f"{D}{'='*66}{R}")
+    return "\n".join(lines)
 
 def format_autopilot_dashboard(
     pilot: Autopilot,
