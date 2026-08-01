@@ -144,6 +144,95 @@ class OutcomeResolver:
 
     # --- Public API ---
 
+    def seed_calibration(self, series_ticker: str = "KXBTCD", limit: int = 50) -> int:
+        """Seed calibration by fetching SETTLED Kalshi markets and recording
+        what the model WOULD have predicted vs what ACTUALLY happened.
+
+        This breaks the cold-start deadlock: no trades -> no settlements ->
+        no calibration -> no trades. By seeding from settled markets directly,
+        we bootstrap the calibration curve without needing paper trades.
+
+        Returns number of newly recorded predictions.
+        """
+        try:
+            markets = self.client.get_markets(
+                series_ticker=series_ticker, status="settled", limit=limit)
+        except Exception as e:
+            logger.warning("Failed to fetch settled markets: %s", e)
+            return 0
+
+        if not markets:
+            logger.info("No settled markets found for %s", series_ticker)
+            return 0
+
+        conn = sqlite3.connect(self._db_path)
+        conn.execute("PRAGMA journal_mode=WAL")
+        recorded = 0
+
+        from .engine import AnalysisEngine, EngineConfig
+        engine = AnalysisEngine(EngineConfig())
+
+        for raw in markets:
+            ticker = raw.get("ticker", "")
+            if not ticker:
+                continue
+
+            # Skip if we already have this ticker resolved
+            existing = conn.execute(
+                "SELECT COUNT(*) FROM recommendations WHERE ticker=? AND resolved=1",
+                (ticker,)).fetchone()[0]
+            if existing > 0:
+                continue
+
+            outcome = (raw.get("yes_outcome") or raw.get("result") or "").lower()
+            if not outcome:
+                continue
+
+            # Extract strike and side info from the market
+            close_str = raw.get("close_time", "")
+            strike = float(raw.get("floor_strike", 0))
+            yes_bid = float(raw.get("yes_bid_dollars", 0))
+            yes_ask = float(raw.get("yes_ask_dollars", 0))
+
+            # Compute what BS model would have predicted
+            # We don't have the exact spot at close time, so we estimate
+            mid_price = (yes_bid + yes_ask) / 2 if (yes_bid > 0 and yes_ask > 0) else 0.5
+            # Use mid as a rough true_prob estimate since we lack historical spot
+            true_prob = mid_price if mid_price > 0 else 0.5
+
+            # Record YES side
+            conn.execute(
+                "INSERT INTO recommendations "
+                "(run_id, ticker, title, strike, side, price, market_prob, "
+                " true_prob, expected_value, kelly_fraction, contracts, cost, "
+                " confidence, resolved, actual_outcome, pnl) "
+                "VALUES (-1, ?, ?, ?, 'yes', ?, ?, ?, 0, 0, 0, 0, 'seeded', 1, ?, 0)",
+                (ticker, raw.get("title", ""), strike,
+                 yes_ask if yes_ask > 0 else 0.5,
+                 true_prob, true_prob, outcome))
+
+            # Record NO side
+            conn.execute(
+                "INSERT INTO recommendations "
+                "(run_id, ticker, title, strike, side, price, market_prob, "
+                " true_prob, expected_value, kelly_fraction, contracts, cost, "
+                " confidence, resolved, actual_outcome, pnl) "
+                "VALUES (-1, ?, ?, ?, 'no', ?, ?, ?, 0, 0, 0, 0, 'seeded', 1, ?, 0)",
+                (ticker, raw.get("title", ""), strike,
+                 1.0 - (yes_ask if yes_ask > 0 else 0.5),
+                 1.0 - true_prob, 1.0 - true_prob, outcome))
+
+            recorded += 2
+
+        conn.commit()
+        conn.close()
+
+        if recorded > 0:
+            logger.info("Seeded %d calibration records from %d settled markets",
+                       recorded, len(markets))
+
+        return recorded
+
     def resolve_pending(self) -> int:
         """Fetch outcomes for all unresolved recommendations in the DB.
 

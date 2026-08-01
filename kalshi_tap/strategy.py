@@ -80,9 +80,10 @@ class StrategyDecision:
 class BetStrategy:
     """Calibration-driven betting strategy."""
 
-    def __init__(self, resolver=None, config=None):
+    def __init__(self, resolver=None, config=None, empirical=None):
         self.cfg = config or StrategyConfig()
         self._resolver = resolver
+        self._empirical = empirical
         self._cal = None
         self._mode = StrategyMode.COLD
         self._last_refresh = 0.0

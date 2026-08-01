@@ -646,6 +646,10 @@ def run_autopilot(
         from .calibrate import OutcomeResolver
         client = KalshiClient()
         resolver = OutcomeResolver(client)
+        # Seed calibration from settled markets (breaks cold-start deadlock)
+        seeded = resolver.seed_calibration(series_ticker, limit=50)
+        if seeded > 0:
+            print(f"  Seeded {seeded} calibration records from settled {series_ticker} markets")
         resolved = resolver.resolve_pending()
         if resolved > 0:
             print(f"  Resolved {resolved} past bets from Kalshi")
@@ -659,7 +663,7 @@ def run_autopilot(
         from .strategy import BetStrategy
         from .probability import EmpiricalProbability
         empirical = EmpiricalProbability()
-        strategy = BetStrategy(resolver)
+        strategy = BetStrategy(resolver, empirical=empirical)
         print(f"  Strategy: {strategy.mode.value} mode ({strategy.status()['samples']} samples)")
     except Exception as e:
         print(f"  [WARN] Strategy unavailable: {e}")
