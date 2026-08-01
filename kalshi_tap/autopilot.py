@@ -539,31 +539,9 @@ class Autopilot:
 
 
 # ---------------------------------------------------------------------------
-# Dashboard formatter
+# Dashboard formatter — clean readable text, no ANSI, no emoji spam
 # ---------------------------------------------------------------------------
 
-
-
-# -- ANSI color codes --
-ESC = chr(27)
-C = {
-    "R": ESC + "[0m",   "B": ESC + "[1m",
-    "g": ESC + "[32m",  "r": ESC + "[31m",
-    "y": ESC + "[33m",  "c": ESC + "[36m",
-    "m": ESC + "[35m",  "b": ESC + "[34m",
-    "d": ESC + "[2m",
-}
-
-# -- Unicode icons --
-I = {
-    "money": "💰", "bank": "🏦", "chart": "📊",
-    "target": "🎯", "win": "✅", "lose": "❌",
-    "scan": "🔄", "live": "⚡", "rocket": "🚀",
-    "skull": "💀", "gem": "💎", "fire": "🔥",
-    "bull": "📈", "bear": "📉", "dice": "🎲",
-    "clock": "⏱", "stop": "🛑", "pkg": "📦",
-    "star": "⭐", "zap": "💥",
-}
 
 def format_autopilot_dashboard(
     pilot: Autopilot,
@@ -573,118 +551,60 @@ def format_autopilot_dashboard(
     volatility: float,
     series: str = "BTC",
 ) -> str:
-    """Render the autopilot dashboard with colors and icons."""
+    """Plain-text dashboard — clean, readable, works on any terminal."""
     bal = status["balance"]
     pnl = status["total_pnl"]
-    pnl_sign = "+" if pnl >= 0 else ""
     pct = (bal / pilot.cfg.starting_balance - 1) * 100
-    pct_sign = "+" if pct >= 0 else ""
-    pnl_color = "g" if pnl >= 0 else "r"
-    pct_color = "g" if pct >= 0 else "r"
-    bal_color = "g" if bal >= pilot.cfg.starting_balance else ("y" if bal >= pilot.cfg.starting_balance * 0.5 else "r")
-
-    total_legs = pilot.stats["wins"] + pilot.stats["losses"]
-    wr = (pilot.stats["wins"] / total_legs * 100) if total_legs > 0 else 0.0
-    wr_color = "g" if wr >= 50 else ("y" if wr >= 25 else "r")
-
     s = status["stats"]
+    wr_total = pilot.stats["wins"] + pilot.stats["losses"]
+    wr = (pilot.stats["wins"] / wr_total * 100) if wr_total > 0 else 0.0
 
-    def c(color, text):
-        return C.get(color, "") + text + C["R"]
-
-    def dim(text):
-        return C["d"] + text + C["R"]
-
-    horz = dim("\u2500" * 62)
+    # Strategy status
+    strat_mode = ""
+    if pilot._strategy:
+        ss = pilot._strategy.status()
+        strat_mode = f"  strategy: {ss['mode']} ({ss['samples']} cal samples)"
 
     lines = [
-        "\u2554" + "\u2550" * 62 + "\u2557",
-        "\u2551  " + c("B", I["dice"] + "  AUTOPILOT  " + I["money"] + " $" + str(int(pilot.cfg.starting_balance)) + " DRY RUN") + "\u2551",
-        "\u2551  " + I["live"] + " " + series + " " + c("b", "${:,.0f}".format(price_usd)) + "  " + I["chart"] + " vol " + c("c", "{:.0f}%".format(volatility * 100)) + "  " + I["scan"] + " scan " + c("m", "#{:03d}".format(s["scans"])) + "\u2551",
-        "\u2560" + "\u2550" * 62 + "\u2563",
-        "\u2551  " + I["bank"] + " " + c(bal_color, c("B", "${:,.2f}".format(bal))) + "  " + I["chart"] + " P&L " + c(pnl_color, "{}{:,.2f}".format(pnl_sign, abs(pnl))) + " (" + c(pct_color, "{}{:+.1f}%".format(pct_sign, pct)) + ")  " + I["target"] + " WR " + c(wr_color, "{:.0f}%".format(wr)) + "\u2551",
+        f"--- AUTOPILOT v3 | {series} ${price_usd:,.0f} | vol {volatility*100:.0f}% | scan #{s['scans']:03d}{strat_mode} ---",
+        f"  balance: ${bal:,.2f}  |  P&L: {pnl:+,.2f} ({pct:+.1f}%)  |  WR: {wr:.0f}% ({wr_total} legs)  |  risk DD: {1-bal/pilot.cfg.starting_balance if bal < pilot.cfg.starting_balance else 0:.0%}",
+        f"  open: {status['open_count']}  settled: {status['settled_count']}  placed: {status['placed_this_scan']}",
     ]
 
-    open_n = status["open_count"]
-    settled_n = status["settled_count"]
-    placed_n = status["placed_this_scan"]
-    placed_icon = "🔔" if placed_n > 0 else "\u00b7"
-    placed_color = "y" if placed_n > 0 else "d"
-    lines.append(
-        "\u2551  " + I["pkg"] + " open " + c("m", str(open_n)) + "  "
-        + I["win"] + " settled " + c("c", str(settled_n)) + "  "
-        + placed_icon + " placed " + c(placed_color, str(placed_n)) + "\u2551"
-    )
-
-    lines.append("\u2560" + "\u2550" * 62 + "\u2563")
+    if status["stopped"]:
+        lines.append(f"  ** STOPPED: {status['stopped_reason']} **")
 
     if last_pair:
-        a_dir = I["bull"] if last_pair.bet_a.direction == "bullish" else I["bear"]
-        b_dir = I["bull"] if last_pair.bet_b.direction == "bullish" else I["bear"]
-        si = I["fire"] if last_pair.hedge_score >= 1.0 else (I["star"] if last_pair.hedge_score >= 0.7 else I["dice"])
-        ri = I["rocket"] if last_pair.payout_ratio >= 20 else (I["gem"] if last_pair.payout_ratio >= 10 else I["zap"])
+        a = last_pair.bet_a
+        b = last_pair.bet_b
+        same = "SAME-DIR" if a.direction == b.direction else "hedge"
+        lines.append(f"  top pair [{same}]: {a.side.upper()} ${a.strike:,.0f} @{a.price_cents}c  x  {b.side.upper()} ${b.strike:,.0f} @{b.price_cents}c")
+        lines.append(f"    score={last_pair.hedge_score:.4f}  P(>=1)={last_pair.joint_win_prob:.0%}  min=${last_pair.min_payout:.0f}  max=${last_pair.max_payout:.0f}  {last_pair.payout_ratio:.0f}x")
 
-        lines.append(
-            "\u2551  " + si + " " + c("m", "{:.4f}".format(last_pair.hedge_score)) + "  "
-            + a_dir + " " + last_pair.bet_a.side.upper() + " "
-            + c("b", "${:,.0f}".format(last_pair.bet_a.strike))
-            + "@" + c("y", "{}c".format(last_pair.bet_a.price_cents)) + "  \u00d7  "
-            + b_dir + " " + last_pair.bet_b.side.upper() + " "
-            + c("b", "${:,.0f}".format(last_pair.bet_b.strike))
-            + "@" + c("y", "{}c".format(last_pair.bet_b.price_cents)) + "\u2551"
-        )
-        lines.append(
-            "\u2551     P(\u22651) " + c("c", "{:.0%}".format(last_pair.joint_win_prob))
-            + "  \u2502  min " + c("g", "${:.0f}".format(last_pair.min_payout))
-            + "  max " + c("g", "${:.0f}".format(last_pair.max_payout))
-            + "  \u2502  " + ri + " " + c("g", "{:.0f}x".format(last_pair.payout_ratio)) + "\u2551"
-        )
-
+    # Open positions (compact)
     open_pos = pilot.get_open_positions()
     if open_pos:
-        lines.append("\u2560" + horz + "\u2563")
-        lines.append("\u2551  " + I["pkg"] + " " + c("B", "OPEN POSITIONS") + " (" + str(len(open_pos)) + ")" + "\u2551")
-        for pos in open_pos[-5:]:
-            da = I["bull"] if pos.side_a == "yes" else I["bear"]
-            db = I["bull"] if pos.side_b == "yes" else I["bear"]
-            lines.append(
-                "\u2551  #" + str(pos.pos_id) + " " + da + " " + pos.side_a.upper() + " "
-                + "${:,.0f}".format(pos.strike_a) + "@" + str(int(pos.price_a * 100)) + "c + "
-                + db + " " + pos.side_b.upper() + " "
-                + "${:,.0f}".format(pos.strike_b) + "@" + str(int(pos.price_b * 100)) + "c  "
-                + "${:.2f}".format(pos.total_cost) + "\u2551"
-            )
-        if len(open_pos) > 5:
-            lines.append("\u2551  " + dim("... and " + str(len(open_pos) - 5) + " more") + "\u2551")
+        lines.append(f"  open positions ({len(open_pos)}):")
+        for pos in open_pos[-8:]:
+            if pos.pair_type == "sniper":
+                lines.append(f"    #{pos.pos_id} SNIPER {pos.side_a.upper()} ${pos.strike_a:,.0f} @{int(pos.price_a*100)}c x{pos.contracts_a} | cost ${pos.cost_a:.2f}")
+            else:
+                lines.append(f"    #{pos.pos_id} {pos.side_a.upper()} ${pos.strike_a:,.0f} @{int(pos.price_a*100)}c + {pos.side_b.upper()} ${pos.strike_b:,.0f} @{int(pos.price_b*100)}c | ${pos.total_cost:.2f}")
 
-    recent = pilot.get_recent_settlements(3)
+    # Recent settlements (compact)
+    recent = pilot.get_recent_settlements(8)
     if recent:
-        lines.append("\u2560" + horz + "\u2563")
-        lines.append("\u2551  " + I["target"] + " " + c("B", "RECENT SETTLEMENTS") + "\u2551")
+        lines.append(f"  recent settlements ({len(recent)}):")
         for pos in recent:
-            oa = I["win"] if pos.outcome_a == "won" else I["lose"]
-            ob = I["win"] if pos.outcome_b == "won" else I["lose"]
-            pc = "g" if pos.pnl >= 0 else "r"
-            ps = "+${:.2f}".format(pos.pnl) if pos.pnl >= 0 else "-${:.2f}".format(abs(pos.pnl))
-            lines.append(
-                "\u2551  #" + str(pos.pos_id) + " " + oa + " " + ob + "  " + c(pc, ps) + "  \u2502  "
-                + pos.side_a.upper() + " ${:,.0f}".format(pos.strike_a) + " + "
-                + pos.side_b.upper() + " ${:,.0f}".format(pos.strike_b) + "\u2551"
-            )
+            oa = "WIN" if pos.outcome_a == "won" else "LOSE"
+            ob = "WIN" if pos.outcome_b == "won" else "LOSE"
+            pnl_s = f"+${pos.pnl:.2f}" if pos.pnl >= 0 else f"-${abs(pos.pnl):.2f}"
+            if pos.pair_type == "sniper":
+                lines.append(f"    #{pos.pos_id} {pos.side_a.upper()} ${pos.strike_a:,.0f} -> {oa} | pnl {pnl_s}")
+            else:
+                lines.append(f"    #{pos.pos_id} {oa}/{ob} {pos.side_a.upper()} ${pos.strike_a:,.0f}+{pos.side_b.upper()} ${pos.strike_b:,.0f} | pnl {pnl_s}")
 
-    if status["stopped"]:
-        lines.append("\u2560" + horz + "\u2563")
-        lines.append("\u2551  " + I["stop"] + " " + c("r", "STOPPED") + ": " + status["stopped_reason"] + "\u2551")
-    else:
-        interval = pilot.cfg.scan_interval_seconds
-        lines.append("\u2560" + horz + "\u2563")
-        lines.append(
-            "\u2551  " + I["clock"] + " next scan in " + dim(str(interval) + "s") + "  "
-            + "\u2502  " + I["scan"] + " " + dim("#" + str(s["scans"])) + "  "
-            + "\u2502  Ctrl+C to stop  \u2502  " + I["dice"] + " dry-run" + "\u2551"
-        )
-
-    lines.append("\u255a" + "\u2550" * 62 + "\u255d")
+    lines.append("-" * 70)
     return "\n".join(lines)
 
 
@@ -795,8 +715,6 @@ def run_autopilot(
             # Render dashboard
             dashboard = format_autopilot_dashboard(
                 pilot, status, last_pair, price.price_usd, vol, series_def.asset)
-            # Clear and redraw
-            sys.stdout.write("\033[2J\033[H")  # clear screen, home cursor
             sys.stdout.write(dashboard + "\n")
             sys.stdout.flush()
 
