@@ -53,15 +53,15 @@ class Decision(Enum):
 
 @dataclass
 class StrategyConfig:
-    power_min_prob: float = 0.55
-    power_min_payout: float = 1.5
-    asym_min_prob: float = 0.15
-    asym_min_payout: float = 3.0      # lowered from 15.0 — works for 10-30c bets
-    asym_cold_payout: float = 6.0     # lowered from 30.0 — cold-mode still conservative
-    cold_max_cost: float = 1.00
+    power_min_prob: float = 0.60        # was 0.55 — need clear edge
+    power_min_payout: float = 1.8       # was 1.5 — 60%×1.8x=1.08 EV minimum
+    asym_min_prob: float = 0.20         # was 0.15 — 20% minimum for asym bets
+    asym_min_payout: float = 6.0        # was 3.0 — 20%×6x=1.2 EV, actual edge
+    asym_cold_payout: float = 12.0      # was 6.0 — cold mode needs massive asymmetry
+    cold_max_cost: float = 0.50         # was 1.00 — tighter cold-mode risk
     cold_max_open: int = 1
     cold_min_samples: int = 20
-    min_score: float = 0.12
+    min_score: float = 0.20             # was 0.12 — require meaningful score
     hot_min_samples: int = 50
     hot_max_brier: float = 0.25
 

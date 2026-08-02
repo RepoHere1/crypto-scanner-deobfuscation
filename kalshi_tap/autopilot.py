@@ -46,7 +46,7 @@ class AutopilotConfig:
     starting_balance: float = 100.0
     bet_per_leg_dollars: float = 1.0       # $1 per leg
     bet_per_pair_dollars: float = 2.0       # $2 total per pair
-    max_open_pairs: int = 5                 # Cap on simultaneous open pairs
+    max_open_pairs: int = 3                 # was 5 — tighter risk control
     settle_check_interval_scans: int = 1    # Check settlements every N scans
     target_balance: float = 0.0             # Stop if balance reaches this (0=disabled)
     max_scans: int = 0                      # Stop after N scans (0=unlimited)
@@ -167,10 +167,10 @@ class Autopilot:
 
         lose_prob = 1.0 - win_prob
         kelly = max(0.0, (win_prob * odds - lose_prob) / odds)
-        kelly_fraction = 0.15  # conservative (standard in prediction markets)
+        kelly_fraction = 0.08  # was 0.15 — more conservative sizing
         bet = kelly * kelly_fraction * self.balance
-        cap = max_bet or (self.cfg.bet_per_leg_dollars * 2.0)
-        return max(self.cfg.bet_per_leg_dollars * 0.25, min(cap, round(bet, 2)))
+        cap = max_bet or (self.cfg.bet_per_leg_dollars * 1.5)
+        return max(self.cfg.bet_per_leg_dollars * 0.20, min(cap, round(bet, 2)))
 
     # --- Public API ---
 
@@ -304,7 +304,7 @@ class Autopilot:
 
         # 5. Place hedge pairs from top pairs
         placed_this_scan = 0
-        max_pairs_per_scan = 3
+        max_pairs_per_scan = 1      # was 3 — one bet per scan, let it breathe
         if can_trade:
             for pair in pairs:
                 # --- Gate: per-scan limit ---
@@ -686,6 +686,7 @@ def run_autopilot(
     from .client import KalshiClient
     from .engine import AnalysisEngine, EngineConfig
     from .hedge import HedgeScanner
+    from .clodds_signals import get_clodds_signals
 
     # Initialize risk manager (persistent state survives restarts)
     risk_manager = None
@@ -791,6 +792,45 @@ def run_autopilot(
             pairs = scanner.scan(valid, price.price_usd, vol, series_ticker,
                                  cross_markets=cross_markets if cross_markets else None)
             raw_bets = scanner._scan_contrarian(valid, price.price_usd, vol, series_ticker)
+
+            # --- Inject CloddsBot signals (cross-platform edge detection) ---
+            try:
+                clodds_signals = get_clodds_signals(min_edge=2.0, kalshi_client=client)
+                if clodds_signals:
+                    # Match CloddsBot market IDs to Kalshi market objects
+                    valid_by_ticker: dict[str, object] = {}
+                    for m in valid:
+                        tid = getattr(m, 'ticker', '') or getattr(m, 'market_id', '')
+                        valid_by_ticker[tid] = m
+                    for sig in clodds_signals:
+                        # Try to find the matching market in our scan
+                        matched = valid_by_ticker.get(sig.ticker)
+                        if matched is not None:
+                            # Create ContrarianBet from signal + Kalshi market data
+                            try:
+                                from .hedge import ContrarianBet
+                                cb = ContrarianBet(
+                                    ticker=sig.ticker,
+                                    event_ticker=getattr(matched, 'event_ticker', ''),
+                                    title=getattr(matched, 'title', sig.ticker),
+                                    series_ticker=series_ticker,
+                                    strike=getattr(matched, 'strike', 0.0),
+                                    side=sig.side,
+                                    market_price=sig.market_price,
+                                    true_prob=sig.true_prob,
+                                    expected_value=sig.expected_value,
+                                    contracts_per_dollar=int(1.0 / sig.market_price) if sig.market_price > 0 else 0,
+                                    payout_per_dollar=1.0 / sig.market_price if sig.market_price > 0 else 0,
+                                    direction=sig.direction,
+                                    close_time=getattr(matched, 'close_time', None) or datetime.now(timezone.utc),
+                                    tte_hours=getattr(matched, 'tte_hours', 0.0) or 0.0,
+                                    market=getattr(matched, 'market', None),
+                                )
+                                raw_bets = list(raw_bets) + [cb]
+                            except Exception:
+                                pass
+            except Exception:
+                pass  # CloddsBot not running — graceful degradation
 
             # Step the autopilot
             status = pilot.step(pairs, price.price_usd, vol, raw_bets=raw_bets)

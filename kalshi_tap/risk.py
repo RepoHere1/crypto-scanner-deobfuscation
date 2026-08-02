@@ -45,7 +45,8 @@ class RiskConfig:
     # Win-rate guard (trailing N bets)
     trailing_window: int = 20             # Look at last N bets
     min_win_rate: float = 0.30            # Pause if win rate drops below 30%
-    min_bets_before_guard: int = 10       # Need at least N bets before enforcing
+    min_bets_before_guard: int = 4        # was 10 — catch bad streaks earlier
+    max_consecutive_losses: int = 5       # Pause after N straight losses
 
     # Dynamic sizing
     base_bet_dollars: float = 1.0         # Normal bet per leg
@@ -79,6 +80,7 @@ class RiskState:
     recent_outcomes: list[bool] = field(default_factory=list)  # True=win, False=loss
     total_wins: int = 0
     total_losses: int = 0
+    consecutive_losses: int = 0  # Reset on win
 
     # Mode
     trading_paused: bool = False
@@ -103,6 +105,7 @@ class RiskState:
             "trading_paused": self.trading_paused,
             "pause_reason": self.pause_reason,
             "recovery_mode": self.recovery_mode,
+            "consecutive_losses": self.consecutive_losses,
             "recovery_wins_needed": self.recovery_wins_needed,
             "start_balance": self.start_balance,
             "started_at": self.started_at,
@@ -122,6 +125,7 @@ class RiskState:
             trading_paused=bool(d.get("trading_paused", False)),
             pause_reason=str(d.get("pause_reason", "")),
             recovery_mode=bool(d.get("recovery_mode", False)),
+            consecutive_losses=int(d.get("consecutive_losses", 0)),
             recovery_wins_needed=int(d.get("recovery_wins_needed", 0)),
             start_balance=float(d.get("start_balance", 100.0)),
             started_at=str(d.get("started_at", "")),
@@ -174,6 +178,11 @@ class RiskManager:
         if drawdown >= self.cfg.max_drawdown_pct:
             self._pause(f"drawdown {drawdown:.0%} >= max {self.cfg.max_drawdown_pct:.0%}")
             return False, self.state.pause_reason, 0.0
+        
+        # 4b. Check consecutive loss streak
+        if self.state.consecutive_losses >= self.cfg.max_consecutive_losses:
+            self._pause(f"{self.state.consecutive_losses} consecutive losses")
+            return False, self.state.pause_reason, 0.0
 
         # 5. Check win rate guard (only after enough bets)
         wr, total = self._trailing_win_rate()
@@ -204,8 +213,10 @@ class RiskManager:
         self.state.recent_outcomes.append(won)
         if won:
             self.state.total_wins += 1
+            self.state.consecutive_losses = 0
         else:
             self.state.total_losses += 1
+            self.state.consecutive_losses += 1
 
         # Trim ring buffer
         if len(self.state.recent_outcomes) > self.cfg.trailing_window * 2:

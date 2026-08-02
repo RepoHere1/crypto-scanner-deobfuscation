@@ -306,7 +306,7 @@ def cmd_hedge(args: argparse.Namespace) -> int:
             force_fresh=args.hedge_no_cache,
         )
         rcfg = RiskConfig(
-            max_drawdown_pct=0.25,
+            max_drawdown_pct=1.0,           # dry-run: no drawdown circuit breaker
             trailing_window=20,
             min_win_rate=0.30,
             base_bet_dollars=1.0,
