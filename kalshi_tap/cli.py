@@ -295,6 +295,16 @@ def cmd_hedge(args: argparse.Namespace) -> int:
     tte_label = f" (TTE ≤ {args.hedge_max_tte}m)" if args.hedge_max_tte > 0 else ""
     fresh_label = " [LIVE: no cache]" if args.hedge_no_cache else ""
 
+    if args.premium_seller:
+        from kalshi_tap.run_premium import run_premium_seller
+        run_premium_seller(
+            series_ticker=series_ticker,
+            starting_balance=args.hedge_bankroll,
+            scan_interval=15,
+            force_fresh=args.hedge_no_cache,
+        )
+        return 0
+
     if args.hedge_autopilot:
         from kalshi_tap.autopilot import run_autopilot, AutopilotConfig
         from kalshi_tap.risk import RiskConfig
@@ -455,6 +465,8 @@ def main() -> int:
                         help="Hedge score threshold for watch-mode alerts (default: 0.90)")
     parser.add_argument("--hedge-autopilot", action="store_true",
                         help="Autopilot dry-run: $100 bankroll, auto-trades top pairs until broke")
+    parser.add_argument("--premium-seller", action="store_true",
+                        help="Premium Seller: sell tail-risk premium (buy NO on far-OTM strikes)")
     parser.add_argument("--hedge-bankroll", type=float, default=100.0,
                         help="Starting bankroll for autopilot mode (default: 100)")
     parser.add_argument("-v", "--verbose", action="store_true",
@@ -473,7 +485,7 @@ def main() -> int:
     if args.status:
         return cmd_status()
 
-    if args.hedge or args.hedge_watch or args.hedge_autopilot:
+    if args.hedge or args.hedge_watch or args.hedge_autopilot or args.premium_seller:
         return cmd_hedge(args)
 
     if args.tui:
