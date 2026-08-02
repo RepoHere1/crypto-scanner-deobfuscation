@@ -1,0 +1,68 @@
+#!/data/data/com.termux/files/usr/bin/env bash
+# Clodds — AI-powered Kalshi trading terminal (Termux-compatible)
+# Wraps kalshi-tap autopilot with Clodds branding + colors
+set -eo pipefail
+
+[ -f "$HOME/.bashrc" ] && source "$HOME/.bashrc" 2>/dev/null || true
+[ -f "$HOME/.env" ] && set -a && source "$HOME/.env" && set +a
+
+ESC="$(printf '\033')"
+R="${ESC}[0m" B="${ESC}[1m" D="${ESC}[2m"
+G="${ESC}[32m" RD="${ESC}[31m" YL="${ESC}[33m"
+BL="${ESC}[34m" MG="${ESC}[35m" CY="${ESC}[36m"
+
+banner() {
+    echo "${D}╔══════════════════════════════════════════════════════════╗${R}"
+    echo "${D}║${R}  ${B}${MG}♠ ♣ ♥ ♦${R}  ${B}CLODDS${R} — AI Trading Terminal  ${D}v1.0${R}         ${D}║${R}"
+    echo "${D}║${R}  ${D}Claude + Odds = Clodds  |  Kalshi + CoinGecko + RSB${R}  ${D}║${R}"
+    echo "${D}╚══════════════════════════════════════════════════════════╝${R}"
+}
+
+cd "$HOME"
+
+case "${1:-autopilot}" in
+    autopilot|auto|run|start)
+        banner
+        echo ""
+        echo "  ${MG}▶${R} Launching ${B}Kalshi Autopilot${R} (paper trading)"
+        echo "  ${D}Bankroll: \$100  |  Dynamic sizing \$0.50–\$2.00/leg${R}"
+        echo "  ${D}Data: CoinGecko OHLC + Kalshi API  |  Strat: HOT mode${R}"
+        echo ""
+        exec python3 -u -m kalshi_tap.cli --hedge-autopilot --hedge-no-cache --hedge-bankroll 100
+        ;;
+    watch|scan)
+        banner
+        echo ""
+        echo "  ${MG}▶${R} Launching ${B}Hedge Watch${R} (continuous scan)"
+        exec python3 -u -m kalshi_tap.cli --hedge-watch --hedge-no-cache
+        ;;
+    status|balance|bal)
+        python3 -m kalshi_tap.cli --status
+        ;;
+    gui|web|dashboard)
+        banner
+        echo ""
+        echo "  ${MG}▶${R} Starting ${B}Clodds Web Dashboard${R}"
+        echo "  ${D}Opening http://localhost:18999${R}"
+        echo ""
+        python3 "$HOME/clodds_dashboard.py" &
+        sleep 1
+        termux-open-url "http://localhost:18999" 2>/dev/null || true
+        wait
+        ;;
+    setup|config)
+        python3 -m kalshi_tap.cli --setup
+        ;;
+    *)
+        echo "Clodds — AI Trading Terminal"
+        echo ""
+        echo "Usage: clodds [command]"
+        echo ""
+        echo "Commands:"
+        echo "  auto, run, start   Launch autopilot (paper trading, \$100 bankroll)"
+        echo "  watch, scan        Continuous hedge monitor"
+        echo "  status, bal        Check Kalshi balance + API status"
+        echo "  gui, web           Launch web dashboard"
+        echo "  setup, config      API setup instructions"
+        ;;
+esac

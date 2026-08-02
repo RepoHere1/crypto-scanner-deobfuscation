@@ -261,8 +261,8 @@ class OutcomeResolver:
         for t in tickers:
             self._ticker_checked_at[t] = now
 
-        logger.info("Checking outcomes for %d tickers (%d skipped, checked recently)...",
-                   len(tickers), len(all_tickers) - len(tickers))
+        logger.debug("Checking outcomes for %d tickers (%d skipped, checked recently)...",
+                    len(tickers), len(all_tickers) - len(tickers))
 
         # Fetch outcomes from Kalshi, respecting rate limits
         outcomes: dict[str, str] = {}
@@ -280,7 +280,10 @@ class OutcomeResolver:
 
         conn.commit()
         conn.close()
-        logger.info("Resolved %d recommendations (%d tickers checked)", resolved, len(tickers))
+        if resolved > 0:
+            logger.info("Resolved %d recommendations (%d tickers checked)", resolved, len(tickers))
+        else:
+            logger.debug("No resolutions (%d tickers checked, no settled markets yet)", len(tickers))
         return resolved
 
     def build_calibration(self) -> CalibrationCurve:

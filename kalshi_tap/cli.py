@@ -445,12 +445,12 @@ def main() -> int:
                         help="Only scan markets closing within N minutes (0=all, try 60)")
     parser.add_argument("--hedge-max-price", type=float, default=5.0,
                         help="Max contrarian price in cents for hedge scan (default: 5)")
-    parser.add_argument("--hedge-min-prob", type=float, default=0.10,
-                        help="Min true probability for hedge bets (default: 0.10)")
-    parser.add_argument("--hedge-min-ev", type=float, default=0.02,
-                        help="Min EV threshold for hedge bets (default: 0.02)")
-    parser.add_argument("--hedge-min-ratio", type=float, default=8.0,
-                        help="Min payout ratio for hedge pairs (default: 8)")
+    parser.add_argument("--hedge-min-prob", type=float, default=0.03,
+                        help="Min true probability for hedge bets (default: 0.03)")
+    parser.add_argument("--hedge-min-ev", type=float, default=0.005,
+                        help="Min EV threshold for hedge bets (default: 0.005)")
+    parser.add_argument("--hedge-min-ratio", type=float, default=2.5,
+                        help="Min payout ratio for hedge pairs (default: 2.5)")
     parser.add_argument("--hedge-alert", type=float, default=0.90,
                         help="Hedge score threshold for watch-mode alerts (default: 0.90)")
     parser.add_argument("--hedge-autopilot", action="store_true",

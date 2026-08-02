@@ -56,8 +56,8 @@ class StrategyConfig:
     power_min_prob: float = 0.55
     power_min_payout: float = 1.5
     asym_min_prob: float = 0.15
-    asym_min_payout: float = 15.0
-    asym_cold_payout: float = 30.0
+    asym_min_payout: float = 3.0      # lowered from 15.0 — works for 10-30c bets
+    asym_cold_payout: float = 6.0     # lowered from 30.0 — cold-mode still conservative
     cold_max_cost: float = 1.00
     cold_max_open: int = 1
     cold_min_samples: int = 20
@@ -130,7 +130,17 @@ class BetStrategy:
         elif tte_hours < 4:
             cp *= 0.92
 
-        # Single bets need HIGHER probability — no hedge partner to fall back on
+        # --- Asymmetric path: low prob, massive payout ---
+        # A 15% chance with 100x payout is a good bet on its own
+        asym_min_prob = self.cfg.asym_min_prob
+        asym_min_payout = self.cfg.asym_min_payout
+        if cp >= asym_min_prob and payout >= asym_min_payout:
+            score = cp * math.log(payout)
+            if score >= self.cfg.min_score * 0.6:
+                return StrategyDecision(Decision.ACCEPT, BetClass.ASYMM,
+                    f"sniper-asym: prob={cp:.0%} pay={payout:.0f}x", score, cp, cp, cp)
+
+        # Single power-path needs HIGHER probability — no hedge partner to fall back on
         min_prob = 0.65 if self._mode == StrategyMode.COLD else 0.55
         min_payout = 1.3  # at least 30% profit
 

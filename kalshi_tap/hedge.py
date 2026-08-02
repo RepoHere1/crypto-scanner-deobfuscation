@@ -44,10 +44,10 @@ class HedgeConfig:
     """Tunable parameters for the hedge-pair scanner."""
 
     max_contrarian_price: float = 0.05    # Only consider bets priced <= 5c
-    min_true_prob: float = 0.10           # True probability must be >= 10%
-    min_ev: float = 0.02                  # Minimum edge per bet
+    min_true_prob: float = 0.03           # True probability must be >= 3% (lowered for emp)
+    min_ev: float = 0.005                 # Minimum edge per bet (0.5%)
     min_joint_win_prob: float = 0.15      # At least 15% chance one wins
-    min_payout_ratio: float = 8.0         # min_payout / total_cost >= 8x
+    min_payout_ratio: float = 2.5         # min_payout / total_cost >= 2.5x (lowered for >1c bets)
     min_hedge_score: float = 0.02         # Score threshold for display
     max_pairs: int = 30                   # Maximum pairs to return
     bet_per_leg_dollars: float = 1.0      # Assume $1 per leg for scoring
@@ -201,18 +201,19 @@ class HedgeScanner:
             if cfg.max_tte_minutes > 0 and tte_sec > cfg.max_tte_minutes * 60:
                 continue
 
-            # YES side: scan ALL prices, let strategy filter downstream
+            # YES side: scan ALL prices, let strategy filter downstream.
+            # No arbitrary price cap — edges exist at every price level.
             yes_price = self._execution_price(m, "yes")
-            if yes_price > 0 and yes_price < 0.50:
+            if yes_price > 0 and yes_price <= 0.98:
                 true_p_yes = self._binary_prob(spot, m.strike, tte_years, volatility, tte_hours)
                 ev_yes = true_p_yes - yes_price
                 if true_p_yes >= cfg.min_true_prob and ev_yes >= cfg.min_ev:
                     bets.append(self._make_bet(m, "yes", yes_price, true_p_yes, ev_yes,
                                                tte_hours, series_ticker))
 
-            # NO side
+            # NO side: scan ALL prices (same as YES — edges exist everywhere)
             no_price = self._execution_price(m, "no")
-            if no_price > 0 and no_price < 0.50:
+            if no_price > 0 and no_price <= 0.98:
                 true_p_no = 1.0 - self._binary_prob(spot, m.strike, tte_years, volatility, tte_hours)
                 ev_no = true_p_no - no_price
                 if true_p_no >= cfg.min_true_prob and ev_no >= cfg.min_ev:
@@ -465,9 +466,14 @@ class HedgeScanner:
         # Try empirical first (live streaming facts from Binance)
         if self._empirical is not None and tte_hours > 0:
             try:
-                # Extract asset from series_ticker if available, default to BTC
                 asset = "BTC"
-                return self._empirical.probability(asset, spot, strike, tte_hours)
+                ep = self._empirical.probability(asset, spot, strike, tte_hours)
+                # Sanity: if strike is far from spot with short TTE, prob should
+                # not be near 0.5. If it is, empirical data is stale/broken.
+                pct_away = abs(strike - spot) / spot if spot > 0 else 0
+                if abs(ep - 0.5) < 0.01 and pct_away > 0.05 and tte_hours < 24:
+                    raise ValueError(f"Empirical returned suspicious 0.5 for {pct_away:.0%} OTM")
+                return ep
             except Exception:
                 pass
 

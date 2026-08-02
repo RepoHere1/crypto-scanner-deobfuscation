@@ -149,6 +149,8 @@ class Autopilot:
         pairs: list["HedgePair"],
         price_usd: float,
         volatility: float,
+        *,
+        raw_bets: list | None = None,
     ) -> dict:
         """Execute one autopilot cycle.
 
@@ -156,6 +158,8 @@ class Autopilot:
             pairs: Ranked hedge pairs from the scanner
             price_usd: Current spot price
             volatility: Current volatility
+            raw_bets: Optional raw ContrarianBet list for sniper mode
+                      (used when pairs are scarce)
 
         Returns:
             Dict with status info for the dashboard
@@ -189,57 +193,81 @@ class Autopilot:
         # 4. Sniper mode: evaluate single bets first (prioritize win probability)
         placed_singles = 0
         if can_trade and self._strategy is not None:
-            seen_singles: set[str] = set()
+            # Collect candidate bets: from pairs + raw bets if provided
+            candidates: list = []
+            seen_keys: set[str] = set()
             for pair in pairs:
                 for bet in (pair.bet_a, pair.bet_b):
                     key = f"{bet.ticker}|{bet.side}"
-                    if key in seen_singles:
-                        continue
-                    seen_singles.add(key)
-                    decision = self._strategy.evaluate_single(bet)
-                    if decision.decision.value != "accept":
-                        continue
-                    # Place single-leg trade
-                    bet_dollars = bet_per_leg * 0.50  # Half-size for singles (no hedge)
-                    contracts = int(bet_dollars / bet.market_price) if bet.market_price > 0 else 0
-                    if contracts < 1:
-                        continue
-                    cost = contracts * bet.market_price
-                    if cost > self.balance or cost < 0.50:
-                        continue
-                    # Quick single-leg position
-                    pos = PaperPosition(
-                        pos_id=self._next_id,
-                        pair_type="sniper",
-                        pair_score=decision.score,
-                        ticker_a=bet.ticker, side_a=bet.side,
-                        strike_a=bet.strike, price_a=bet.market_price,
-                        contracts_a=contracts, cost_a=round(cost, 4),
-                        ticker_b="", side_b="", strike_b=0, price_b=0,
-                        contracts_b=0, cost_b=0,
-                        total_cost=round(cost, 4),
-                        max_payout=contracts, min_payout=0,
-                        opened_at=datetime.now(timezone.utc),
-                        pair_key=f"sniper:{key}",
-                    )
-                    self._next_id += 1
-                    self.balance = round(self.balance - cost, 4)
-                    self.positions.append(pos)
-                    self.stats["trades_placed"] += 1
-                    placed_singles += 1
-                    if self._risk:
-                        self._risk.update_balance(self.balance)
-                    # Record to DB
-                    pos.db_id_a = self._record_leg_to_db(
-                        bet.ticker, bet.side, bet.market_price,
-                        bet.true_prob, contracts, cost)
-                    logger.info(
-                        "SNIPER #%d: %s %s@%dc x%d | cost $%.4f | bal $%.2f | %s",
-                        pos.pos_id, bet.side.upper(), bet.ticker[-12:],
-                        int(bet.market_price * 100), contracts, cost,
-                        self.balance, decision.reason)
-                    if placed_singles >= 2:
-                        break
+                    if key not in seen_keys:
+                        seen_keys.add(key)
+                        candidates.append(bet)
+            if raw_bets:
+                for bet in raw_bets:
+                    key = f"{bet.ticker}|{bet.side}"
+                    if key not in seen_keys:
+                        seen_keys.add(key)
+                        candidates.append(bet)
+            # Sort by EV descending so best bets go first
+            candidates.sort(key=lambda b: b.expected_value, reverse=True)
+
+            # Build set of tickers already in open positions (avoid re-buying)
+            open_tickers_sniper: set[str] = set()
+            for p in self.positions:
+                open_tickers_sniper.add(p.ticker_a)
+                open_tickers_sniper.add(p.ticker_b)
+
+            seen_singles: set[str] = set()
+            for bet in candidates:
+                key = f"{bet.ticker}|{bet.side}"
+                if key in seen_singles:
+                    continue
+                seen_singles.add(key)
+                # Don't re-buy tickers already in open positions
+                if bet.ticker in open_tickers_sniper:
+                    continue
+                decision = self._strategy.evaluate_single(bet)
+                if decision.decision.value != "accept":
+                    continue
+                # Place single-leg trade
+                bet_dollars = bet_per_leg * 0.50  # Half-size for singles (no hedge)
+                contracts = int(bet_dollars / bet.market_price) if bet.market_price > 0 else 0
+                if contracts < 1:
+                    continue
+                cost = contracts * bet.market_price
+                if cost > self.balance or cost < 0.50:
+                    continue
+                # Quick single-leg position
+                pos = PaperPosition(
+                    pos_id=self._next_id,
+                    pair_type="sniper",
+                    pair_score=decision.score,
+                    ticker_a=bet.ticker, side_a=bet.side,
+                    strike_a=bet.strike, price_a=bet.market_price,
+                    contracts_a=contracts, cost_a=round(cost, 4),
+                    ticker_b="", side_b="", strike_b=0, price_b=0,
+                    contracts_b=0, cost_b=0,
+                    total_cost=round(cost, 4),
+                    max_payout=contracts, min_payout=0,
+                    opened_at=datetime.now(timezone.utc),
+                    pair_key=f"sniper:{key}",
+                )
+                self._next_id += 1
+                self.balance = round(self.balance - cost, 4)
+                self.positions.append(pos)
+                self.stats["trades_placed"] += 1
+                placed_singles += 1
+                if self._risk:
+                    self._risk.update_balance(self.balance)
+                # Record to DB
+                pos.db_id_a = self._record_leg_to_db(
+                    bet.ticker, bet.side, bet.market_price,
+                    bet.true_prob, contracts, cost)
+                logger.info(
+                    "SNIPER #%d: %s %s@%dc x%d | cost $%.4f | bal $%.2f | %s",
+                    pos.pos_id, bet.side.upper(), bet.ticker[-12:],
+                    int(bet.market_price * 100), contracts, cost,
+                    self.balance, decision.reason)
                 if placed_singles >= 2:
                     break
 
@@ -264,9 +292,13 @@ class Autopilot:
                     if decision.decision.value != "accept":
                         continue
 
-                # --- Gate: skip same-direction pairs (not a hedge) ---
+                # --- Gate: same-direction pairs are risky (not a true hedge) ---
+                # The HedgeScanner already applies a 0.60 score penalty for these.
+                # We don't hard-skip them — the strategy and risk manager decide.
+                # But we log a warning so the operator can see the risk.
                 if pair.bet_a.direction == pair.bet_b.direction:
-                    continue
+                    logger.debug("Same-direction pair accepted (score %.4f): %s + %s",
+                                 pair.hedge_score, pair.bet_a.ticker[-12:], pair.bet_b.ticker[-12:])
 
                 # --- Gate: don't reuse tickers already in open positions ---
                 open_tickers: set[str] = set()
@@ -310,7 +342,7 @@ class Autopilot:
             "open_count": len(self.positions),
             "settled_count": len(self.settled_positions),
             "total_pnl": self.total_pnl,
-            "placed_this_scan": placed_this_scan,
+            "placed_this_scan": placed_this_scan + placed_singles,
             "stopped": bool(stopped_reason),
             "stopped_reason": stopped_reason,
             "stats": dict(self.stats),
@@ -682,9 +714,10 @@ def run_autopilot(
 
             scanner = HedgeScanner(hedge_config, empirical=empirical)
             pairs = scanner.scan(valid, price.price_usd, vol, series_ticker)
+            raw_bets = scanner._scan_contrarian(valid, price.price_usd, vol, series_ticker)
 
             # Step the autopilot
-            status = pilot.step(pairs, price.price_usd, vol)
+            status = pilot.step(pairs, price.price_usd, vol, raw_bets=raw_bets)
             last_pair = pairs[0] if pairs else last_pair
 
             # Render dashboard
