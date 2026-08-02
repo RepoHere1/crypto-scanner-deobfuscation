@@ -802,6 +802,17 @@ def run_autopilot(
             sys.stdout.write(dashboard + "\n")
             sys.stdout.flush()
 
+            # Trump Watch section (every 240 scans = ~1 hour)
+            if pilot.stats["scans"] % 240 == 0:
+                try:
+                    from .trump_watch import generate_report as tw_report, format_trump_section
+                    tw = tw_report(client)
+                    tw_out = format_trump_section(tw)
+                    sys.stdout.write("\n" + tw_out + "\n\n")
+                    sys.stdout.flush()
+                except Exception:
+                    pass
+
             if status["stopped"]:
                 print(f"\n  AUTOPILOT STOPPED: {status['stopped_reason']}")
                 break

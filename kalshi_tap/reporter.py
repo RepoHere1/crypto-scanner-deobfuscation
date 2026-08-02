@@ -400,6 +400,16 @@ def generate_and_send(test: bool = False) -> bool:
     analysis = analyze_trades(trades)
     recs = generate_recommendations(analysis, risk, calibration)
     html = build_html_report(risk, analysis, trades, recs)
+
+    # --- Trump Watch section ---
+    try:
+        from .trump_watch import generate_report as trump_report, format_trump_html
+        tw = trump_report()
+        html = html.replace("<!-- RECOMMENDATIONS -->",
+                            format_trump_html(tw) + "\n<!-- RECOMMENDATIONS -->")
+    except Exception:
+        pass
+
     config = get_smtp_config()
 
     if test:
