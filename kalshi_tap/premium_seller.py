@@ -38,7 +38,8 @@ logger = logging.getLogger(__name__)
 @dataclass
 class PremiumSellerConfig:
     # Entry conditions
-    vol_spike_pct: float = 1.2          # BTC must move this % in lookback window
+    vol_spike_pct: float = 0.6          # was 1.2 — BTC must move this % in lookback window
+    vol_always_enter: float = 0.60      # If vol > 60%, enter even without spike
     vol_lookback_minutes: int = 15      # Lookback window for vol spike
     min_tte_minutes: int = 30           # Minimum time to expiry
     max_tte_minutes: int = 120          # Maximum time to expiry (2 hours)
@@ -133,7 +134,8 @@ class PremiumSeller:
 
     # ── Public API ─────────────────────────────────────────────────────────
 
-    def scan(self, markets: list, btc_price: float, btc_change_15m: float) -> list[SellSignal]:
+    def scan(self, markets: list, btc_price: float, btc_change_15m: float,
+             vol: float = 0.60) -> list[SellSignal]:
         """Scan markets for premium-selling opportunities.
 
         Args:
@@ -143,10 +145,12 @@ class PremiumSeller:
         """
         signals: list[SellSignal] = []
 
-        # Gate: need volatility spike or elevated vol
+        # Gate: need volatility spike OR elevated ambient vol
         abs_change = abs(btc_change_15m)
-        if abs_change < self.cfg.vol_spike_pct:
-            return signals  # No vol spike, don't sell premium
+        has_spike = abs_change >= self.cfg.vol_spike_pct
+        has_high_vol = vol >= self.cfg.vol_always_enter
+        if not has_spike and not has_high_vol:
+            return signals  # No trigger, don't sell premium
 
         for m in markets:
             strike = getattr(m, 'strike', 0.0)

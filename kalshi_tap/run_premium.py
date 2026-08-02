@@ -126,7 +126,7 @@ def run_premium_seller(
                 markets = []
 
             # Scan for signals
-            signals = seller.scan(markets, current_price, btc_change_15m)
+            signals = seller.scan(markets, current_price, btc_change_15m, vol)
 
             # Enter positions
             for sig in signals:
