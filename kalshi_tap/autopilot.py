@@ -648,6 +648,23 @@ def format_autopilot_dashboard(pilot,status,last_pair,price_usd,volatility,serie
 
 
 
+# --- Cross-asset series for diversification ---
+# Scanned alongside BTC each cycle; pairs can span different assets.
+_CROSS_SERIES: list[tuple[str, "SeriesDef"]] = []
+
+def _init_cross_series():
+    """Lazy-init cross-series list from series registry."""
+    global _CROSS_SERIES
+    if _CROSS_SERIES:
+        return
+    from .series import SERIES
+    for ticker in ("KXETHD", "KXSOLD"):  # ETH Daily, SOL Daily
+        for s in SERIES:
+            if s.ticker == ticker:
+                _CROSS_SERIES.append((ticker, s))
+                break
+
+
 def run_autopilot(
     series_def,
     series_ticker: str,
@@ -711,8 +728,13 @@ def run_autopilot(
     interval = pilot.cfg.scan_interval_seconds
     last_pair: "HedgePair | None" = None
 
+    # Init cross-asset series for diversification
+    _init_cross_series()
+    cross_labels = ", ".join(t for t, _ in _CROSS_SERIES)
+
     print()
     print(f"  Starting autopilot v3 with ${pilot.balance:.2f}")
+    print(f"  Cross-asset: {cross_labels}" if _CROSS_SERIES else f"  Cross-asset: none")
     if risk_manager:
         print(f"  Risk: max DD {risk_manager.cfg.max_drawdown_pct:.0%}, "
               f"min WR {risk_manager.cfg.min_win_rate:.0%}")
@@ -747,8 +769,27 @@ def run_autopilot(
             parsed = [engine._parse_market(m) for m in markets_raw]
             valid = [m for m in parsed if m is not None]
 
+            # --- Cross-asset: ETH + SOL for diversification ---
+            cross_markets: list = []
+            for xs_ticker, xs_def in _CROSS_SERIES:
+                try:
+                    xs_price = feed.get(
+                        xs_def.asset, xs_def.coingecko_id, xs_def.binance_symbol,
+                        force_fresh=pilot.cfg.force_fresh,
+                    )
+                    xs_vol = gv(xs_def.asset, xs_def.binance_symbol)
+                    xs_raw = client.get_markets(
+                        series_ticker=xs_ticker, status="open", limit=50)
+                    xs_parsed = [engine._parse_market(m) for m in xs_raw]
+                    xs_valid = [m for m in xs_parsed if m is not None]
+                    cross_markets.append(
+                        (xs_ticker, xs_valid, xs_price.price_usd, xs_vol))
+                except Exception:
+                    pass
+
             scanner = HedgeScanner(hedge_config, empirical=empirical)
-            pairs = scanner.scan(valid, price.price_usd, vol, series_ticker)
+            pairs = scanner.scan(valid, price.price_usd, vol, series_ticker,
+                                 cross_markets=cross_markets if cross_markets else None)
             raw_bets = scanner._scan_contrarian(valid, price.price_usd, vol, series_ticker)
 
             # Step the autopilot
