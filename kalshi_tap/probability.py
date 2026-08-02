@@ -136,13 +136,24 @@ class EmpiricalProbability:
         prob = weight * empirical_p + (1.0 - weight) * normal_p
 
         # --- Trend adjustment ---
-        # If BTC has been trending up, boost P(up) slightly
-        if abs(data.trend) > 0.002:  # meaningful trend (>0.2% daily)
+        if abs(data.trend) > 0.002:
             trend_signal = 1.0 if data.trend > 0 else -1.0
             if (strike > spot and trend_signal > 0) or (strike < spot and trend_signal < 0):
-                prob += 0.02  # small boost for trend-aligned bets
+                prob += 0.02
             else:
-                prob -= 0.02  # small penalty for counter-trend bets
+                prob -= 0.02
+
+        # --- Microstructure adjustment (from CoinGecko candle data) ---
+        # Blend RSI, momentum, VWAP convergence when available
+        if hasattr(data, '_closes') and len(data._closes) >= 20:
+            try:
+                from .microstructure import analyze_microstructure
+                ms = analyze_microstructure(data._closes, trend=data.trend)
+                # Microstructure adjustment: ±5% based on indicator convergence
+                micro_adj = (ms.directional_prob - 0.5) * 0.10  # scale to ±5%
+                prob += micro_adj
+            except Exception:
+                pass
 
         return max(0.01, min(0.99, prob))
 
@@ -232,13 +243,15 @@ class EmpiricalProbability:
                         trend = sum(recent) / len(recent)
                         logger.debug("CoinGecko: %d candles → %d daily closes for %s, annual_vol=%.0f%%",
                                      len(raw), len(daily), asset, annual_vol * 100)
-                        return AssetData(
+                        result = AssetData(
                             returns=returns[-30:] if len(returns) >= 30 else returns,
                             spot=spot or closes[-1],
                             volatility=annual_vol,
                             trend=trend,
                             fetched_at=time.time(),
                         )
+                        result._closes = closes  # store for microstructure
+                        return result
                 else:
                     logger.debug("CoinGecko: unexpected response for %s (type=%s, len=%d)",
                                  asset, type(raw).__name__, len(raw) if isinstance(raw, list) else 0)

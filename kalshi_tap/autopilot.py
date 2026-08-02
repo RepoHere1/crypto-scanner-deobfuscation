@@ -142,6 +142,36 @@ class Autopilot:
             "total_lost": 0.0,
         }
 
+    # --- Kelly criterion sizing ---
+
+    def _kelly_bet_size(
+        self, win_prob: float, market_price: float, max_bet: float | None = None
+    ) -> float:
+        """Fractional Kelly bet size for a binary option.
+
+        Formula (from suislanchez/polymarket-kalshi-weather-bot):
+          kelly = (win_prob * odds - lose_prob) / odds
+          bet = kelly * 0.15 * bankroll, capped at max_bet
+
+        Args:
+            win_prob: Calibrated probability of winning (0-1)
+            market_price: Current market price (0-1)
+            max_bet: Optional cap (defaults to cfg.bet_per_leg_dollars * 2)
+        """
+        if market_price <= 0 or market_price >= 1:
+            return self.cfg.bet_per_leg_dollars
+
+        odds = (1.0 / market_price) - 1.0  # net odds
+        if odds <= 0:
+            return self.cfg.bet_per_leg_dollars
+
+        lose_prob = 1.0 - win_prob
+        kelly = max(0.0, (win_prob * odds - lose_prob) / odds)
+        kelly_fraction = 0.15  # conservative (standard in prediction markets)
+        bet = kelly * kelly_fraction * self.balance
+        cap = max_bet or (self.cfg.bet_per_leg_dollars * 2.0)
+        return max(self.cfg.bet_per_leg_dollars * 0.25, min(cap, round(bet, 2)))
+
     # --- Public API ---
 
     def step(
@@ -229,8 +259,9 @@ class Autopilot:
                 decision = self._strategy.evaluate_single(bet)
                 if decision.decision.value != "accept":
                     continue
-                # Place single-leg trade
-                bet_dollars = bet_per_leg * 0.50  # Half-size for singles (no hedge)
+                # Place single-leg trade — Kelly-sized
+                bet_dollars = self._kelly_bet_size(
+                    decision.prob_a, bet.market_price, max_bet=bet_per_leg)
                 contracts = int(bet_dollars / bet.market_price) if bet.market_price > 0 else 0
                 if contracts < 1:
                     continue
@@ -357,8 +388,12 @@ class Autopilot:
     # --- Internal ---
 
     def _place_pair(self, pair: "HedgePair", bet_per_leg: float | None = None) -> PaperPosition | None:
-        """Place a paper trade for a hedge pair. Deducts from balance."""
-        bet = bet_per_leg if bet_per_leg is not None else self.cfg.bet_per_leg_dollars
+        """Place a paper trade for a hedge pair. Deducts from balance.
+        Uses Kelly sizing per leg based on calibrated probabilities."""
+        # Kelly-sized bet per leg using joint win probability
+        kelly_bet = self._kelly_bet_size(
+            pair.joint_win_prob, pair.total_cost / 2.0, max_bet=bet_per_leg)
+        bet = kelly_bet if bet_per_leg is None else min(bet_per_leg, kelly_bet * 2.0) / 2.0
 
         # Leg A
         contracts_a = int(bet / pair.bet_a.market_price) if pair.bet_a.market_price > 0 else 0
