@@ -680,7 +680,7 @@ def watch() -> int:
 # ── Show open positions / balance ─────────────────────────────────────────
 
 def show_open() -> None:
-    """Display current Kalshi balance."""
+    """Display Kalshi balance and ALL open market positions."""
     try:
         from kalshi_tap.client import KalshiClient
         client = KalshiClient.from_env()
@@ -688,16 +688,45 @@ def show_open() -> None:
         bal = float(b.get("balance_dollars", 0))
         port = float(b.get("portfolio_value", 0)) / 100
         bal_color = GR if bal >= 50 else YE if bal >= 20 else RD
-        print(f"\n  {B}{WH}KALSHI ACCOUNT{R}")
-        print(f"  {'─'*40}")
-        print(f"  Balance:  {bal_color}${bal:,.2f}{R}")
-        print(f"  Position: ${port:,.2f}")
-        print(f"  Total:    ${bal + port:,.2f}")
+
+        # Header
+        print(f"\n  {B}{WH}╔══════════════════════════════════════════════════════════════╗{R}")
+        print(f"  {B}{WH}║  KALSHI FEED  —  Balance: {bal_color}${bal:,.2f}{R}{B}{WH}  |  "
+              f"Position value: ${port:,.2f}  |  Total: ${bal + port:,.2f}  ║{R}")
+        print(f"  {B}{WH}╚══════════════════════════════════════════════════════════════╝{R}\n")
+
+        # Open positions
+        data = client.get("/portfolio/positions")
+        positions = data.get("market_positions", [])
+
+        # Filter to positions with actual exposure (non-zero)
+        active = [p for p in positions if abs(float(p.get("position_fp", 0) or 0)) > 0.01]
+        active.sort(key=lambda p: abs(float(p.get("position_fp", 0) or 0)), reverse=True)
+
+        if not active:
+            print(f"  {DIM}No open positions.{R}\n")
+        else:
+            print(f"  {B}{'TICKER':<55s} {'SIDE':>5s} {'QTY':>8s} {'EXPOSURE':>10s} {'COST':>10s}{R}")
+            print(f"  {'─'*55}  {'─'*5}  {'─'*8}  {'─'*10}  {'─'*10}")
+            for p in active:
+                ticker = p.get("ticker", "?")
+                pos = float(p.get("position_fp", 0) or 0)
+                side = f"{GR}LONG{R}" if pos > 0 else f"{RD}SHORT{R}"
+                qty = f"{abs(pos):.0f}"
+                exposure = float(p.get("market_exposure_dollars", 0) or 0)
+                cost = float(p.get("total_traded_dollars", 0) or 0)
+                pnl = float(p.get("realized_pnl_dollars", 0) or 0)
+                pnl_str = f"{GR}+${pnl:.2f}{R}" if pnl >= 0 else f"{RD}-${abs(pnl):.2f}{R}"
+                # Truncate ticker for display
+                display = ticker if len(ticker) <= 54 else ticker[:51] + "..."
+                print(f"  {display:<55s} {side} {qty:>8s} ${exposure:>9,.2f} ${cost:>9,.2f}  {pnl_str}")
+            print()
+
         # Local bankroll
         br = load_bankroll()
         lc = GR if br["balance"] >= 50 else YE if br["balance"] >= 20 else RD
-        print(f"  Bankroll: {lc}${br['balance']:,.2f}{R}  (local tracker, started ${br.get('started_at','?')[:10]})")
-        print()
+        print(f"  {DIM}Local bankroll tracker: {lc}${br['balance']:,.2f}{R}{DIM}  (started {br.get('started_at','?')[:10]}){R}\n")
+
     except Exception as e:
         print(f"  {RD}[AUTH REQUIRED]{R} {e}")
 
