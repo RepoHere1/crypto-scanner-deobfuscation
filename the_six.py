@@ -677,6 +677,31 @@ def watch() -> int:
     return 0
 
 
+# ── Show open positions / balance ─────────────────────────────────────────
+
+def show_open() -> None:
+    """Display current Kalshi balance."""
+    try:
+        from kalshi_tap.client import KalshiClient
+        client = KalshiClient.from_env()
+        b = client.get_balance()
+        bal = float(b.get("balance_dollars", 0))
+        port = float(b.get("portfolio_value", 0)) / 100
+        bal_color = GR if bal >= 50 else YE if bal >= 20 else RD
+        print(f"\n  {B}{WH}KALSHI ACCOUNT{R}")
+        print(f"  {'─'*40}")
+        print(f"  Balance:  {bal_color}${bal:,.2f}{R}")
+        print(f"  Position: ${port:,.2f}")
+        print(f"  Total:    ${bal + port:,.2f}")
+        # Local bankroll
+        br = load_bankroll()
+        lc = GR if br["balance"] >= 50 else YE if br["balance"] >= 20 else RD
+        print(f"  Bankroll: {lc}${br['balance']:,.2f}{R}  (local tracker, started ${br.get('started_at','?')[:10]})")
+        print()
+    except Exception as e:
+        print(f"  {RD}[AUTH REQUIRED]{R} {e}")
+
+
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
@@ -698,7 +723,17 @@ def main():
                         help="Institute today + tomorrow's SIX (1 day ahead only)")
     parser.add_argument("--watch", action="store_true",
                         help="Check settlement state — unblock when today settles")
+    parser.add_argument("--show-open", action="store_true",
+                        help="Display Kalshi balance and open positions")
+    parser.add_argument("--loop", type=int, default=0, metavar="SECS",
+                        help="Run continuously, refreshing every SECS seconds")
     args = parser.parse_args()
+
+    # --show-open (can combine with other flags)
+    if args.show_open:
+        show_open()
+        if not args.loop and not args.live and not args.institute:
+            return 0
 
     # --watch mode (check state, don't run)
     if args.watch:

@@ -1,4 +1,4 @@
 #!/data/data/com.termux/files/usr/bin/bash
-# kalshi-auto — THE SIX daily betting strategy
+# kalshi-auto — THE SIX: show open positions + run continuously
 cd "$HOME" || exit 1
-exec python3 the_six.py "$@"
+exec python3 the_six.py --show-open --loop 60 "$@"
