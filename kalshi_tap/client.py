@@ -29,6 +29,8 @@ logger = logging.getLogger(__name__)
 # Kalshi API base — note this differs from the old trading-api.kalshi.com
 API_BASE = "https://api.elections.kalshi.com/trade-api/v2"
 DEMO_BASE = "https://external-api.demo.kalshi.co/trade-api/v2"
+# V2 order endpoint uses a different base URL
+ORDER_BASE = "https://external-api.kalshi.com/trade-api/v2"
 
 
 class KalshiError(Exception):
@@ -126,9 +128,11 @@ class KalshiClient:
 
     # --- HTTP ---
 
-    def _request(self, method: str, endpoint: str, body: dict | None = None) -> dict:
+    def _request(self, method: str, endpoint: str, body: dict | None = None,
+                 base: str | None = None) -> dict:
         """Make an authenticated request and return parsed JSON."""
-        url = f"{self.api_base}{endpoint}"
+        base_url = base or self.api_base
+        url = endpoint if endpoint.startswith("http") else f"{base_url}{endpoint}"
         data_bytes = json.dumps(body).encode() if body else None
         headers = self._headers(method, endpoint)
 
@@ -196,22 +200,32 @@ class KalshiClient:
         price_cents: int,
         client_order_id: str | None = None,
     ) -> dict:
-        """Place a binary option order.
+        """Place a binary option order via V2 endpoint.
 
         Args:
             ticker: Market ticker (e.g. KXBTCD-26AUG0117-T73249.99)
-            side: "yes" or "no"
+            side: "yes" (buy) or "no" (sell) — translated to bid/ask for V2
             count: Number of contracts
             price_cents: Price in cents (0-100, where 100 = $1.00)
             client_order_id: Idempotency key (auto-generated if omitted)
         """
         cid = client_order_id or str(uuid.uuid4())
+        # V2 uses "bid"/"ask" instead of "yes"/"no"
+        v2_side = "bid" if side.lower() == "yes" else "ask"
+        # V2 price is a dollar string like "0.70", count is a string
+        price_dollars = f"{price_cents / 100:.2f}"
         body = {
             "ticker": ticker,
-            "side": side,
-            "count": count,
-            "type": "limit",
-            "price": price_cents,  # cents
             "client_order_id": cid,
+            "side": v2_side,
+            "count": str(count),
+            "price": price_dollars,
+            "time_in_force": "good_till_canceled",
+            "self_trade_prevention_type": "taker_at_cross",
+            "post_only": False,
+            "cancel_order_on_pause": False,
+            "reduce_only": False,
+            "subaccount": 0,
+            "exchange_index": 0,
         }
-        return self.post("/portfolio/orders", body)
+        return self._request("POST", "/portfolio/events/orders", body)

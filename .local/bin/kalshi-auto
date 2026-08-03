@@ -1,0 +1,4 @@
+#!/data/data/com.termux/files/usr/bin/bash
+# kalshi-auto — THE SIX daily betting strategy
+cd "$HOME" || exit 1
+exec python3 the_six.py "$@"

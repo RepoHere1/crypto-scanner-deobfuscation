@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
-"""THE SIX — a daily 6-bet sports-style strategy for Kalshi prediction markets.
+"""THE SIX — a daily 6-bet sports combo strategy for Kalshi prediction markets.
 
 Philosophy:
-  Every day, pick the most active series (the "sport").  Its open markets
-  are the "games".  Each game has a favorite (higher probability) and an
-  underdog (lower probability).  THE SIX places exactly 6 bets, each $1,
-  covering every logical combination of favorites and underdogs.
+  Every day, discover the hottest sports COMBO markets (Kalshi's "combo
+  button" multi-game bundles).  Each combo is a "game" — a binary bet on
+  multiple sports outcomes packaged together.  THE SIX places exactly 6
+  bets, each $1, covering every logical combination of favorites and
+  underdogs across the day's hottest combos.
 
 The six bets:
   1.  THE TRAITOR  — all favorites, but ONE game flipped to underdog
@@ -15,10 +16,13 @@ The six bets:
   5.  THE LONGSHOT  — all underdogs, no exceptions
   6.  THE SNIPER    — single game, favorite side only
 
+Default: auto-discovers KXMVESPORTSMULTIGAMEEXTENDED combo markets.
+         No crypto.  No single markets.  Combos only.
+
 Usage:
-    python3 the_six.py                 # dry-run with simulated markets
-    python3 the_six.py --live           # real Kalshi (requires auth)
-    python3 the_six.py --series KXETHD  # pick a specific series
+    python3 the_six.py                 # show today's sports combos (dry)
+    python3 the_six.py --live           # place real bets on Kalshi
+    python3 the_six.py --series KXBTCD  # target a specific series (optional)
 """
 
 from __future__ import annotations
@@ -212,102 +216,117 @@ class TheSix:
 
 
 # ---------------------------------------------------------------------------
-# Simulated markets for dry-run (no auth needed)
+# Sports combo market discovery (replaces crypto simulation)
 # ---------------------------------------------------------------------------
 
-def simulate_todays_games(series_label: str = "BTC", num_games: int = 8) -> list[Game]:
-    """Generate realistic-looking prediction markets for dry-run testing.
+COMBO_EVENT_PREFIX = "KXMVESPORTSMULTIGAMEEXTENDED"
 
-    Each "game" is a strike-level binary option: Will {asset} be above ${strike} today?
-    Prices are derived from a spot price + normal distribution, producing a natural
-    mix of favorites (high probability) and underdogs (low probability).
+
+def discover_combo_games(max_games: int = 20) -> tuple[list[Game], bool]:
+    """Discover the hottest sports COMBO markets on Kalshi.
+
+    Targets only KXMVESPORTSMULTIGAMEEXTENDED combo bundles — the "combo
+    button" markets that bundle multiple sports games into one binary.
+    Sorted by 24h volume descending, then by closest expiry.
+
+    Returns (games, live) where live=True only if real combo markets found.
+    No crypto fallback.  No simulation.  Sports combos or nothing.
     """
-    rng = random.Random(42)  # fixed seed for reproducibility
-
-    if series_label.upper() == "BTC":
-        spot = 87500.0
-        unit = "$"
-        step = 500.0
-    elif series_label.upper() == "ETH":
-        spot = 1950.0
-        unit = "$"
-        step = 50.0
-    elif series_label.upper() == "SOL":
-        spot = 128.0
-        unit = "$"
-        step = 5.0
-    else:
-        spot = 100.0
-        unit = "$"
-        step = 5.0
-
-    games = []
-    for i in range(num_games):
-        strike = spot + (i - num_games // 2) * step
-        # Probability the asset closes above strike — use a logistic-style curve
-        # centered at spot with some noise
-        z = (strike - spot) / (spot * 0.03)  # ~3% daily vol
-        prob = 1.0 / (1.0 + 2.71828 ** z)  # sigmoid
-        prob += rng.uniform(-0.08, 0.08)
-        prob = max(0.02, min(0.98, prob))
-
-        yes_ask = round(prob, 2)
-        yes_bid = round(max(0.01, yes_ask - 0.02), 2)
-        no_ask = round(1.0 - yes_bid, 2)
-        no_bid = round(max(0.01, no_ask - 0.02), 2)
-
-        close_ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT23:59:59Z")
-        ticker = f"{series_label.upper()}-{strike:.0f}"
-
-        games.append(Game(
-            ticker=ticker,
-            title=f"{series_label} above {unit}{strike:,.0f} today?",
-            strike=strike,
-            close_time=close_ts,
-            yes_bid=yes_bid,
-            yes_ask=yes_ask,
-            no_bid=no_bid,
-            no_ask=no_ask,
-        ))
-
-    # Sort by strike for clean display
-    games.sort(key=lambda g: g.strike)
-    return games
-
-
-def fetch_real_games(series_ticker: str = "KXBTCD") -> list[Game]:
-    """Fetch real open markets from Kalshi (requires auth)."""
     try:
         from kalshi_tap.client import KalshiClient
         client = KalshiClient()
-        markets = client.get_markets(series_ticker=series_ticker, status="open")
+        # Fetch sports markets — the combo ones have event_ticker matching our prefix
+        data = client.get("/markets?status=open&limit=500&category=sports")
+        all_markets = data.get("markets", [])
     except Exception as e:
         print(f"[FAIL] Kalshi auth: {e}")
-        print("       Falling back to simulated markets...")
-        return simulate_todays_games()
+        return [], False
+
+    # Filter strictly to sports combo markets
+    combos = [
+        m for m in all_markets
+        if (m.get("event_ticker", "") or "").startswith(COMBO_EVENT_PREFIX)
+    ]
+
+    if len(combos) < 2:
+        print(f"[WARN] Only {len(combos)} sports combo markets available today.")
+        print(f"       Kalshi sports combo slate may be thin — check back later.")
+        return [], False
+
+    # Sort by volume (desc), then by close time (ascending — soonest first)
+    def _vol(m):
+        return float(m.get("volume_24h_fp", 0) or 0)
+    combos.sort(key=lambda m: (-_vol(m), m.get("close_time", "z")))
+
+    # Take top N
+    combos = combos[:max_games]
 
     games = []
-    for m in markets:
+    for i, m in enumerate(combos):
         try:
+            # Truncate long combo titles for display
+            raw_title = m.get("title", "?")
+            title = raw_title[:60] + ("…" if len(raw_title) > 60 else "")
             games.append(Game(
                 ticker=m.get("ticker", "?"),
-                title=m.get("title", "?"),
-                strike=float(m.get("strike", 0)),
-                close_time=m.get("close_time", m.get("settlement_cutoff", "")),
-                yes_bid=float(m.get("yes_bid", 0)),
-                yes_ask=float(m.get("yes_ask", 0)),
-                no_bid=float(m.get("no_bid", 0)),
-                no_ask=float(m.get("no_ask", 0)),
+                title=title,
+                strike=float(i),  # synthetic: rank order
+                close_time=m.get("close_time", ""),
+                yes_bid=float(m.get("yes_bid_dollars", m.get("yes_bid", 0))),
+                yes_ask=float(m.get("yes_ask_dollars", m.get("yes_ask", 0))),
+                no_bid=float(m.get("no_bid_dollars", m.get("no_bid", 0))),
+                no_ask=float(m.get("no_ask_dollars", m.get("no_ask", 0))),
             ))
         except (ValueError, TypeError):
             continue
 
     if len(games) < 2:
-        print(f"[WARN] Only {len(games)} markets — need ≥2. Simulating fallback.")
-        return simulate_todays_games()
+        print(f"[WARN] Parsed only {len(games)} valid combo markets.")
+        return [], False
 
-    games.sort(key=lambda g: g.strike)
-    return games
+    return games, True
+
+
+def fetch_real_games(series_ticker: str = "") -> tuple[list[Game], bool]:
+    """Fetch real markets.  Defaults to sports combo discovery.
+    
+    Pass a series_ticker like 'KXBTCD' to target a specific series instead.
+    """
+    if series_ticker:
+        # Explicit series requested — use the old path
+        try:
+            from kalshi_tap.client import KalshiClient
+            client = KalshiClient()
+            markets = client.get_markets(series_ticker=series_ticker,
+                                         status="open", limit=20)
+        except Exception as e:
+            print(f"[FAIL] Kalshi auth: {e}")
+            return [], False
+
+        games = []
+        for m in markets:
+            try:
+                games.append(Game(
+                    ticker=m.get("ticker", "?"),
+                    title=m.get("title", "?"),
+                    strike=float(m.get("floor_strike", m.get("strike", 0))),
+                    close_time=m.get("close_time", m.get("settlement_cutoff", "")),
+                    yes_bid=float(m.get("yes_bid_dollars", m.get("yes_bid", 0))),
+                    yes_ask=float(m.get("yes_ask_dollars", m.get("yes_ask", 0))),
+                    no_bid=float(m.get("no_bid_dollars", m.get("no_bid", 0))),
+                    no_ask=float(m.get("no_ask_dollars", m.get("no_ask", 0))),
+                ))
+            except (ValueError, TypeError):
+                continue
+
+        if len(games) < 2:
+            print(f"[WARN] Only {len(games)} markets in series {series_ticker}.")
+            return [], False
+        games.sort(key=lambda g: g.strike)
+        return games, True
+
+    # Default: sports combo discovery
+    return discover_combo_games()
 
 
 # ---------------------------------------------------------------------------
@@ -330,11 +349,15 @@ def print_header(games: list[Game], series_label: str, live: bool):
     mode = f"{RD}LIVE{R}" if live else f"{CY}DRY-RUN{R}"
     fav_count = sum(1 for g in games if g.favored_side == "yes")
     dog_count = len(games) - fav_count
+    br = load_bankroll()
+    bal = br["balance"]
+    bal_color = GR if bal >= 50 else YE if bal >= 20 else RD
     print()
     print(f"{'='*66}")
     print(f"  {B}{WH}THE SIX{R} — {mode}  |  {series_label}  |  {len(games)} games today")
     print(f"  {DIM}{datetime.now().strftime('%Y-%m-%d %H:%M UTC')}{R}")
     print(f"  {GR}{fav_count} favorites{R} (YES)  |  {RD}{dog_count} underdogs{R} (NO)")
+    print(f"  {B}Bankroll:{R} {bal_color}${bal:,.2f}{R}")
     print(f"{'='*66}")
     print()
     print(f"  {'Game':<18s} {'Strike':>10s}  {'YES':>8s}  {'NO':>8s}  {'Call':>12s}")
@@ -361,6 +384,9 @@ def print_bet(bet: SixBet):
 
 
 def print_summary(bets: list[SixBet]):
+    br = load_bankroll()
+    bal = br["balance"]
+    bal_color = GR if bal >= 50 else YE if bal >= 20 else RD
     print(f"  {'='*66}")
     print(f"  {B}{WH}THE SIX — SUMMARY{R}")
     print(f"  {'='*66}")
@@ -368,6 +394,7 @@ def print_summary(bets: list[SixBet]):
     total_spent = sum(b.total_cost for b in bets)
     print(f"  Total laid:  ${total_spent:.2f} across {len(bets)} bets")
     print(f"  Total legs:  {sum(len(b.picks) for b in bets)}")
+    print(f"  {B}Bankroll:{R}   {bal_color}${bal:,.2f}{R}")
     print()
     print(f"  {DIM}All prices shown are ASK (what you'd pay to enter).{R}")
     print(f"  {DIM}Payouts determined at settlement. Run with --live to place real orders.{R}")
@@ -383,6 +410,7 @@ import os
 from datetime import date, timedelta
 
 STATE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".six_state.json")
+BANKROLL_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".six_bankroll.json")
 
 
 @dataclass
@@ -436,6 +464,40 @@ def save_state(state: dict) -> None:
         json.dump(state, f, indent=2, default=str)
 
 
+# ── Bankroll ──────────────────────────────────────────────────────────────
+
+def load_bankroll() -> dict:
+    """Load bankroll state.  Starts at $100 if no file exists."""
+    if not os.path.exists(BANKROLL_FILE):
+        now = datetime.now(timezone.utc).isoformat()
+        br = {"balance": 100.00, "started_at": now, "total_spent": 0.0}
+        save_bankroll(br)
+        return br
+    try:
+        with open(BANKROLL_FILE) as f:
+            return json.load(f)
+    except Exception:
+        now = datetime.now(timezone.utc).isoformat()
+        br = {"balance": 100.00, "started_at": now, "total_spent": 0.0}
+        save_bankroll(br)
+        return br
+
+
+def save_bankroll(state: dict) -> None:
+    """Persist bankroll state."""
+    with open(BANKROLL_FILE, "w") as f:
+        json.dump(state, f, indent=2, default=str)
+
+
+def charge_bankroll(amount: float) -> dict:
+    """Deduct an amount from the bankroll.  Returns updated state."""
+    br = load_bankroll()
+    br["balance"] = round(br["balance"] - amount, 2)
+    br["total_spent"] = round(br.get("total_spent", 0) + amount, 2)
+    save_bankroll(br)
+    return br
+
+
 def institute(series: str, live: bool, num_games: int) -> dict:
     """Generate today's SIX + tomorrow's SIX.  Only ever 1 day ahead.
 
@@ -477,16 +539,13 @@ def _generate_day(state: dict, day_str: str, series: str, live: bool,
     """Generate and store one day's SIX."""
     from datetime import datetime as dt
 
-    if live:
-        games = fetch_real_games(series)
+    if live or not series:
+        # Live mode or auto-discover: fetch real sports combos
+        games, live = fetch_real_games(series)
     else:
-        label_map = {
-            "KXBTCD": "BTC", "KXETHD": "ETH", "KXSOLD": "SOL",
-            "KXXRPD": "XRP", "KXDOGD": "DOGE", "KXADAD": "ADA",
-        }
-        label = label_map.get(series, "BTC")
-        n = num_games or 8
-        games = simulate_todays_games(series_label=label, num_games=n)
+        # Explicit series requested in dry-run — fetch real markets for display
+        games, _ = fetch_real_games(series)
+        live = False
 
     if len(games) < 2:
         print(f"[FAIL] {day_str}: need ≥2 markets, got {len(games)}.")
@@ -496,7 +555,8 @@ def _generate_day(state: dict, day_str: str, series: str, live: bool,
     six = TheSix(games, seed=seed)
     bets = six.run()
 
-    series_label = games[0].ticker.split("-")[0] if games else "?"
+    raw = games[0].ticker if games else "?"
+    series_label = "SPORTS-COMBO" if raw.startswith(COMBO_EVENT_PREFIX) else raw.split("-")[0]
 
     day = SixDay(
         date=day_str, series=series_label, live=live,
@@ -515,13 +575,69 @@ def _generate_day(state: dict, day_str: str, series: str, live: bool,
     }
 
     mode = f"{RD}LIVE{R}" if live else f"{CY}DRY-RUN{R}"
+    br = load_bankroll()
+    bal = br["balance"]
+    bal_color = GR if bal >= 50 else YE if bal >= 20 else RD
     print(f"\n{'='*66}")
     print(f"  {B}{WH}THE SIX{R} — {mode}  |  {day_str}  |  {series_label}  |  {len(games)} games")
+    print(f"  {B}Bankroll:{R} {bal_color}${bal:,.2f}{R}")
     print(f"{'='*66}")
 
     # Print the bets
     for bet in bets:
         print_bet(bet)
+
+    # Charge bankroll if live
+    if live:
+        total = sum(b.total_cost for b in bets)
+        br = charge_bankroll(total)
+        bal_color2 = GR if br["balance"] >= 50 else YE if br["balance"] >= 20 else RD
+        print(f"  {RD}LIVE CHARGE:{R} -${total:.2f}  |  "
+              f"{B}New balance:{R} {bal_color2}${br['balance']:,.2f}{R}")
+        print()
+
+
+# ── Live order placement ──────────────────────────────────────────────────
+
+def place_six_bets(bets: list[SixBet], client) -> dict:
+    """Place all six bets on Kalshi.  1 contract per leg at ask price.
+
+    Returns: {"placed": N, "failed": N, "total_cost": float, "orders": [...]}
+    """
+    summary: dict = {"placed": 0, "failed": 0, "total_cost": 0.0, "orders": []}
+    for bet in bets:
+        for pick in bet.picks:
+            ticker = pick["ticker"]
+            side = pick["side"].lower()
+            price = pick["price"]
+            price_cents = int(round(price * 100))
+            if price_cents <= 0:
+                continue  # skip worthless legs
+            if price_cents >= 100:
+                price_cents = 99  # Kalshi rejects $1.00 — cap at 99c
+            try:
+                result = client.place_order(
+                    ticker=ticker, side=side, count=1, price_cents=price_cents,
+                )
+                cost = price
+                summary["placed"] += 1
+                summary["total_cost"] += cost
+                summary["orders"].append({
+                    "ticker": ticker, "side": side, "price_cents": price_cents,
+                    "cost": round(cost, 2), "status": "placed",
+                    "order_id": result.get("order", {}).get("order_id", "?"),
+                })
+                print(f"  {GR}✓{R} {ticker} {side.upper():3s} @ {price_cents}c  "
+                      f"(${cost:.2f})")
+            except Exception as e:
+                summary["failed"] += 1
+                summary["orders"].append({
+                    "ticker": ticker, "side": side, "price_cents": price_cents,
+                    "cost": 0, "status": "failed", "error": str(e)[:80],
+                })
+                print(f"  {RD}✗{R} {ticker} {side.upper():3s} @ {price_cents}c  "
+                      f"FAIL: {e}")
+    return summary
 
 
 def watch() -> int:
@@ -574,8 +690,8 @@ def main():
     )
     parser.add_argument("--live", action="store_true",
                         help="Place real bets on Kalshi (requires auth)")
-    parser.add_argument("--series", type=str, default="KXBTCD",
-                        help="Series ticker (default: KXBTCD)")
+    parser.add_argument("--series", type=str, default="",
+                        help="Series ticker (default: auto-discover sports combos)")
     parser.add_argument("--games", type=int, default=0,
                         help="Number of simulated games for dry-run (default: auto)")
     parser.add_argument("--institute", action="store_true",
@@ -593,33 +709,46 @@ def main():
         institute(args.series, args.live, args.games)
         return 0
 
-    # Default: single dry-run (original behavior)
-    if args.live:
-        games = fetch_real_games(args.series)
-        live = True
-    else:
-        label_map = {
-            "KXBTCD": "BTC", "KXETHD": "ETH", "KXSOLD": "SOL",
-            "KXXRPD": "XRP", "KXDOGD": "DOGE", "KXADAD": "ADA",
-        }
-        label = label_map.get(args.series, "BTC")
-        n = args.games or 8
-        games = simulate_todays_games(series_label=label, num_games=n)
-        live = False
+    # Default: auto-discover sports combos (dry-run or live)
+    games, got_data = fetch_real_games(args.series)
+    live = args.live and got_data
 
     if len(games) < 2:
         print("[FAIL] Need at least 2 open markets to run THE SIX.")
         return 1
 
-    series_label = games[0].ticker.split("-")[0] if games else "?"
+    raw = games[0].ticker if games else "?"
+    series_label = "SPORTS-COMBO" if raw.startswith(COMBO_EVENT_PREFIX) else raw.split("-")[0]
 
     six = TheSix(games, seed=datetime.now().day)
     bets = six.run()
+
+    # Ensure bankroll exists (creates $100 starting balance if missing)
+    br = load_bankroll()
 
     print_header(games, series_label, live)
     for bet in bets:
         print_bet(bet)
     print_summary(bets)
+
+    # Place bets and charge bankroll if live
+    if live:
+        from kalshi_tap.client import KalshiClient
+        client = KalshiClient.from_env()
+        print(f"\n  {RD}{'='*66}{R}")
+        print(f"  {B}{WH}PLACING ORDERS{R} — 1 contract per leg at ask")
+        print(f"  {RD}{'='*66}{R}\n")
+        result = place_six_bets(bets, client)
+        total = result["total_cost"]
+        br = charge_bankroll(total)
+        bal_color = GR if br["balance"] >= 50 else YE if br["balance"] >= 20 else RD
+        print(f"\n  {RD}{'='*66}{R}")
+        print(f"  {B}PLACED:{R} {GR}{result['placed']}{R}  |  "
+              f"{B}FAILED:{R} {RD}{result['failed']}{R}  |  "
+              f"{B}Cost:{R} ${total:.2f}")
+        print(f"  {B}Bankroll:{R} {bal_color}${br['balance']:,.2f}{R}")
+        print(f"  {RD}{'='*66}{R}")
+        print()
 
     return 0
 
