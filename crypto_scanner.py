@@ -112,6 +112,102 @@ def _is_connectivity_error(exc: BaseException) -> bool:
     return any(kw in msg for kw in keywords)
 
 
+# ── Dual network-access gate (NEW + OLD) ──────────────────────────
+# Every balance check runs both tests before firing RPCs:
+#   NEW access — a fresh connectivity probe RIGHT NOW (can we reach the internet?)
+#   OLD access — how stale is our last confirmed successful probe?
+# The "old" check prevents hammering RPCs from a connection that died silently;
+# the "new" check confirms we are actually online before spending 10+ seconds
+# on a provider timeout.
+
+_NET_LAST_OK: float = 0.0       # epoch timestamp of last successful connectivity probe
+_NET_LAST_OK_LOCK = threading.Lock()
+_NET_PROBE_URLS = (
+    ("https://www.google.com",         5.0),   # primary — fast, always up
+    ("https://cloudflare-dns.com",      5.0),   # fallback — lighter payload
+    ("https://1.1.1.1",                 5.0),   # last resort — raw IP, no DNS needed
+)
+_NET_STALE_OK_SEC = 120.0   # "old" access is still considered fresh within 2 min
+
+
+def check_network_access() -> dict:
+    """Run NEW + OLD network access gate and return a status dict.
+
+    Returns keys:
+        new_ok      — bool: fresh probe succeeded right now
+        new_ms      — int:  latency of the fresh probe (ms), or -1
+        new_url     — str:  which URL answered, or ""
+        old_ok      — bool: last confirmed probe was within _NET_STALE_OK_SEC
+        old_age_sec — float: seconds since last confirmed probe (0 if never)
+        old_stale   — bool: old_ok is False AND we have a recorded probe
+    """
+    now = time.time()
+    result: dict = {
+        "new_ok": False,
+        "new_ms": -1,
+        "new_url": "",
+        "old_ok": False,
+        "old_age_sec": -1.0,
+        "old_stale": False,
+    }
+
+    # ── OLD access: how fresh is the last known-good probe? ──────
+    with _NET_LAST_OK_LOCK:
+        last_ok = _NET_LAST_OK
+    if last_ok > 0:
+        age = now - last_ok
+        result["old_age_sec"] = age
+        if age <= _NET_STALE_OK_SEC:
+            result["old_ok"] = True
+        else:
+            result["old_stale"] = True
+
+    # ── NEW access: can we reach the internet RIGHT NOW? ─────────
+    for url, timeout in _NET_PROBE_URLS:
+        t0 = time.time()
+        try:
+            r = requests.head(
+                url,
+                timeout=timeout,
+                headers={"User-Agent": "RepoHere1-Termux/2.0"},
+            )
+            elapsed_ms = int((time.time() - t0) * 1000)
+            # Any 2xx/3xx/4xx means the network is alive
+            result["new_ok"] = True
+            result["new_ms"] = elapsed_ms
+            result["new_url"] = url
+            with _NET_LAST_OK_LOCK:
+                _NET_LAST_OK = now
+            # Also promote old_ok since we just confirmed connectivity
+            result["old_ok"] = True
+            result["old_age_sec"] = 0.0
+            result["old_stale"] = False
+            break
+        except Exception:
+            continue
+
+    return result
+
+
+def _should_block_rpc(net: dict) -> tuple[bool, str]:
+    """Return (block, reason) — whether we should skip RPC calls given *net* status.
+
+    We block only when BOTH new AND old access are dead — i.e. we cannot reach
+    the internet NOW and our last successful probe is stale.  If either succeeds
+    we proceed; the RPC layer has its own retry/timeout logic."""
+    if net["new_ok"]:
+        return False, ""
+    if net["old_ok"]:
+        # New failed but old is fresh — probably a transient blip; let RPC try.
+        return False, "new_probe_failed_old_fresh"
+    if net["old_stale"]:
+        return True, "network_dead_new_failed_old_stale"
+    if net["old_age_sec"] < 0:
+        # No prior probe at all (fresh boot)
+        return True, "network_dead_no_prior_probe"
+    return True, "network_dead"
+
+
 # ---------------------------------------------------------------------------
 # Config
 # ---------------------------------------------------------------------------
@@ -711,27 +807,32 @@ def throttle_cpu_ram(sleep_base: float = 0.05):
 
 
 def recommend_balance_workers() -> int:
-    """Scale balance workers from free RAM + CPU. Env BALANCE_WORKERS overrides."""
+    """Scale balance workers from free RAM + CPU. Env BALANCE_WORKERS overrides.
+
+    Capped conservatively on phones — too many concurrent HTTP workers + mass_scan
+    was driving Termux into Android LMK / session kills.
+    """
     env = os.environ.get("BALANCE_WORKERS", "").strip()
     if env.isdigit():
-        return max(2, min(32, int(env)))
+        return max(1, min(12, int(env)))
     mem = available_memory_mb()
     try:
         cpus = os.cpu_count() or 4
     except Exception:
         cpus = 4
-    # I/O-bound HTTP checks → more threads than cores is fine
+    # Keep headroom for mass_scan + adaptive + UI
     if mem >= 6000:
-        n = min(24, max(16, cpus * 3))  # prefer high concurrency on big-RAM devices
+        n = min(8, max(4, cpus))
     elif mem >= 3000:
-        n = min(20, max(12, cpus * 2))
+        n = min(6, max(3, cpus - 1))
     elif mem >= 1500:
-        n = min(10, max(6, cpus))
+        n = min(4, max(2, cpus // 2 or 2))
     elif mem >= 700:
-        n = 4
-    else:
         n = 2
+    else:
+        n = 1
     return n
+
 
 
 # ---------------------------------------------------------------------------
@@ -750,31 +851,62 @@ def check_disk_space(threshold_mb: float = SAFE_SHUTDOWN_THRESHOLD_MB) -> Option
     return None
 
 
-def save_checkpoint(processed: int, findings_total: int) -> None:
+def save_checkpoint(processed: int, findings_total: int, byte_offset: int = 0, scan_path: str = "") -> None:
     """Persist scanner state so it can resume after a controlled shutdown."""
     data = {
         "processed": processed,
         "findings_total": findings_total,
+        "byte_offset": int(byte_offset or 0),
+        "scan_path": scan_path or SCAN_FILE,
         "timestamp": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
     }
     try:
         with open(CHECKPOINT_FILE, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=2)
-        logger.info("Checkpoint saved to %s", CHECKPOINT_FILE)
+        logger.info("Checkpoint saved to %s (offset=%s)", CHECKPOINT_FILE, data["byte_offset"])
     except Exception as exc:
         logger.warning("Failed to save checkpoint: %s", exc)
 
 
-def controlled_shutdown(processed: int, findings_total: int, reason: str) -> None:
+def load_checkpoint(scan_path: str) -> dict:
+    """Load resume offset for *scan_path*. Invalid/stale offsets are ignored."""
+    try:
+        with open(CHECKPOINT_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except Exception:
+        return {"processed": 0, "findings_total": 0, "byte_offset": 0}
+    try:
+        off = int(data.get("byte_offset") or 0)
+    except (TypeError, ValueError):
+        off = 0
+    prev = str(data.get("scan_path") or "")
+    try:
+        size = os.path.getsize(scan_path) if os.path.exists(scan_path) else 0
+    except OSError:
+        size = 0
+    # File rotated/truncated, or checkpoint is for a different path.
+    if prev and os.path.abspath(prev) != os.path.abspath(scan_path):
+        off = 0
+    if off < 0 or (size and off > size):
+        off = 0
+    return {
+        "processed": int(data.get("processed") or 0),
+        "findings_total": int(data.get("findings_total") or 0),
+        "byte_offset": off,
+    }
+
+
+def controlled_shutdown(processed: int, findings_total: int, reason: str, byte_offset: int = 0, scan_path: str = "") -> None:
     """Graceful exit that saves state so the scanner can resume later."""
     logger.warning("CONTROLLED SHUTDOWN triggered: %s", reason)
-    save_checkpoint(processed, findings_total)
+    save_checkpoint(processed, findings_total, byte_offset=byte_offset, scan_path=scan_path or SCAN_FILE)
     try:
         with open(CONTROLLED_SHUTDOWN_FLAG, "w", encoding="utf-8") as f:
             f.write(f"reason={reason}\ntimestamp={datetime.now(timezone.utc).isoformat()}\n")
     except Exception:
         pass
     logger.info("Controlled shutdown complete. Restart %s to resume.", __file__)
+
 
 
 # ---------------------------------------------------------------------------
@@ -1100,8 +1232,15 @@ def save_balance_cache(force: bool = False) -> None:
 
     Debounced: by default only flush every few seconds unless force=True,
     so thousands of RPC checks do not thrash the filesystem.
+
+    Cross-process safe: unique per-PID temp name + fcntl flock so walletx,
+    wallet_view, and crypto_scanner never race on the same .tmp path.
     """
     global _CACHE_DIRTY, _CACHE_LAST_FLUSH, _CACHE_PENDING_WRITES
+    import fcntl
+
+    lock_path = BALANCE_CACHE_FILE + ".lock"
+    tmp = None
     try:
         with BALANCE_CACHE_LOCK:
             now = time.time()
@@ -1109,29 +1248,57 @@ def save_balance_cache(force: bool = False) -> None:
                 return
             if not force and (now - _CACHE_LAST_FLUSH) < _CACHE_FLUSH_INTERVAL and _CACHE_PENDING_WRITES < 25:
                 return
-            tmp = BALANCE_CACHE_FILE + ".tmp"
-            now_flush = time.time()
-            with open(tmp, "w", encoding="utf-8") as f:
-                for rec in BALANCE_CACHE.values():
-                    # Never persist eternal PENDING — settle aged failures as 0
-                    if rec.get("balance") is None:
-                        age = now_flush - float(rec.get("ts") or 0)
-                        if age > 600 or rec.get("invalid") or rec.get("settled"):
-                            rec = dict(rec)
-                            rec["balance"] = 0.0
-                            rec["settled"] = True
-                    f.write(json.dumps(rec) + chr(10))
-                f.flush()
-                os.fsync(f.fileno())
-            os.replace(tmp, BALANCE_CACHE_FILE)
+
+            # Snapshot under the in-process lock, then release before slow I/O
+            # waiters can keep updating memory while we hold only the file lock.
+            records = list(BALANCE_CACHE.values())
+
+        os.makedirs(os.path.dirname(BALANCE_CACHE_FILE) or ".", exist_ok=True)
+        # Exclusive cross-process lock around write+replace
+        with open(lock_path, "a+", encoding="utf-8") as lf:
+            fcntl.flock(lf.fileno(), fcntl.LOCK_EX)
+            try:
+                now_flush = time.time()
+                # Unique tmp avoids ENOENT when another process replaces/removes
+                # a shared balance_cache.jsonl.tmp mid-write.
+                tmp = (
+                    f"{BALANCE_CACHE_FILE}.tmp.{os.getpid()}.{threading.get_ident()}."
+                    f"{int(now_flush * 1000000)}"
+                )
+                with open(tmp, "w", encoding="utf-8") as f:
+                    for rec in records:
+                        # Never persist eternal PENDING — settle aged failures as 0
+                        if rec.get("balance") is None:
+                            age = now_flush - float(rec.get("ts") or 0)
+                            if age > 600 or rec.get("invalid") or rec.get("settled"):
+                                rec = dict(rec)
+                                rec["balance"] = 0.0
+                                rec["settled"] = True
+                        f.write(json.dumps(rec) + chr(10))
+                    f.flush()
+                    os.fsync(f.fileno())
+                os.replace(tmp, BALANCE_CACHE_FILE)
+                tmp = None
+            finally:
+                fcntl.flock(lf.fileno(), fcntl.LOCK_UN)
+
+        with BALANCE_CACHE_LOCK:
             _CACHE_DIRTY = False
-            _CACHE_LAST_FLUSH = now
+            _CACHE_LAST_FLUSH = time.time()
             _CACHE_PENDING_WRITES = 0
     except Exception as e:
         logger.warning("Could not save balance cache: %s", e)
+        if tmp:
+            try:
+                if os.path.exists(tmp):
+                    os.remove(tmp)
+            except Exception:
+                pass
+        # Clean stale shared-name leftovers from older builds
         try:
-            if os.path.exists(BALANCE_CACHE_FILE + ".tmp"):
-                os.remove(BALANCE_CACHE_FILE + ".tmp")
+            legacy = BALANCE_CACHE_FILE + ".tmp"
+            if os.path.exists(legacy) and os.path.getsize(legacy) == 0:
+                os.remove(legacy)
         except Exception:
             pass
 
@@ -1142,14 +1309,20 @@ def _mark_cache_dirty() -> None:
 
 
 def notify(title: str, message: str) -> None:
-    """Send Android notification via termux-notification if available."""
+    """Send Android notification via termux-notification if available.
+
+    Always use a short timeout — termux-api Notification often hangs forever
+    when the Android binder/API is busy, which leaves orphan bash/termux-api
+    children and contributes to process/table pressure under load.
+    """
     try:
         import subprocess
         subprocess.run(
-            ["termux-notification", "--title", title, "--content", message],
+            ["termux-notification", "--title", str(title)[:64], "--content", str(message)[:200]],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             check=False,
+            timeout=3,
         )
     except Exception:
         pass
@@ -1177,6 +1350,31 @@ def retry(max_attempts: int = 3, base_delay: float = 1.0, backoff: float = 2.0):
     return decorator
 
 def fetch_balance(chain: str, address: str) -> Optional[float]:
+    # ── Dual network-access gate (NEW + OLD) ─────────────────────
+    # Before spending up to 10 s per provider, confirm we actually have
+    # internet access.  A single check here gates the entire provider loop;
+    # individual connectivity errors inside the loop still trigger
+    # wait_for_wifi + retry as before.
+    net = check_network_access()
+    block, reason = _should_block_rpc(net)
+    if block:
+        logger.warning(
+            "[net-gate] Blocking RPC for %s/%s — %s "
+            "(new_ok=%s old_ok=%s old_age=%.0fs)",
+            chain, address, reason,
+            net["new_ok"], net["old_ok"], net["old_age_sec"],
+        )
+        if not net["new_ok"] and net["old_age_sec"] > 30:
+            # Give WiFi a short chance to come back (non-blocking for callers)
+            wait_for_wifi(max_wait=15.0)
+            # Retry once after waiting
+            net2 = check_network_access()
+            block2, _ = _should_block_rpc(net2)
+            if block2:
+                return None
+        else:
+            return None
+
     providers = BALANCE_PROVIDERS.get(chain, [])
     headers = {"User-Agent": "RepoHere1-Termux/2.0", "Content-Type": "application/json"}
     for prov in providers:
@@ -1471,27 +1669,59 @@ def extract_source_metadata(line: str) -> Dict[str, Any]:
 
 
 def normalize_input_line(line: str) -> str:
-    """Flatten truffleHog/mass_scan JSONL into a searchable string."""
+    """Flatten truffleHog/mass_scan JSONL into a searchable string.
+
+    Huge truffleHog diffs (100KB+) used to be json.loads'd and regex-scanned
+    in full, pegging a core at 100%+ and starving Termux until Android killed it.
+    Cap payload size aggressively while keeping secret-bearing fields.
+    """
+    # Hard cap before JSON parse — prevents multi-MB line blowups
+    max_raw = int(os.environ.get("SCAN_LINE_MAX_BYTES", "65536"))
+    if len(line) > max_raw:
+        line = line[:max_raw]
     try:
         obj = json.loads(line)
         parts = []
         seen = set()
-        for key in (
-            "reason", "string", "path", "commit", "source_line", "diff",
-            "repository", "repo", "url", "Raw", "RawV2", "DetectorName",
-        ):
+        # Prefer compact secret fields; truncate fat diffs hard
+        field_caps = {
+            "reason": 2000,
+            "string": 4000,
+            "path": 500,
+            "commit": 500,
+            "source_line": 2000,
+            "diff": 8000,
+            "repository": 500,
+            "repo": 500,
+            "url": 500,
+            "Raw": 8000,
+            "RawV2": 8000,
+            "DetectorName": 200,
+        }
+        for key, cap in field_caps.items():
             val = obj.get(key, "")
             if isinstance(val, list):
                 val = " ".join(str(x) for x in val[:20])
             if val and str(val) not in seen:
                 seen.add(str(val))
-                parts.append(str(val)[:2000])
+                parts.append(str(val)[:cap])
         sf = obj.get("stringsFound")
         if isinstance(sf, list):
             parts.extend(str(x)[:500] for x in sf[:30])
-        return " ".join(parts)
+        # Also pull nested SourceMetadata lightly
+        sm = obj.get("SourceMetadata") or obj.get("source_metadata") or {}
+        if isinstance(sm, dict):
+            blob = json.dumps(sm, default=str)
+            if blob and blob not in seen:
+                parts.append(blob[:2000])
+        out = " ".join(parts)
+        # Final safety cap on normalized text fed to regexes
+        max_text = int(os.environ.get("SCAN_TEXT_MAX_CHARS", "24000"))
+        return out[:max_text]
     except json.JSONDecodeError:
-        return line
+        max_text = int(os.environ.get("SCAN_TEXT_MAX_CHARS", "24000"))
+        return line[:max_text]
+
 
 def scan_line(line: str) -> Dict[str, Any]:
     text = normalize_input_line(line)
@@ -1666,24 +1896,86 @@ def balance_worker(q: queue_module.Queue, stop_event: threading.Event):
             q.task_done()
 
 
-def tail_file(path: str):
-    with open(path, "r", encoding="utf-8", errors="ignore") as f:
-        f.seek(0, 0)
-        while True:
-            line = f.readline()
-            if line:
-                yield line.rstrip("\n")
-            else:
-                time.sleep(0.5)
+def tail_file(path: str, start_offset: int = 0):
+    """Yield lines from *path*, resuming at *start_offset* and following growth.
 
-# ---------------------------------------------------------------------------
-# Main
-# ---------------------------------------------------------------------------
+    Yields (line, byte_offset_after_line). Persisting the offset avoids re-scanning
+    multi-GB result files from byte 0 after every crash/restart (the main Termux
+    kill trigger on this phone).
+
+    Lines longer than SCAN_LINE_READ_MAX (default 256KB) are skipped by seeking
+    forward to the next newline — never fully loaded into RAM/CPU.
+    """
+    offset = max(0, int(start_offset or 0))
+    max_line = int(os.environ.get("SCAN_LINE_READ_MAX", str(256 * 1024)))
+    idle_sleep = float(os.environ.get("SCAN_IDLE_SLEEP", "0.75"))
+
+    with open(path, "rb") as f:
+        try:
+            size = os.fstat(f.fileno()).st_size
+        except OSError:
+            size = 0
+        if offset > size:
+            offset = 0
+        if offset > 0:
+            f.seek(offset)
+            partial = f.readline()
+            if partial:
+                offset = f.tell()
+        else:
+            f.seek(0, 0)
+            offset = 0
+
+        while True:
+            start_pos = f.tell()
+            chunk = f.readline()
+            if chunk:
+                offset = f.tell()
+                if len(chunk) > max_line:
+                    if not chunk.endswith(b"\n"):
+                        while True:
+                            more = f.read(1024 * 1024)
+                            if not more:
+                                break
+                            idx = more.find(b"\n")
+                            if idx >= 0:
+                                f.seek(f.tell() - (len(more) - idx - 1))
+                                break
+                        offset = f.tell()
+                    logger.warning(
+                        "Skipping oversized line (~%d+ bytes) at offset %s",
+                        len(chunk), start_pos,
+                    )
+                    continue
+                try:
+                    line = chunk.decode("utf-8", errors="ignore").rstrip("\n")
+                except Exception:
+                    continue
+                yield line, offset
+            else:
+                try:
+                    cur_size = os.path.getsize(path)
+                except OSError:
+                    cur_size = 0
+                if cur_size < offset:
+                    logger.warning("Scan file truncated/rotated — restarting from 0")
+                    f.seek(0, 0)
+                    offset = 0
+                    continue
+                time.sleep(idle_sleep)
+
+
 def main():
     scan_path = SCAN_FILE
     if not os.path.exists(scan_path):
         logger.error("Scan file not found: %s", scan_path)
         sys.exit(1)
+
+    # Lower CPU priority so Android is less eager to kill Termux
+    try:
+        os.nice(10)
+    except Exception:
+        pass
 
     logger.info("Crypto Scanner v2.0 starting...")
     logger.info("Monitoring: %s", scan_path)
@@ -1723,17 +2015,48 @@ def main():
     with open(PID_FILE, "w") as f:
         f.write(str(os.getpid()))
 
+    ckpt = load_checkpoint(scan_path)
+    start_offset = int(ckpt.get("byte_offset") or 0)
+    # Optional env force: SCAN_FROM_END=1 skips backlog and only follows new lines
+    if os.environ.get("SCAN_FROM_END", "").strip() in ("1", "true", "yes"):
+        try:
+            start_offset = os.path.getsize(scan_path)
+            logger.info("SCAN_FROM_END set — starting at EOF offset=%s", start_offset)
+        except OSError:
+            pass
+    elif start_offset > 0:
+        logger.info("Resuming from byte offset %s (skipping already-scanned backlog)", start_offset)
+    else:
+        # Fresh start on multi-GB backlog would peg CPU for hours and kill Termux.
+        # Default: if file is huge and no checkpoint, start near the end and only
+        # process a small recent window + follow new data.
+        try:
+            fsize = os.path.getsize(scan_path)
+        except OSError:
+            fsize = 0
+        huge = int(os.environ.get("SCAN_HUGE_BYTES", str(512 * 1024 * 1024)))
+        if fsize > huge:
+            keep = int(os.environ.get("SCAN_CATCHUP_BYTES", str(64 * 1024 * 1024)))
+            start_offset = max(0, fsize - keep)
+            logger.warning(
+                "Huge scan file (%.1f GB) with no checkpoint — catching up last %.0f MB from offset %s",
+                fsize / (1024 ** 3),
+                keep / (1024 ** 2),
+                start_offset,
+            )
+
     seen_lines = set()
-    processed = 0
-    findings_total = 0
+    processed = int(ckpt.get("processed") or 0)
+    findings_total = int(ckpt.get("findings_total") or 0)
+    byte_offset = start_offset
     start_ts = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
     with open(STATUS_FILE, "w") as f:
-        f.write(f"started={start_ts}, processed=0, findings=0, memory=0 bytes")
+        f.write(f"started={start_ts}, processed={processed}, findings={findings_total}, offset={byte_offset}")
 
     context_window: List[str] = []
     balance_queue: queue_module.Queue = queue_module.Queue()
     stop_event = threading.Event()
-    queued_keys: set = set()  # (chain, addr) already in-flight or recently queued
+    queued_keys: set = set()
     queued_keys_lock = threading.Lock()
 
     num_workers = recommend_balance_workers()
@@ -1771,15 +2094,12 @@ def main():
 
     def queue_balances(addr_map: Dict[str, List[str]]):
         """Enqueue unique addresses that still need a live check."""
-        # Soft backpressure: if queue is huge, only take high-value chains first
         qsz = balance_queue.qsize()
         priority = ("btc", "eth", "sol", "ltc", "doge", "matic", "avax", "bnb", "base", "monad", "xrp", "ton")
         chains = [c for c in priority if c in addr_map] + [
             c for c in addr_map if c not in priority
         ]
-        # When overloaded, skip secondary EVM mirrors of same hex (matic/avax/bnb/base/monad)
-        # if eth already queued — they share address; eth check is enough signal for now
-        skip_evm_mirrors = qsz > 20_000
+        skip_evm_mirrors = qsz > 5_000
         for chain in chains:
             if skip_evm_mirrors and chain in ("matic", "avax", "bnb", "base", "monad"):
                 continue
@@ -1790,37 +2110,47 @@ def main():
                 with queued_keys_lock:
                     if ck in queued_keys:
                         continue
-                    if len(queued_keys) > 500_000:
+                    if len(queued_keys) > 200_000:
                         queued_keys.clear()
                     if _cache_fresh_enough(chain, a):
                         continue
                     queued_keys.add(ck)
                 balance_queue.put((chain, a))
 
+    last_ckpt = time.time()
+    ckpt_every = float(os.environ.get("SCAN_CHECKPOINT_SEC", "30"))
+    line_throttle = float(os.environ.get("SCAN_LINE_SLEEP", "0.01"))
+
     try:
         _line_count = 0
-        for line in tail_file(scan_path):
+        for line, byte_offset in tail_file(scan_path, start_offset=start_offset):
             _line_count += 1
-            # Check disk space every 50 lines to protect against filling the disk.
             if _line_count % 50 == 0:
                 low = check_disk_space()
                 if low:
-                    controlled_shutdown(processed, BALANCE_HITS_COUNT, low)
+                    controlled_shutdown(
+                        processed, BALANCE_HITS_COUNT, low,
+                        byte_offset=byte_offset, scan_path=scan_path,
+                    )
                     break
+            now = time.time()
+            if now - last_ckpt >= ckpt_every:
+                save_checkpoint(processed, findings_total, byte_offset=byte_offset, scan_path=scan_path)
+                last_ckpt = now
+
             if not line.strip():
                 continue
             h = hashlib.md5(line.encode()).hexdigest()
             if h in seen_lines:
                 continue
             seen_lines.add(h)
-            if len(seen_lines) > 100_000:
+            if len(seen_lines) > 50_000:
                 seen_lines.clear()
 
             findings = scan_line(line)
             if material_findings(findings):
                 processed += 1
                 findings = correlate_findings(findings, line, context_window)
-                # After IQ scrub, drop records that lost all material
                 if not material_findings(findings) and not (findings.get("derived_addresses")):
                     context_window.append(line[:200])
                     if len(context_window) > 3:
@@ -1851,22 +2181,35 @@ def main():
                 )
                 for k, vs in findings.items():
                     if vs and k not in ("high_entropy", "base58_strings", "base64_strings"):
-                        logger.info("  %s: %s", k, vs)
+                        if isinstance(vs, list) and len(vs) > 12:
+                            logger.info("  %s: %d items (showing 8) %s...", k, len(vs), vs[:8])
+                        else:
+                            logger.info("  %s: %s", k, vs)
 
                 addr_map: Dict[str, List[str]] = {}
+                _per_chain_cap = int(os.environ.get("SCAN_ADDR_CAP_PER_LINE", "24"))
                 for chain in ("btc", "eth", "ltc", "sol", "doge", "xrp", "ton", "avax", "matic", "bnb", "base", "monad"):
-                    for addr in findings.get(chain, []):
+                    for addr in (findings.get(chain, []) or [])[:_per_chain_cap]:
                         addr_map.setdefault(chain, []).append(addr)
-                for derived in findings.get("derived_addresses", []):
-                    chain = derived["chain"]
-                    addr = derived["address"]
-                    addr_map.setdefault(chain, []).append(addr)
+                for derived in (findings.get("derived_addresses") or [])[:_per_chain_cap]:
+                    chain = derived.get("chain")
+                    addr = derived.get("address")
+                    if chain and addr:
+                        addr_map.setdefault(chain, []).append(addr)
 
                 if addr_map:
-                    queue_balances(addr_map)
+                    # Skip pure-address spam lines with no key material
+                    _w = findings.get("wallet") or {}
+                    _has_key = bool(
+                        _w.get("wifs") or _w.get("hex_keys") or _w.get("seed_phrases")
+                        or findings.get("wif") or findings.get("hex_key") or findings.get("seed_phrase")
+                    )
+                    _addr_count = sum(len(v) for v in addr_map.values())
+                    if _has_key or _addr_count <= 40:
+                        queue_balances(addr_map)
+                    else:
+                        logger.debug("skip queue: address-spam line (%d addrs, no keys)", _addr_count)
 
-                # High-confidence gate: require real key material + IQ score
-                # (stops ascii-text hex and bare address noise flooding HC file)
                 _wallet = findings.get("wallet") or {}
                 _has_real_key = bool(
                     _wallet.get("wifs")
@@ -1922,7 +2265,12 @@ def main():
 
             with BALANCE_HITS_LOCK:
                 total_hits = BALANCE_HITS_COUNT
-            status = f"processed={processed}, findings={total_hits}, memory={os.path.getsize(MEMORY_FILE) if os.path.exists(MEMORY_FILE) else 0} bytes, queue={balance_queue.qsize()}"
+            findings_total = total_hits
+            status = (
+                f"processed={processed}, findings={total_hits}, "
+                f"memory={os.path.getsize(MEMORY_FILE) if os.path.exists(MEMORY_FILE) else 0} bytes, "
+                f"queue={balance_queue.qsize()}, offset={byte_offset}"
+            )
             with open(STATUS_FILE, "w") as f:
                 f.write(status)
 
@@ -1930,13 +2278,20 @@ def main():
             if len(context_window) > 3:
                 context_window.pop(0)
 
-            throttle_cpu_ram(0.0)
+            throttle_cpu_ram(line_throttle)
 
     except KeyboardInterrupt:
         logger.info("Stopping. Waiting for balance queue to drain...")
     finally:
+        try:
+            save_checkpoint(processed, findings_total, byte_offset=byte_offset, scan_path=scan_path)
+        except Exception:
+            pass
         stop_event.set()
-        balance_queue.join()
+        try:
+            balance_queue.join()
+        except Exception:
+            pass
         for w in workers:
             w.join(timeout=2)
         try:
@@ -1946,7 +2301,10 @@ def main():
         save_balance_cache()
         with BALANCE_HITS_LOCK:
             total_hits = BALANCE_HITS_COUNT
-        logger.info("Stopped. Processed %d finding-blocks, %d balance hits.", processed, total_hits)
+        logger.info(
+            "Stopped. Processed %d finding-blocks, %d balance hits, offset=%s.",
+            processed, total_hits, byte_offset,
+        )
 
 
 if __name__ == "__main__":

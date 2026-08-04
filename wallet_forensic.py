@@ -570,6 +570,10 @@ def forensic_bundle_for_wallet(w: dict) -> Dict[str, Any]:
         "linked_hex_full": w.get("_linked_hex") or "",
         "linked_wif_full": w.get("_linked_wif") or "",
         "linked_seed_full": w.get("_linked_seed") or "",
+        "linked_hexes_full": w.get("_linked_hexes") or [],
+        "linked_wifs_full": w.get("_linked_wifs") or [],
+        "linked_seeds_full": w.get("_linked_seeds") or [],
+        "link_method": w.get("_link_method") or "",
         "analysis": None,
         "linked_analysis": [],
         "analyzed_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
@@ -653,6 +657,10 @@ def export_dossier(w: dict, balances: dict, meta: dict, rank: int, total_bal: fl
         "linked_hex_full": w.get("_linked_hex"),
         "linked_wif_full": w.get("_linked_wif"),
         "linked_seed_full": w.get("_linked_seed"),
+        "linked_hexes_full": w.get("_linked_hexes") or [],
+        "linked_wifs_full": w.get("_linked_wifs") or [],
+        "linked_seeds_full": w.get("_linked_seeds") or [],
+        "link_method": w.get("_link_method") or "",
         "chains": w.get("_chains"),
         "addresses": addr_table,
         "forensic": bundle,
@@ -906,6 +914,152 @@ def attach_memory_meta(wallets, max_bytes: int = MEMORY_DEEP_BYTES):
                 target["_link_method"] = "derive_match"
             still = [w for w in want.values() if not w.get("_linked_hex")]
     return wallets
+
+
+def cross_link_wallets(wallets):
+    """Cross-link HEX/WIF/SEED wallets so _linked_hex, _linked_wif, _linked_seed
+    are populated for ALL wallet types. Also cross-link between types based on
+    derived addresses and key material."""
+    if not wallets:
+        return wallets
+
+    hex_by_key = {}
+    addr_by_body = {}
+    for w in wallets:
+        typ = w.get("type") or ""
+        key = w.get("key") or ""
+        if typ == "HEX":
+            hx = _hex_norm(key)
+            if len(hx) == 64:
+                hex_by_key[hx] = w
+        elif typ == "ADDR":
+            body = key.lower()
+            if ":" in body:
+                body = body.split(":", 1)[-1]
+            bare = body[2:] if body.startswith("0x") else body
+            addr_by_body[body] = w
+            addr_by_body[bare] = w
+            if body.startswith("0x"):
+                addr_by_body["0x" + bare] = w
+
+    for w in wallets:
+        typ = w.get("type") or ""
+        key = w.get("key") or ""
+
+        if typ == "HEX":
+            hx = _hex_norm(key)
+            if len(hx) == 64 and not wv.is_junk_hex(hx):
+                priv = _priv_bytes_from_hex(hx)
+                if priv and not w.get("_linked_wif"):
+                    wif_c = _wif_from_priv(priv, compressed=True)
+                    if wif_c:
+                        w["_linked_wif"] = wif_c
+                if not w.get("_linked_hexes"):
+                    w["_linked_hexes"] = [hx]
+                if not w.get("_linked_hex"):
+                    w["_linked_hex"] = hx
+
+        elif typ == "WIF" and not w.get("_linked_hex"):
+            res = analyze_wif(key)
+            if res.get("hex"):
+                w["_linked_hex"] = res["hex"]
+                hx = res["hex"]
+                if hx in hex_by_key:
+                    hw = hex_by_key[hx]
+                    if key not in (hw.get("_linked_wif") or ""):
+                        if not hw.get("_linked_wif"):
+                            hw["_linked_wif"] = key
+                        if not hw.get("_linked_wifs"):
+                            hw["_linked_wifs"] = []
+                        if key not in hw["_linked_wifs"]:
+                            hw["_linked_wifs"].append(key)
+            if not w.get("_linked_wifs"):
+                w["_linked_wifs"] = [key]
+            if not w.get("_linked_wif"):
+                w["_linked_wif"] = key
+
+        elif typ == "SEED":
+            if not w.get("_linked_hex") or not w.get("_linked_wif"):
+                res = analyze_seed(key)
+                nh = res.get("nested_hex") or {}
+                if nh.get("hex") and not w.get("_linked_hex"):
+                    w["_linked_hex"] = nh["hex"]
+                    hx = nh["hex"]
+                    if hx in hex_by_key:
+                        hw = hex_by_key[hx]
+                        if not hw.get("_linked_seed"):
+                            hw["_linked_seed"] = key
+                if nh.get("wif_compressed") and not w.get("_linked_wif"):
+                    w["_linked_wif"] = nh["wif_compressed"]
+                elif nh.get("wif_uncompressed") and not w.get("_linked_wif"):
+                    w["_linked_wif"] = nh["wif_uncompressed"]
+            if not w.get("_linked_seeds"):
+                w["_linked_seeds"] = [key]
+            if not w.get("_linked_seed"):
+                w["_linked_seed"] = key
+
+    if _cs is not None:
+        for w in wallets:
+            typ = w.get("type") or ""
+            if typ in ("HEX", "WIF", "SEED"):
+                wv.ensure_derived(w)
+                hx = w.get("_linked_hex") or _hex_norm(w.get("key") or "")
+                if len(hx) == 64 and not wv.is_junk_hex(hx):
+                    try:
+                        priv = bytes.fromhex(hx)
+                        derived = _cs.priv_to_addresses(priv) or {}
+                    except Exception:
+                        derived = {}
+                    for _chain, addr in derived.items():
+                        if not addr:
+                            continue
+                        body = addr.lower()
+                        bare = body[2:] if body.startswith("0x") else body
+                        target = (addr_by_body.get(body) or
+                                  addr_by_body.get(bare) or
+                                  addr_by_body.get("0x" + bare))
+                        if target is None:
+                            continue
+                        if hx and not target.get("_linked_hex"):
+                            target["_linked_hex"] = hx
+                            target["_link_method"] = "cross-link"
+                        if typ == "WIF":
+                            if w.get("key") and not target.get("_linked_wif"):
+                                target["_linked_wif"] = w["key"]
+                        elif typ == "SEED":
+                            if w.get("key") and not target.get("_linked_seed"):
+                                target["_linked_seed"] = w["key"]
+                            if w.get("_linked_wif") and not target.get("_linked_wif"):
+                                target["_linked_wif"] = w["_linked_wif"]
+
+    return wallets
+
+
+def create_wallet_backup():
+    """Create a timestamped backup of wallet data files before walletx processes them."""
+    backup_dir = os.path.join(HOME, "backups")
+    os.makedirs(backup_dir, exist_ok=True)
+    ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    files = [
+        wv.MEMORY_FILE,
+        wv.CACHE_FILE,
+        wv.HITS_FILE,
+        os.path.join(HOME, "high_confidence_hits.jsonl"),
+    ]
+    created = []
+    for fpath in files:
+        if not os.path.exists(fpath) or os.path.getsize(fpath) == 0:
+            continue
+        try:
+            base = os.path.basename(fpath)
+            dst = os.path.join(backup_dir, f"{base}.bak.{ts}")
+            with open(fpath, "rb") as src:
+                with open(dst, "wb") as dest:
+                    dest.write(src.read())
+            created.append(dst)
+        except Exception:
+            pass
+    return created
 
 
 def rank_wallets(wallets, balances, funded_only: bool = False):
@@ -1469,10 +1623,11 @@ def _paint_forensic_inner(
             f"  {BOLD}CHAINS{RESET}    {', '.join(c.upper() for c in chains_meta)}  "
             f"{DIM}(multi-chain){RESET}"
         )
+    _key_label = f"🔑 {typ} KEY (FULL)"
     lines.extend(
-        _line_full("KEY", key, color=YELLOW if typ in ("HEX", "WIF", "SEED") else "")
+        _line_full(_key_label, key, color=YELLOW)
     )
-    lines.append(f"  {BOLD}KEY_LEN{RESET}   {len(key)} chars  {DIM}(complete){RESET}")
+    lines.append(f"  {BOLD}KEY_LEN{RESET}   {len(key)} chars  {GREEN}(COMPLETE · never truncated){RESET}")
     if src:
         lines.extend(_line_full("SOURCE", src))
     else:
@@ -1489,12 +1644,38 @@ def _paint_forensic_inner(
         )
     if w.get("_link_method"):
         lines.append(f"  {BOLD}LINK VIA{RESET}  {w['_link_method']}")
+    link_any = False
     if w.get("_linked_hex"):
         lines.extend(_line_full("LINKED HEX", w["_linked_hex"], color=YELLOW))
+        link_any = True
     if w.get("_linked_wif"):
         lines.extend(_line_full("LINKED WIF", w["_linked_wif"], color=YELLOW))
+        link_any = True
     if w.get("_linked_seed"):
         lines.extend(_line_full("LINKED SEED", w["_linked_seed"], color=YELLOW))
+        link_any = True
+    if not link_any and typ in ("HEX", "WIF", "SEED"):
+        hx = _hex_norm(w.get("key") or "")
+        if len(hx) == 64 and not wv.is_junk_hex(hx):
+            priv = _priv_bytes_from_hex(hx)
+            if priv:
+                wif_c = _wif_from_priv(priv, compressed=True)
+                wif_u = _wif_from_priv(priv, compressed=False)
+                if wif_c:
+                    lines.extend(_line_full("→ WIF (C)", wif_c, color=YELLOW))
+                if wif_u:
+                    lines.extend(_line_full("→ WIF (U)", wif_u, color=YELLOW))
+    elif link_any:
+        plural_links = []
+        for lk in ("_linked_hexes", "_linked_wifs", "_linked_seeds"):
+            vals = w.get(lk) or []
+            primary = w.get(lk.replace("_es", "").rstrip("s") + ("s" if lk.endswith("es") else "")) or ""
+            extras = [v for v in vals if v != primary]
+            if extras:
+                plural_links.append(f"{lk[1:].upper()}: {len(vals)} total")
+        if plural_links:
+            lines.append(f"  {BOLD}CROSS-LINKS{RESET}  {', '.join(plural_links)}")
+            lines.append(f"  {DIM}  export dossier for full linked material{RESET}")
 
     # Chain balances (compact — always live from cache)
     lines.append("")
@@ -1604,39 +1785,78 @@ def _paint_forensic_inner(
 
 # ── IO / state ─────────────────────────────────────────────────────
 
+# ── Raw terminal fd (set once by _with_cbreak, used everywhere) ───
+_stdin_fd: int = -1  # shared fd for _stdin_key / _drain_stdin
+
+
 def _stdin_key(timeout: float = 0.0):
-    if not sys.stdin.isatty():
-        return None
+    """Read ONE raw byte from the terminal with *timeout* seconds.
+
+    Returns a 1-char string (or escape-prefix byte), or None on no data.
+
+    Does NOT check isatty() — the caller (_with_cbreak) already decided
+    we are on a terminal.  We use the shared _stdin_fd set by _with_cbreak
+    so even if sys.stdin.isatty() lies, we still read from the real fd.
+
+    Uses select.poll() + os.read(fd,1) — the ONLY reliable combo on
+    Android/Termux ptys.  select.select() on integer fds has known
+    edge cases on some kernel versions; poll() is the canonical API."""
+    fd = _stdin_fd
+    if fd < 0:
+        fd = sys.stdin.fileno()
+        _set_stdin_fd(fd)
     try:
-        r, _, _ = select.select([sys.stdin], [], [], max(0.0, timeout))
-        if not r:
+        p = select.poll()
+        p.register(fd, select.POLLIN)
+        timeout_ms = max(1, int(timeout * 1000)) if timeout > 0 else 0
+        events = p.poll(timeout_ms)
+        if not events:
             return None
-        ch = sys.stdin.read(1)
-        return ch
-    except Exception:
+        raw = os.read(fd, 1)
+        if not raw:
+            return None
+        return raw.decode("utf-8", errors="replace")
+    except (OSError, ValueError, UnicodeDecodeError):
         return None
 
 
 def _drain_stdin():
-    """Consume bursty key/paste input so we don't process a flood after paint."""
-    if not sys.stdin.isatty():
+    """Consume bursty key/paste input so we never process a flood."""
+    fd = _stdin_fd
+    if fd < 0:
         return 0
     n = 0
     while True:
-        ch = _stdin_key(0.0)
-        if ch is None:
-            break
-        n += 1
-        if n > 64:
+        try:
+            p = select.poll()
+            p.register(fd, select.POLLIN)
+            if not p.poll(0):
+                break
+            os.read(fd, 1)
+            n += 1
+            if n > 64:
+                break
+        except (OSError, ValueError):
             break
     return n
 
 
+def _set_stdin_fd(fd: int):
+    global _stdin_fd
+    _stdin_fd = fd
+
+
 def _with_cbreak(fn):
-    if not sys.stdin.isatty():
-        return fn()
+    """Put terminal in cbreak mode, call fn(), restore.  Stores the fd
+    globally so _stdin_key / _drain_stdin never need to re-check isatty()."""
     fd = sys.stdin.fileno()
-    old = termios.tcgetattr(fd)
+    _set_stdin_fd(fd)
+    # Try to set cbreak even if isatty() says no — Termux ptys can lie.
+    try:
+        old = termios.tcgetattr(fd)
+    except termios.error:
+        # Not a real tty — just run the function raw
+        return fn()
     try:
         tty.setcbreak(fd)
         _hide_cursor()
@@ -1870,6 +2090,7 @@ class ForensicState:
             raw = wv.gather_wallets(max_wallets=self.max_wallets)
             shaped = consolidate_addr_wallets(raw)
             shaped = attach_memory_meta(shaped, max_bytes=MEMORY_DEEP_BYTES)
+            shaped = cross_link_wallets(shaped)
             self.wallets = shaped
             self.last_gather = time.time()
             self.gather_ms = int((time.time() - t0) * 1000)
@@ -2663,6 +2884,10 @@ def main():
     if args.interval and args.interval > 0:
         args.idle_sec = float(args.interval)
 
+    backs = create_wallet_backup()
+    if backs:
+        sys.stderr.write(f"[walletx] backed up {len(backs)} data files\n")
+
     try:
         if args.once:
             cycle_once(
@@ -2682,9 +2907,24 @@ def main():
             watch_static(args)
             return
 
-        if args.interactive or (sys.stdin.isatty() and not args.watch):
+        # Decide interactive vs watch.
+        # sys.stdin.isatty() can return False on some Termux/Android ptys
+        # even though the terminal IS usable.  Fall back to fstat() which
+        # checks the actual file type (character device = terminal).
+        is_tty = sys.stdin.isatty()
+        if not is_tty:
+            try:
+                import stat as _stat
+                is_tty = _stat.S_ISCHR(os.fstat(sys.stdin.fileno()).st_mode)
+            except Exception:
+                pass
+        if args.interactive or (is_tty and not args.watch):
             interactive_loop(args)
         else:
+            sys.stderr.write(
+                "[walletx] stdin is not a terminal — falling back to static watch mode.\n"
+                "  Use  walletx -I  to force interactive mode.\n"
+            )
             watch_static(args)
     except KeyboardInterrupt:
         print()

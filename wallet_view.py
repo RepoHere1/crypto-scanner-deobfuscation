@@ -151,7 +151,15 @@ def load_jsonl_tail(path: str, max_bytes: int = 0):
 
 
 def _is_noise_address(chain: str, addr: str) -> bool:
-    """Burn/null/hardhat/demo — never count as real nonzero loot."""
+    """Burn/null/hardhat/demo/contract/infrastructure — never count as real wallet."""
+    # ── Contract / infrastructure filter (new) ──────────────────
+    try:
+        from contract_filter import is_known_infrastructure as _cf_infra
+        if _cf_infra(chain, addr):
+            return True
+    except Exception:
+        pass
+    # ── Original noise checks ───────────────────────────────────
     try:
         from crypto_iq import is_noise_address
         return bool(is_noise_address(chain, addr))
@@ -1140,17 +1148,19 @@ def paint(
             f"  [{idx}/{n_wallets}] TYPE={w.get('type')}  "
             f"bal_sum={sc:.8f}{usd_bit}  unresolved={pend}  zero={chk}"
         )
-        # FULL key — never truncate (wrap only)
+        # FULL key — NEVER truncate (wrap only). Printed in bright color.
         _k = w.get("key") or ""
-        if len(_k) <= 72:
-            print(f"  KEY:  {_k}")
+        _typ = (w.get("type") or "").upper()
+        _label = f"🔑 {_typ} KEY (FULL)"
+        if len(_k) <= 64:
+            print(f"  {BOLD}{_label}:{RESET}  {YELLOW}{_k}{RESET}")
         else:
-            print(f"  KEY:  {_k[:72]}")
-            _rest = _k[72:]
+            print(f"  {BOLD}{_label}:{RESET}  {YELLOW}{_k[:64]}{RESET}")
+            _rest = _k[64:]
             while _rest:
-                print(f"        {_rest[:72]}")
-                _rest = _rest[72:]
-        print(f"  KEY_LEN: {len(_k)} chars (complete)")
+                print(f"  {' ' * (len(_label) + 3)}{YELLOW}{_rest[:70]}{RESET}")
+                _rest = _rest[70:]
+        print(f"  {DIM}→ {len(_k)} chars · COMPLETE · never truncated{RESET}")
         src = w.get("source") or ""
         if src:
             if len(src) <= 72:
@@ -1163,6 +1173,22 @@ def paint(
                     _rest = _rest[72:]
         if w.get("timestamp"):
             print(f"  TS:   {w.get('timestamp')}")
+        if w.get("_linked_hex"):
+            print(f"  LINK HEX: {w['_linked_hex']}")
+        if w.get("_linked_wif"):
+            print(f"  LINK WIF: {w['_linked_wif']}")
+        if w.get("_linked_seed"):
+            print(f"  LINK SEED: {w['_linked_seed']}")
+        for lk in ("_linked_hexes", "_linked_wifs", "_linked_seeds"):
+            vals = w.get(lk) or []
+            if vals:
+                primary_tag = lk.rstrip("s")
+                if primary_tag.endswith("e"):
+                    primary_tag = primary_tag[:-1] + "s"
+                primary = w.get(primary_tag) or ""
+                extras = [v for v in vals if v != primary]
+                if extras:
+                    print(f"  CROSS-LINKS: {lk[1:].upper()} ({len(vals)} total, {len(extras)} extra)")
         print()
         addrs = list((w.get("addresses") or {}).items())
 

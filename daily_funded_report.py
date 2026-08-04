@@ -163,11 +163,26 @@ def collect_funded_dossiers() -> Tuple[List[dict], dict]:
     except Exception:
         prices = {}
 
+    try:
+        from contract_filter import is_real_wallet as _cf_real
+    except Exception:
+        _cf_real = None
+
     dossiers: List[dict] = []
     for rank_i, row in enumerate(st.ranked or []):
         total, pend, chk, ts, w = row
         if float(total) <= 1e-12:
             continue
+        # Skip known infrastructure addresses (contracts, tokens, bridges, exchanges)
+        typ = (w.get("type") or "").upper()
+        key_full = w.get("key") or ""
+        if typ == "ADDR" and key_full and _cf_real is not None:
+            # For ADDR-type "wallets", check if the address itself is infrastructure
+            parts = key_full.split(":", 1)
+            chain = parts[0] if len(parts) == 2 else "eth"
+            addr = parts[1] if len(parts) == 2 else key_full
+            if not _cf_real(chain, addr):
+                continue  # skip — this is a contract/bridge/token, not a wallet
         try:
             wv.ensure_derived(w)
         except Exception:

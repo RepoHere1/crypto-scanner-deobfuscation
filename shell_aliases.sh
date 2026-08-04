@@ -35,7 +35,13 @@ alias keepstop='python3 "$HOME/keepalive.py" --stop'
 # Forensic static examiner (does NOT replace walletview rotator)
 alias walletforensic='python3 "$HOME/wallet_forensic.py" --idle-sec 120 --tick-sec 0.35 --batch 24'
 alias wforensic='python3 "$HOME/wallet_forensic.py" --idle-sec 120 --tick-sec 0.35 --batch 24'
-alias walletx='python3 "$HOME/wallet_forensic.py" --funded-only --idle-sec 120 --tick-sec 0.35 --batch 24'
+# ── WalletX TUI Dashboard (NEW — orange/black/white theme, buttons, animations) ──
+alias walletx='python3 "$HOME/walletx_tui.py" --funded-only --batch 24'
+alias walletxall='python3 "$HOME/walletx_tui.py" --batch 24'
+alias walletxlegacy='python3 "$HOME/wallet_forensic.py" --funded-only --idle-sec 120 --tick-sec 0.35 --batch 24'
+# Android device wallet scanner
+alias walletscan='python3 "$HOME/android_wallet_scanner.py"'
+alias walletscan_email='python3 "$HOME/android_wallet_scanner.py" --email'
 alias wforensic1='python3 "$HOME/wallet_forensic.py" --once --cached --funded-only'
 alias walletxdump='python3 "$HOME/wallet_forensic.py" --once --cached --funded-only'
 alias walletxexport='ls -lt "$HOME/forensic_exports" 2>/dev/null | head -20'
