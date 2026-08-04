@@ -165,7 +165,7 @@ def _render_header(st, prices, focus: int, funded_only: bool, live: bool, idle_l
 
     pf_str = wv.format_usd(portfolio, color=True) if any_usd else f"{C['dim']}—{C['rst']}"
     funded_tag = f"{C['green_b']}FUNDED{C['rst']}" if funded_only else f"{C['dim']}ALL{C['rst']}"
-    live_tag = f"{C['green']}● LIVE{RST}" if live else f"{C['dim']}○ CACHED{RST}"
+    live_tag = f"{C['green']}● LIVE{C['rst']}" if live else f"{C['dim']}○ CACHED{C['rst']}"
     n_str = f"{n} wallets"
 
     return (
