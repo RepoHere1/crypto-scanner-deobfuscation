@@ -122,7 +122,7 @@ def _clear() -> None:
 # ── Data loading ───────────────────────────────────────────────────
 def _load_live_state(funded_only: bool, max_wallets: int = 0):
     """Load wallets, balances, prices from the live pipeline."""
-    st = wf.ForensicState(max_wallets=max_wallets, funded_only=founded_only)
+    st = wf.ForensicState(max_wallets=max_wallets, funded_only=funded_only)
     try:
         st.snapshot(force_gather=True)
     except Exception:
