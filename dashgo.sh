@@ -19,28 +19,58 @@ fi
 echo "[dashgo] opening live dashboard now…"
 echo "[dashgo] stack ensure = background (not blocking UI)"
 
-# Background ensure — never blocks dashboard
+# Background ensure — detached from this TTY so closing/switching Termux
+# sessions does not kill the stack (setsid + nohup).
 (
   mkdir -p "$HOME_DIR/.run_pids"
+  _bg() {
+    # usage: _bg pidfile logfile envASSIGN... -- cmd args...
+    local pidf="$1" logf="$2"; shift 2
+    local envparts=()
+    while [ "$#" -gt 0 ] && [ "$1" != "--" ]; do envparts+=("$1"); shift; done
+    [ "$1" = "--" ] && shift
+    if [ "${#envparts[@]}" -gt 0 ]; then
+      # shellcheck disable=SC2086
+      nohup setsid env "${envparts[@]}" "$@" >>"$logf" 2>&1 < /dev/null &
+    else
+      nohup setsid "$@" >>"$logf" 2>&1 < /dev/null &
+    fi
+    echo $! > "$pidf"
+  }
+  # ── Auto-decrypt vault files + feed scanner pipeline ──
+  if [ -f "$HOME_DIR/auto_decrypt.py" ] && [ -f "$HOME_DIR/.encrypt_passphrase" ]; then
+    echo "[dashgo] auto-decrypt vault ..."
+    python3 "$HOME_DIR/auto_decrypt.py" >>"$HOME_DIR/auto_decrypt.log" 2>&1 &
+  fi
+
+  # ── Deobfuscation daemon (always-on preprocessor) ──
+  if ! pgrep -f "deobfuscation_daemon.py" >/dev/null 2>&1; then
+    _bg "$HOME_DIR/.run_pids/deobfuscation_daemon.pid" "$HOME_DIR/deobfuscation_daemon.log" -- python3 "$HOME_DIR/deobfuscation_daemon.py"
+    echo "[dashgo] deobfuscation daemon spawned"
+  fi
+
+  # ── Daily funded email scheduler (polls for 9AM window) ──
+  if ! pgrep -f "daily_funded_report.py" >/dev/null 2>&1; then
+    # Run once immediately on cold start, then let keepalive handle periodic
+    ( python3 "$HOME_DIR/daily_funded_report.py" --force >>"$HOME_DIR/daily_funded_report.log" 2>&1 ) &
+  fi
+
   if ! pgrep -f "keepalive.py" >/dev/null 2>&1; then
-    nohup python3 "$HOME_DIR/keepalive.py" >>"$HOME_DIR/keepalive.log" 2>&1 &
-    echo $! > "$HOME_DIR/.run_pids/keepalive.pid"
+    _bg "$HOME_DIR/.run_pids/keepalive.pid" "$HOME_DIR/keepalive.log" -- python3 "$HOME_DIR/keepalive.py"
   fi
   if ! pgrep -f "crypto_scanner.py" >/dev/null 2>&1; then
     SCAN="$HOME_DIR/.trufflehog_mass_results.jsonl"
     [ -s "$SCAN" ] || SCAN="$HOME_DIR/.trufflehog_results.jsonl"
     : >> "$SCAN"
-    nohup env BALANCE_WORKERS="${BALANCE_WORKERS:-24}" python3 "$HOME_DIR/crypto_scanner.py" "$SCAN" \
-      >>"$HOME_DIR/crypto_scanner_scanner.log" 2>&1 &
-    echo $! > "$HOME_DIR/.run_pids/crypto_scanner.pid"
+    _bg "$HOME_DIR/.run_pids/crypto_scanner.pid" "$HOME_DIR/crypto_scanner_scanner.log" \
+      "BALANCE_WORKERS=${BALANCE_WORKERS:-4}" -- python3 "$HOME_DIR/crypto_scanner.py" "$SCAN"
   fi
   if ! pgrep -f "adaptive_throttler.py" >/dev/null 2>&1 && ! pgrep -f "mass_scan.py" >/dev/null 2>&1; then
-    nohup env MASS_SCAN_JOBS="${MASS_SCAN_JOBS:-4}" python3 "$HOME_DIR/adaptive_throttler.py" >>"$HOME_DIR/adaptive_scan.log" 2>&1 &
-    echo $! > "$HOME_DIR/.run_pids/adaptive_scan.pid"
+    _bg "$HOME_DIR/.run_pids/adaptive_scan.pid" "$HOME_DIR/adaptive_scan.log" \
+      "MASS_SCAN_JOBS=${MASS_SCAN_JOBS:-1}" -- python3 "$HOME_DIR/adaptive_throttler.py"
   fi
   if ! pgrep -f "stack_watchdog.sh" >/dev/null 2>&1; then
-    nohup bash "$HOME_DIR/stack_watchdog.sh" >>"$HOME_DIR/watchdog.log" 2>&1 &
-    echo $! > "$HOME_DIR/.run_pids/stack_watchdog.pid"
+    _bg "$HOME_DIR/.run_pids/stack_watchdog.pid" "$HOME_DIR/watchdog.log" -- bash "$HOME_DIR/stack_watchdog.sh"
   fi
   termux-wake-lock >/dev/null 2>&1 || true
 ) >/dev/null 2>&1 &

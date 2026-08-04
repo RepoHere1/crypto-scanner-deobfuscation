@@ -230,7 +230,7 @@ def encrypt_status():
     if not has_pass or (not manifest and not vault_enc and not home_enc):
         lines.append(f"  Run    : python3 ~/encrypt_offload.py --live-backup")
     else:
-        lines.append(f"  Run    : encrypt_offload.py --live-backup | --decrypt")
+        lines.append(f"  Run    : python3 ~/encrypt_offload.py --decrypt")
     return lines
 
 
