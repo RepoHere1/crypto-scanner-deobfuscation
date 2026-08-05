@@ -201,7 +201,8 @@ load();
 
 @app.route("/")
 def index():
-    return render_template_string(HTML)
+    from flask import Response
+    return Response(HTML, mimetype="text/html")
 
 
 @app.route("/api/stats")
