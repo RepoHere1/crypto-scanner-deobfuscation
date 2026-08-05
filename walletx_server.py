@@ -279,20 +279,31 @@ def api_balances():
         chain=chain, min_balance=min_bal, funded_only=funded_only,
         limit=99999, offset=0, sort_by=sort_by,
     )
-    # Filter out addresses with NO key material in scanner memory
+    # Filter: only show addresses that can be CRYPTOGRAPHICALLY DERIVED from a known private key.
+    # Contract addresses found in the same source file as a key are NOT wallets — they have no key.
+    # This calls priv_to_addresses() on every known key to build an accurate derived-address set.
     records = _load_memory()
     keyed_addrs = set()
     for rec in records:
         w = (rec.get("findings") or {}).get("wallet") or {}
-        if w.get("hex_keys") or w.get("wifs") or w.get("seed_phrases"):
-            for d in (rec.get("findings") or {}).get("derived_addresses") or []:
-                if isinstance(d, dict):
-                    keyed_addrs.add((d.get("address") or "").lower())
-            for chain_key in ("btc", "eth", "ltc", "sol", "doge", "xrp", "matic",
-                              "avax", "bnb", "base", "arb", "op", "monad"):
-                for a in (rec.get("findings") or {}).get(chain_key) or []:
-                    if isinstance(a, str):
+        hex_keys = w.get("hex_keys") or rec.get("findings", {}).get("hex_key") or []
+        wifs = w.get("wifs") or rec.get("findings", {}).get("wif") or []
+        seeds = w.get("seed_phrases") or rec.get("findings", {}).get("seed_phrase") or []
+        if not (hex_keys or wifs or seeds):
+            continue
+        try:
+            for hk in hex_keys:
+                addrs = _cs.priv_to_addresses(bytes.fromhex(hk))
+                for a in addrs.values():
+                    keyed_addrs.add(a.lower())
+            for wif in wifs:
+                p = _cs.wif_to_priv_bytes(wif)
+                if p:
+                    addrs = _cs.priv_to_addresses(p)
+                    for a in addrs.values():
                         keyed_addrs.add(a.lower())
+        except Exception:
+            continue
     filtered = [r for r in rows if r["address"].lower() in keyed_addrs]
     total_filtered = len(filtered)
     # Apply pagination after filtering
