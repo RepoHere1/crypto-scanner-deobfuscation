@@ -161,16 +161,21 @@ function showDetail(i){
  h+='<button onclick="buildTx(\''+addrEsc+'\')" style="width:100%;padding:8px;background:#ff8c00;color:#000;font-weight:bold;border:none;border-radius:4px;cursor:pointer;font:inherit;margin:4px 0">Build Transaction</button>';
  h+='<div id="txOut" style="font-size:10px;color:#0f0;background:#000;padding:8px;border-radius:4px;margin-top:8px;word-break:break-all;display:none"></div>';
  h+='</div>';
- // ── SWAP / BRIDGE links ────────────────────────────────────
+ // ── SWAP / BRIDGE links (chain-aware) ─────────────────────
+ var chMap={eth:'1',matic:'137',bnb:'56',avax:'43114',base:'8453',arb:'42161',op:'10'};
+ var cid=chMap[chain]||'1';
+ var uniChains={eth:'mainnet',matic:'polygon',bnb:'bnb',avax:'avalanche',base:'base',arb:'arbitrum',op:'optimism'};
+ var uc=uniChains[chain]||'mainnet';
  h+='<div class="sec" style="border:1px solid #333;border-radius:4px;padding:12px;background:#0d0d0d;margin-top:12px">';
- h+='<span class="lbl">SWAP / BRIDGE</span>';
+ h+='<span class="lbl">SWAP / BRIDGE on '+chain.toUpperCase()+'</span>';
+ h+='<div style="font-size:10px;color:#888;margin:4px 0">Opens DEX on the correct chain. Connect your wallet there to swap.</div>';
  h+='<div style="display:flex;flex-wrap:wrap;gap:6px;margin-top:6px">';
- h+='<a href="https://app.1inch.io/#/1/unified/swap/ETH/'+addr+'" target="_blank" style="padding:6px 10px;background:#1a1a1a;color:#ff8c00;border:1px solid #ff8c00;border-radius:4px;text-decoration:none;font-size:11px">1inch</a>';
- h+='<a href="https://app.uniswap.org/swap?outputCurrency='+addr+'" target="_blank" style="padding:6px 10px;background:#1a1a1a;color:#ff8c00;border:1px solid #ff8c00;border-radius:4px;text-decoration:none;font-size:11px">Uniswap</a>';
- h+='<a href="https://pancakeswap.finance/swap?outputCurrency='+addr+'" target="_blank" style="padding:6px 10px;background:#1a1a1a;color:#ff8c00;border:1px solid #ff8c00;border-radius:4px;text-decoration:none;font-size:11px">PancakeSwap</a>';
- h+='<a href="https://portalbridge.com/#/transfer" target="_blank" style="padding:6px 10px;background:#1a1a1a;color:#ff8c00;border:1px solid #ff8c00;border-radius:4px;text-decoration:none;font-size:11px">Portal Bridge</a>';
+ h+='<a href="https://app.1inch.io/#/'+cid+'/unified/swap" target="_blank" style="padding:6px 10px;background:#1a1a1a;color:#ff8c00;border:1px solid #ff8c00;border-radius:4px;text-decoration:none;font-size:11px">1inch</a>';
+ h+='<a href="https://app.uniswap.org/swap?chain='+uc+'" target="_blank" style="padding:6px 10px;background:#1a1a1a;color:#ff8c00;border:1px solid #ff8c00;border-radius:4px;text-decoration:none;font-size:11px">Uniswap</a>';
+ h+='<a href="https://pancakeswap.finance/swap?chain='+(chain==='bnb'?'bsc':uc)+'" target="_blank" style="padding:6px 10px;background:#1a1a1a;color:#ff8c00;border:1px solid #ff8c00;border-radius:4px;text-decoration:none;font-size:11px">PancakeSwap</a>';
+ h+='<a href="https://portalbridge.com/" target="_blank" style="padding:6px 10px;background:#1a1a1a;color:#ff8c00;border:1px solid #ff8c00;border-radius:4px;text-decoration:none;font-size:11px">Portal Bridge</a>';
  h+='<a href="https://jumper.exchange/" target="_blank" style="padding:6px 10px;background:#1a1a1a;color:#ff8c00;border:1px solid #ff8c00;border-radius:4px;text-decoration:none;font-size:11px">Jumper</a>';
- h+='<a href="https://app.odos.xyz/" target="_blank" style="padding:6px 10px;background:#1a1a1a;color:#ff8c00;border:1px solid #ff8c00;border-radius:4px;text-decoration:none;font-size:11px">Odos</a>';
+ h+='<a href="https://app.odos.xyz/?chain='+cid+'" target="_blank" style="padding:6px 10px;background:#1a1a1a;color:#ff8c00;border:1px solid #ff8c00;border-radius:4px;text-decoration:none;font-size:11px">Odos</a>';
  h+='</div></div>';
  // ── BALANCES across chains ─────────────────────────────────
  h+='<div id="multiBal" class="sec" style="border:1px solid #333;border-radius:4px;padding:12px;background:#0d0d0d;margin-top:12px">';
