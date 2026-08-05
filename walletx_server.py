@@ -584,6 +584,23 @@ def api_send():
     sk = ecdsa.SigningKey.from_string(bytes.fromhex(pk), curve=ecdsa.SECP256k1)
     from_addr = "0x" + _keccak256((b"\x04" + sk.get_verifying_key().to_string())[1:])[-20:].hex()
 
+    # Check LIVE balance first (not cached — actual RPC balance)
+    live_bal_wei = None
+    for rpc_url in rpc_list:
+        try:
+            br = requests.post(rpc_url, json={"jsonrpc":"2.0","id":1,"method":"eth_getBalance","params":[from_addr,"latest"]}, timeout=10, headers={"Content-Type":"application/json"})
+            live_bal_wei = int(br.json()["result"], 16)
+            break
+        except Exception: continue
+    if live_bal_wei is None:
+        return jsonify({"ok": False, "error": f"Could not check live balance — all RPCs failed"}), 500
+    live_bal_eth = live_bal_wei / 1e18
+    # Gas estimate: 21000 * gasPrice. Use 50 gwei as conservative estimate since we don't have gasPrice yet
+    gas_estimate_wei = 21000 * 50_000_000_000  # ~0.00105 ETH
+    if live_bal_wei < value_wei + gas_estimate_wei:
+        return jsonify({"ok": False,
+            "error": f"Insufficient funds: live balance is {live_bal_eth:.6f} ETH, need {float(value_eth):.6f} ETH + ~0.00105 ETH gas. Cache may be stale."}), 500
+
     # Get nonce (try each RPC)
     nonce = None
     for rpc_url in rpc_list:
