@@ -1,2 +1,2 @@
-# production targets — s3 — generated 2026-07-29T07:43:31.532489Z
+# production targets — s3 — generated 2026-08-05T14:44:45.641443Z
 # no live-verified targets; placeholders purged

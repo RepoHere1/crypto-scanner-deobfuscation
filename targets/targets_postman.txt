@@ -1,2 +1,2 @@
-# production targets — postman — generated 2026-07-29T07:43:31.538748Z
+# production targets — postman — generated 2026-08-05T14:44:45.645405Z
 # no live-verified targets; placeholders purged
