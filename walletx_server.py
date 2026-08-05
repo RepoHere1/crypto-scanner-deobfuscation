@@ -503,6 +503,187 @@ def api_import_key():
     })
 
 
+# ── Send transaction: sign with private key + broadcast via RPC ──
+
+def _keccak256(data: bytes) -> bytes:
+    from Crypto.Hash import keccak
+    return keccak.new(digest_bits=256).update(data).digest()
+
+def _rlp_encode(item) -> bytes:
+    """Minimal RLP encoder — no external dependency needed."""
+    if isinstance(item, bytes):
+        if len(item) == 1 and item[0] < 0x80:
+            return item
+        if len(item) < 56:
+            return bytes([0x80 + len(item)]) + item
+        length_bytes = _int_to_bytes(len(item))
+        return bytes([0xb7 + len(length_bytes)]) + length_bytes + item
+    if isinstance(item, list):
+        payload = b"".join(_rlp_encode(i) for i in item)
+        if len(payload) < 56:
+            return bytes([0xc0 + len(payload)]) + payload
+        length_bytes = _int_to_bytes(len(payload))
+        return bytes([0xf7 + len(length_bytes)]) + length_bytes + payload
+    # integer → minimal big-endian bytes
+    b = _int_to_bytes(item)
+    return _rlp_encode(b)
+
+
+def _int_to_bytes(n: int) -> bytes:
+    if n == 0:
+        return b""
+    b = n.to_bytes((n.bit_length() + 7) // 8, "big")
+    return b
+
+
+def _sign_eth_tx(priv_hex: str, to_addr: str, value_wei: int, nonce: int,
+                 gas_price: int, gas_limit: int, chain_id: int) -> str:
+    """Sign an Ethereum transaction and return the raw hex."""
+    from ecdsa import SigningKey, SECP256k1
+
+    priv_bytes = bytes.fromhex(priv_hex.replace("0x", ""))
+    sk = SigningKey.from_string(priv_bytes, curve=SECP256k1)
+    vk = sk.get_verifying_key()
+
+    # Build unsigned tx
+    tx = [
+        int.to_bytes(nonce, 8, "big").lstrip(b"\x00") or b"\x00",
+        int.to_bytes(gas_price, 8, "big").lstrip(b"\x00") or b"\x00",
+        int.to_bytes(gas_limit, 8, "big").lstrip(b"\x00") or b"\x00",
+        bytes.fromhex(to_addr[2:]) if to_addr.startswith("0x") else bytes.fromhex(to_addr),
+        int.to_bytes(value_wei, 32, "big").lstrip(b"\x00") or b"\x00",
+        b"",
+        int.to_bytes(chain_id, 8, "big").lstrip(b"\x00") or b"\x00",
+        b"",
+        b"",
+    ]
+    encoded = _rlp_encode(tx)
+    if chain_id:
+        encoded += _rlp_encode([int.to_bytes(chain_id, 8, "big").lstrip(b"\x00") or b"\x00", b"", b""])
+
+    h = _keccak256(encoded)
+    sig = sk.sign_digest(h, sigencode=ecdsa.util.sigencode_der)
+    r, s = ecdsa.util.sigdecode_der(sig, SECP256k1.generator.order())
+
+    v = chain_id * 2 + 35
+    # Normalize s
+    n_order = SECP256k1.generator.order()
+    if s > n_order // 2:
+        s = n_order - s
+        v ^= 1
+
+    signed_tx = [
+        int.to_bytes(nonce, 8, "big").lstrip(b"\x00") or b"\x00",
+        int.to_bytes(gas_price, 8, "big").lstrip(b"\x00") or b"\x00",
+        int.to_bytes(gas_limit, 8, "big").lstrip(b"\x00") or b"\x00",
+        bytes.fromhex(to_addr[2:]) if to_addr.startswith("0x") else bytes.fromhex(to_addr),
+        int.to_bytes(value_wei, 32, "big").lstrip(b"\x00") or b"\x00",
+        b"",
+        int.to_bytes(v, 8, "big").lstrip(b"\x00") or b"\x00",
+        r.to_bytes(32, "big"),
+        s.to_bytes(32, "big"),
+    ]
+    return "0x" + _rlp_encode(signed_tx).hex()
+
+
+@app.route("/api/send", methods=["POST"])
+def api_send():
+    """Sign a transaction with a private key and broadcast it via RPC."""
+    try:
+        body = request.get_json(force=True, silent=True) or {}
+    except Exception:
+        body = {}
+    priv_key = (body.get("private_key") or "").strip()
+    to_addr = (body.get("to") or "").strip()
+    value_eth = body.get("value_eth")
+    chain = (body.get("chain") or "eth").strip().lower()
+
+    if not priv_key or not to_addr or value_eth is None:
+        return jsonify({"ok": False, "error": "Missing private_key, to, or value_eth"}), 400
+
+    try:
+        value_wei = int(float(value_eth) * 1e18)
+    except (ValueError, TypeError):
+        return jsonify({"ok": False, "error": "Invalid value_eth"}), 400
+
+    # Clean private key
+    pk = priv_key.strip().replace("0x", "").replace(" ", "")
+    if len(pk) != 64 or not all(c in "0123456789abcdefABCDEF" for c in pk):
+        return jsonify({"ok": False, "error": "Private key must be 64 hex characters"}), 400
+
+    # Import ecdsa + rlp
+    import ecdsa
+    true  # rlp handled inline
+
+    # RPC URL for the chain
+    rpc_urls = {
+        "eth": "https://rpc.ankr.com/eth",
+        "matic": "https://rpc.ankr.com/polygon",
+        "bnb": "https://rpc.ankr.com/bsc",
+        "avax": "https://rpc.ankr.com/avalanche",
+        "base": "https://rpc.ankr.com/base",
+        "arb": "https://rpc.ankr.com/arbitrum",
+        "op": "https://rpc.ankr.com/optimism",
+    }
+    rpc_url = rpc_urls.get(chain, rpc_urls["eth"])
+
+    # Derive from address
+    sk = ecdsa.SigningKey.from_string(bytes.fromhex(pk), curve=ecdsa.SECP256k1)
+    vk = sk.get_verifying_key()
+    pub_bytes = b"\x04" + vk.to_string()
+    from_addr = "0x" + _keccak256(pub_bytes[1:])[-20:].hex()
+
+    # Get nonce
+    try:
+        nr = requests.post(rpc_url, json={
+            "jsonrpc": "2.0", "id": 1, "method": "eth_getTransactionCount",
+            "params": [from_addr, "latest"],
+        }, timeout=10, headers={"Content-Type": "application/json"})
+        nonce = int(nr.json()["result"], 16)
+    except Exception:
+        return jsonify({"ok": False, "error": f"Failed to get nonce from {chain} RPC"}), 500
+
+    # Get gas price
+    try:
+        gr = requests.post(rpc_url, json={
+            "jsonrpc": "2.0", "id": 1, "method": "eth_gasPrice", "params": [],
+        }, timeout=10, headers={"Content-Type": "application/json"})
+        gas_price = int(gr.json()["result"], 16)
+    except Exception:
+        gas_price = 50_000_000_000  # 50 gwei fallback
+
+    chain_ids = {"eth": 1, "matic": 137, "bnb": 56, "avax": 43114, "base": 8453, "arb": 42161, "op": 10}
+    cid = chain_ids.get(chain, 1)
+
+    try:
+        signed_hex = _sign_eth_tx(pk, to_addr, value_wei, nonce, gas_price, 21000, cid)
+    except Exception as e:
+        return jsonify({"ok": False, "error": f"Signing failed: {e}"}), 500
+
+    # Broadcast
+    try:
+        br = requests.post(rpc_url, json={
+            "jsonrpc": "2.0", "id": 1, "method": "eth_sendRawTransaction",
+            "params": [signed_hex],
+        }, timeout=15, headers={"Content-Type": "application/json"})
+        result = br.json()
+        if "error" in result:
+            return jsonify({"ok": False, "error": f"Broadcast failed: {result['error']}"}), 500
+        tx_hash = result["result"]
+        return jsonify({
+            "ok": True,
+            "tx_hash": tx_hash,
+            "from": from_addr,
+            "to": to_addr,
+            "value_wei": value_wei,
+            "value_eth": float(value_eth),
+            "chain": chain,
+            "explorer": f"https://{'polygonscan.com' if chain=='matic' else chain+'scan.io' if chain not in ('eth','matic') else 'etherscan.io'}/tx/{tx_hash}",
+        })
+    except Exception as e:
+        return jsonify({"ok": False, "error": f"Broadcast failed: {e}"}), 500
+
+
 # ── Main ─────────────────────────────────────────────────────────────
 
 def import_existing_cache():

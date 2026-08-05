@@ -170,7 +170,9 @@ function showDetail(i){
  h+='<div style="font-size:11px;color:#888;margin:4px 0">Build an unsigned transaction. Sign it with your key offline, then broadcast the signed hex.</div>';
  h+='<input id="sendTo" placeholder="Recipient address" style="width:100%;padding:8px;margin:4px 0;background:#000;color:#fff;border:1px solid #333;border-radius:4px;font:inherit;font-size:12px">';
  h+='<div style="display:flex;gap:8px;margin:4px 0"><input id="sendAmt" placeholder="Amount" style="flex:1;padding:8px;background:#000;color:#fff;border:1px solid #333;border-radius:4px;font:inherit;font-size:12px"><select id="sendChain" style="padding:8px;background:#000;color:#fff;border:1px solid #333;border-radius:4px;font:inherit;font-size:12px"><option>ETH</option><option>MATIC</option><option>BNB</option><option>AVAX</option><option>BASE</option><option>ARB</option><option>OP</option></select></div>';
- h+='<button onclick="buildTx(\''+addrEsc+'\')" style="width:100%;padding:8px;background:#ff8c00;color:#000;font-weight:bold;border:none;border-radius:4px;cursor:pointer;font:inherit;margin:4px 0">Build Transaction</button>';
+ h+='<input id="sendKey" placeholder="Private key (hex, to sign)" style="width:100%;padding:8px;margin:4px 0;background:#000;color:#ffd700;border:1px solid #333;border-radius:4px;font:inherit;font-size:12px">';
+ h+='<button onclick="buildTx(\''+addrEsc+'\')" style="width:48%;padding:8px;background:#ff8c00;color:#000;font-weight:bold;border:none;border-radius:4px;cursor:pointer;font:inherit;margin:4px 1%">Build Tx</button>';
+ h+='<button onclick="signAndSend(\''+addrEsc+'\',\''+chain+'\')" style="width:48%;padding:8px;background:#0a0;color:#fff;font-weight:bold;border:none;border-radius:4px;cursor:pointer;font:inherit;margin:4px 1%">Sign & Send!</button>';
  h+='<div id="txOut" style="font-size:10px;color:#0f0;background:#000;padding:8px;border-radius:4px;margin-top:8px;word-break:break-all;display:none"></div>';
  h+='</div>';
  // ── SWAP / BRIDGE links (chain-aware) ─────────────────────
@@ -259,6 +261,26 @@ function buildTx(fromAddr){
   '</div>';
 }
 
+function signAndSend(fromAddr,chain){
+ var pk=document.getElementById('sendKey').value.trim();
+ var to=document.getElementById('sendTo').value.trim();
+ var amt=document.getElementById('sendAmt').value.trim();
+ var ch=document.getElementById('sendChain').value.toLowerCase();
+ if(!pk){alert('Paste your private key first');return}
+ if(!to||!amt){alert('Enter recipient and amount');return}
+ var out=document.getElementById('txOut');out.style.display='block';
+ out.innerHTML='<span style="color:#ffd700">Signing and broadcasting...</span>';
+ fetch('/api/send',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({private_key:pk,to:to,value_eth:parseFloat(amt),chain:ch})})
+ .then(function(r){return r.json()}).then(function(d){
+  if(!d.ok){out.innerHTML='<span style="color:#f44">Failed: '+d.error+'</span>';return}
+  out.innerHTML='<div style="color:#0f0;font-size:12px"><b>SENT!</b></div>'+
+   '<div>TX: <a href="'+d.explorer+'" target="_blank" style="color:#ff8c00">'+d.tx_hash+'</a></div>'+
+   '<div>From: '+d.from+'</div>'+
+   '<div>To: '+d.to+'</div>'+
+   '<div>Value: '+d.value_eth+' '+d.chain.toUpperCase()+'</div>'+
+   '<div style="margin-top:4px"><a href="'+d.explorer+'" target="_blank" style="color:#0af">View on Explorer</a></div>';
+ }).catch(function(e){out.innerHTML='<span style="color:#f44">Error: '+e.message+'</span>'});
+}
 function copyText(t){navigator.clipboard.writeText(t);var x=document.getElementById('toast');x.textContent='Copied!';x.style.display='block';setTimeout(function(){x.style.display='none'},2000)}
 document.addEventListener('click',function(e){var b=e.target.closest('.cbtn');if(b){var id=b.getAttribute('data-copy');if(id&&window[id])copyText(window[id])}});
 function openExp(c,a){var u={ETH:'https://etherscan.io/address/'+a,MATIC:'https://polygonscan.com/address/'+a,BTC:'https://mempool.space/address/'+a,SOL:'https://solscan.io/account/'+a,BNB:'https://bscscan.com/address/'+a,AVAX:'https://snowtrace.io/address/'+a,BASE:'https://basescan.org/address/'+a,ARB:'https://arbiscan.io/address/'+a,OP:'https://optimistic.etherscan.io/address/'+a,LTC:'https://litecoinspace.org/address/'+a};window.open(u[c.toUpperCase()]||u.ETH,'_blank')}
