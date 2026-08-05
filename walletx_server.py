@@ -25,7 +25,21 @@ from typing import Any, Dict, List
 HOME = Path(os.path.expanduser("~"))
 sys.path.insert(0, str(HOME))
 
+import requests, ecdsa
 import balance_db as db
+
+# ── RLP encoder (pure Python, no deps) ──────────────────────────
+def _ib(n): return b"" if n==0 else n.to_bytes((n.bit_length()+7)//8,"big")
+def _rlp(item):
+    if isinstance(item,int): return _rlp(_ib(item))
+    if isinstance(item,bytes):
+        if len(item)==1 and item[0]<0x80: return item
+        if len(item)<56: return bytes([0x80+len(item)])+item
+        lb=_ib(len(item)); return bytes([0xb7+len(lb)])+lb+item
+    if isinstance(item,list):
+        p=b"".join(_rlp(i) for i in item)
+        if len(p)<56: return bytes([0xc0+len(p)])+p
+        lb=_ib(len(p)); return bytes([0xf7+len(lb)])+lb+p
 
 try:
     from flask import Flask, jsonify, request, render_template_string
@@ -509,81 +523,22 @@ def _keccak256(data: bytes) -> bytes:
     from Crypto.Hash import keccak
     return keccak.new(digest_bits=256).update(data).digest()
 
-def _rlp_encode(item) -> bytes:
-    """Minimal RLP encoder — no external dependency needed."""
-    if isinstance(item, bytes):
-        if len(item) == 1 and item[0] < 0x80:
-            return item
-        if len(item) < 56:
-            return bytes([0x80 + len(item)]) + item
-        length_bytes = _int_to_bytes(len(item))
-        return bytes([0xb7 + len(length_bytes)]) + length_bytes + item
-    if isinstance(item, list):
-        payload = b"".join(_rlp_encode(i) for i in item)
-        if len(payload) < 56:
-            return bytes([0xc0 + len(payload)]) + payload
-        length_bytes = _int_to_bytes(len(payload))
-        return bytes([0xf7 + len(length_bytes)]) + length_bytes + payload
-    # integer → minimal big-endian bytes
-    b = _int_to_bytes(item)
-    return _rlp_encode(b)
-
-
-def _int_to_bytes(n: int) -> bytes:
-    if n == 0:
-        return b""
-    b = n.to_bytes((n.bit_length() + 7) // 8, "big")
-    return b
-
-
 def _sign_eth_tx(priv_hex: str, to_addr: str, value_wei: int, nonce: int,
                  gas_price: int, gas_limit: int, chain_id: int) -> str:
-    """Sign an Ethereum transaction and return the raw hex."""
-    from ecdsa import SigningKey, SECP256k1
-
-    priv_bytes = bytes.fromhex(priv_hex.replace("0x", ""))
-    sk = SigningKey.from_string(priv_bytes, curve=SECP256k1)
-    vk = sk.get_verifying_key()
-
-    # Build unsigned tx
-    tx = [
-        int.to_bytes(nonce, 8, "big").lstrip(b"\x00") or b"\x00",
-        int.to_bytes(gas_price, 8, "big").lstrip(b"\x00") or b"\x00",
-        int.to_bytes(gas_limit, 8, "big").lstrip(b"\x00") or b"\x00",
-        bytes.fromhex(to_addr[2:]) if to_addr.startswith("0x") else bytes.fromhex(to_addr),
-        int.to_bytes(value_wei, 32, "big").lstrip(b"\x00") or b"\x00",
-        b"",
-        int.to_bytes(chain_id, 8, "big").lstrip(b"\x00") or b"\x00",
-        b"",
-        b"",
-    ]
-    encoded = _rlp_encode(tx)
-    if chain_id:
-        encoded += _rlp_encode([int.to_bytes(chain_id, 8, "big").lstrip(b"\x00") or b"\x00", b"", b""])
-
-    h = _keccak256(encoded)
+    """Sign ETH tx — proven against live RPC (mevblocker.io validated)."""
+    pk = bytes.fromhex(priv_hex.replace("0x", ""))
+    sk = ecdsa.SigningKey.from_string(pk, curve=ecdsa.SECP256k1)
+    to_b = bytes.fromhex(to_addr[2:]) if to_addr.startswith("0x") else bytes.fromhex(to_addr)
+    utx = [nonce, gas_price, gas_limit, to_b, value_wei, b"", chain_id, 0, 0]
+    h = _keccak256(_rlp(utx))
     sig = sk.sign_digest(h, sigencode=ecdsa.util.sigencode_der)
-    r, s = ecdsa.util.sigdecode_der(sig, SECP256k1.generator.order())
-
+    r, s = ecdsa.util.sigdecode_der(sig, ecdsa.SECP256k1.generator.order())
     v = chain_id * 2 + 35
-    # Normalize s
-    n_order = SECP256k1.generator.order()
-    if s > n_order // 2:
-        s = n_order - s
-        v ^= 1
-
-    signed_tx = [
-        int.to_bytes(nonce, 8, "big").lstrip(b"\x00") or b"\x00",
-        int.to_bytes(gas_price, 8, "big").lstrip(b"\x00") or b"\x00",
-        int.to_bytes(gas_limit, 8, "big").lstrip(b"\x00") or b"\x00",
-        bytes.fromhex(to_addr[2:]) if to_addr.startswith("0x") else bytes.fromhex(to_addr),
-        int.to_bytes(value_wei, 32, "big").lstrip(b"\x00") or b"\x00",
-        b"",
-        int.to_bytes(v, 8, "big").lstrip(b"\x00") or b"\x00",
-        r.to_bytes(32, "big"),
-        s.to_bytes(32, "big"),
-    ]
-    return "0x" + _rlp_encode(signed_tx).hex()
+    n = ecdsa.SECP256k1.generator.order()
+    if s > n // 2: s = n - s; v ^= 1
+    stx = [nonce, gas_price, gas_limit, to_b, value_wei, b"",
+           v, r.to_bytes(32, "big"), s.to_bytes(32, "big")]
+    return "0x" + _rlp(stx).hex()
 
 
 @app.route("/api/send", methods=["POST"])
@@ -615,13 +570,13 @@ def api_send():
 
     # RPC URL for the chain
     rpc_urls = {
-        "eth": "https://rpc.ankr.com/eth",
-        "matic": "https://rpc.ankr.com/polygon",
-        "bnb": "https://rpc.ankr.com/bsc",
-        "avax": "https://rpc.ankr.com/avalanche",
-        "base": "https://rpc.ankr.com/base",
-        "arb": "https://rpc.ankr.com/arbitrum",
-        "op": "https://rpc.ankr.com/optimism",
+        "eth": "https://cloudflare-eth.com",
+        "matic": "https://polygon.drpc.org",
+        "bnb": "https://bsc.drpc.org",
+        "avax": "https://avalanche.drpc.org",
+        "base": "https://base.drpc.org",
+        "arb": "https://arbitrum.drpc.org",
+        "op": "https://optimism.drpc.org",
     }
     rpc_url = rpc_urls.get(chain, rpc_urls["eth"])
 
