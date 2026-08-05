@@ -570,7 +570,7 @@ def api_send():
 
     # RPC URL for the chain
     rpc_urls = {
-        "eth": "https://cloudflare-eth.com",
+        "eth": "https://rpc.mevblocker.io",
         "matic": "https://polygon.drpc.org",
         "bnb": "https://bsc.drpc.org",
         "avax": "https://avalanche.drpc.org",
