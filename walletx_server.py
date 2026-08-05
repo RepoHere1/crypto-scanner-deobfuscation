@@ -611,9 +611,7 @@ def api_send():
     if len(pk) != 64 or not all(c in "0123456789abcdefABCDEF" for c in pk):
         return jsonify({"ok": False, "error": "Private key must be 64 hex characters"}), 400
 
-    # Import ecdsa + rlp
     import ecdsa
-    true  # rlp handled inline
 
     # RPC URL for the chain
     rpc_urls = {
