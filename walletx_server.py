@@ -568,42 +568,42 @@ def api_send():
 
     import ecdsa
 
-    # RPC URL for the chain
-    rpc_urls = {
-        "eth": "https://rpc.mevblocker.io",
-        "matic": "https://polygon.drpc.org",
-        "bnb": "https://bsc.drpc.org",
-        "avax": "https://avalanche.drpc.org",
-        "base": "https://base.drpc.org",
-        "arb": "https://arbitrum.drpc.org",
-        "op": "https://optimism.drpc.org",
+    # Multi-RPC fallback URLs (tried in order until one works)
+    _RPC_SETS = {
+        "eth":   ["https://rpc.mevblocker.io","https://cloudflare-eth.com","https://eth.drpc.org","https://ethereum.publicnode.com"],
+        "matic": ["https://polygon.drpc.org","https://polygon.publicnode.com","https://1rpc.io/matic"],
+        "bnb":   ["https://bsc.drpc.org","https://bsc.publicnode.com","https://1rpc.io/bnb"],
+        "avax":  ["https://avalanche.drpc.org","https://avalanche.publicnode.com","https://api.avax.network/ext/bc/C/rpc"],
+        "base":  ["https://base.drpc.org","https://base.publicnode.com","https://mainnet.base.org"],
+        "arb":   ["https://arbitrum.drpc.org","https://arbitrum.publicnode.com","https://arb1.arbitrum.io/rpc"],
+        "op":    ["https://optimism.drpc.org","https://optimism.publicnode.com","https://mainnet.optimism.io"],
     }
-    rpc_url = rpc_urls.get(chain, rpc_urls["eth"])
+    rpc_list = _RPC_SETS.get(chain, _RPC_SETS["eth"])
 
     # Derive from address
     sk = ecdsa.SigningKey.from_string(bytes.fromhex(pk), curve=ecdsa.SECP256k1)
-    vk = sk.get_verifying_key()
-    pub_bytes = b"\x04" + vk.to_string()
-    from_addr = "0x" + _keccak256(pub_bytes[1:])[-20:].hex()
+    from_addr = "0x" + _keccak256((b"\x04" + sk.get_verifying_key().to_string())[1:])[-20:].hex()
 
-    # Get nonce
-    try:
-        nr = requests.post(rpc_url, json={
-            "jsonrpc": "2.0", "id": 1, "method": "eth_getTransactionCount",
-            "params": [from_addr, "latest"],
-        }, timeout=10, headers={"Content-Type": "application/json"})
-        nonce = int(nr.json()["result"], 16)
-    except Exception:
-        return jsonify({"ok": False, "error": f"Failed to get nonce from {chain} RPC"}), 500
+    # Get nonce (try each RPC)
+    nonce = None
+    for rpc_url in rpc_list:
+        try:
+            nr = requests.post(rpc_url, json={"jsonrpc":"2.0","id":1,"method":"eth_getTransactionCount","params":[from_addr,"latest"]}, timeout=10, headers={"Content-Type":"application/json"})
+            nonce = int(nr.json()["result"], 16)
+            break
+        except Exception: continue
+    if nonce is None:
+        return jsonify({"ok": False, "error": f"All {len(rpc_list)} RPCs failed for nonce on {chain}"}), 500
 
-    # Get gas price
-    try:
-        gr = requests.post(rpc_url, json={
-            "jsonrpc": "2.0", "id": 1, "method": "eth_gasPrice", "params": [],
-        }, timeout=10, headers={"Content-Type": "application/json"})
-        gas_price = int(gr.json()["result"], 16)
-    except Exception:
-        gas_price = 50_000_000_000  # 50 gwei fallback
+    # Get gas price (try each RPC)
+    gas_price = None
+    for rpc_url in rpc_list:
+        try:
+            gr = requests.post(rpc_url, json={"jsonrpc":"2.0","id":1,"method":"eth_gasPrice","params":[]}, timeout=10, headers={"Content-Type":"application/json"})
+            gas_price = int(gr.json()["result"], 16)
+            break
+        except Exception: continue
+    if gas_price is None: gas_price = 50_000_000_000
 
     chain_ids = {"eth": 1, "matic": 137, "bnb": 56, "avax": 43114, "base": 8453, "arb": 42161, "op": 10}
     cid = chain_ids.get(chain, 1)
@@ -613,28 +613,36 @@ def api_send():
     except Exception as e:
         return jsonify({"ok": False, "error": f"Signing failed: {e}"}), 500
 
-    # Broadcast
-    try:
-        br = requests.post(rpc_url, json={
-            "jsonrpc": "2.0", "id": 1, "method": "eth_sendRawTransaction",
-            "params": [signed_hex],
-        }, timeout=15, headers={"Content-Type": "application/json"})
-        result = br.json()
-        if "error" in result:
-            return jsonify({"ok": False, "error": f"Broadcast failed: {result['error']}"}), 500
-        tx_hash = result["result"]
-        return jsonify({
-            "ok": True,
-            "tx_hash": tx_hash,
-            "from": from_addr,
-            "to": to_addr,
-            "value_wei": value_wei,
-            "value_eth": float(value_eth),
-            "chain": chain,
-            "explorer": f"https://{'polygonscan.com' if chain=='matic' else chain+'scan.io' if chain not in ('eth','matic') else 'etherscan.io'}/tx/{tx_hash}",
-        })
-    except Exception as e:
-        return jsonify({"ok": False, "error": f"Broadcast failed: {e}"}), 500
+    # Broadcast (try each RPC)
+    last_err = ""
+    for rpc_url in rpc_list:
+        try:
+            br = requests.post(rpc_url, json={"jsonrpc":"2.0","id":1,"method":"eth_sendRawTransaction","params":[signed_hex]}, timeout=20, headers={"Content-Type":"application/json"})
+            result = br.json()
+            if "error" in result:
+                last_err = f"{rpc_url}: {result['error'].get('message', result['error'])}"
+                # If it's a funds issue (not an encoding issue), stop trying
+                if "insufficient" in str(result["error"]).lower() or "balance" in str(result["error"]).lower():
+                    return jsonify({"ok": False, "error": f"Insufficient funds: {result['error'].get('message', result['error'])}"}), 500
+                continue
+            tx_hash = result["result"]
+            break
+        except Exception as e:
+            last_err = f"{rpc_url}: {e}"
+            continue
+    else:
+        return jsonify({"ok": False, "error": f"All RPCs failed to broadcast. Last: {last_err}"}), 500
+
+    return jsonify({
+        "ok": True,
+        "tx_hash": tx_hash,
+        "from": from_addr,
+        "to": to_addr,
+        "value_wei": value_wei,
+        "value_eth": float(value_eth),
+        "chain": chain,
+        "explorer": f"https://{'polygonscan.com' if chain=='matic' else chain+'scan.io' if chain not in ('eth','matic') else 'etherscan.io'}/tx/{tx_hash}",
+    })
 
 
 # ── Main ─────────────────────────────────────────────────────────────
@@ -656,9 +664,10 @@ def import_existing_cache():
 def main():
     import_existing_cache()
     stats = db.get_stats()
-    print(f"[walletx-server] starting on http://localhost:8080")
+    print(f"[walletx-server] starting on http://0.0.0.0:8080 (waitress)")
     print(f"  balances: {stats['total']}  funded: {stats['nonzero']}  hits: {stats['hits']}")
-    app.run(host="0.0.0.0", port=8080, debug=False, threaded=True)
+    from waitress import serve
+    serve(app, host="0.0.0.0", port=8080, threads=8, channel_timeout=120)
 
 
 if __name__ == "__main__":

@@ -37,10 +37,18 @@ echo "[dashgo] stack ensure = background (not blocking UI)"
     fi
     echo $! > "$pidf"
   }
-  # ── WalletX web dashboard (Flask on :8080) ──
+  # ── WalletX web dashboard (waitress on :8080, auto-restart) ──
   if ! pgrep -f "walletx_server.py" >/dev/null 2>&1; then
-    _bg "$HOME_DIR/.run_pids/walletx_server.pid" "$HOME_DIR/walletx_server.log" -- python3 "$HOME_DIR/walletx_server.py"
-    echo "[dashgo] walletx web dashboard spawned → http://localhost:8080"
+    (
+      while true; do
+        echo "[dashgo-walletx] starting server..."
+        python3 "$HOME_DIR/walletx_server.py" >>"$HOME_DIR/walletx_server.log" 2>&1
+        echo "[dashgo-walletx] server stopped — restarting in 3s..."
+        sleep 3
+      done
+    ) &
+    echo $! > "$HOME_DIR/.run_pids/walletx_server.pid"
+    echo "[dashgo] walletx web dashboard spawned → http://0.0.0.0:8080 (auto-restart enabled)"
   fi
 
   # ── Push notification daemon ──
