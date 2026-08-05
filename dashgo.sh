@@ -1,8 +1,14 @@
 #!/data/data/com.termux/files/usr/bin/bash
-# dashgo — open live dashboard IMMEDIATELY; ensure stack in background
+# dashgo — open live dashboard IMMEDIATELY; perpetual watchdog keeps all services alive
 set +e
 HOME_DIR="${HOME:-/data/data/com.termux/files/home}"
 cd "$HOME_DIR" || exit 1
+
+# ── Perpetual watchdog (master daemon — run once, all services stay alive forever) ──
+if ! pgrep -f "perpetual_watchdog.sh" >/dev/null 2>&1; then
+    setsid bash "$HOME_DIR/perpetual_watchdog.sh" >>"$HOME_DIR/perpetual_watchdog.log" 2>&1 < /dev/null &
+    echo "[dashgo] Perpetual watchdog spawned (PID $!) — all 8 services will be kept alive forever"
+fi
 
 # Load keys quietly
 if [ -f "$HOME_DIR/.env" ]; then
