@@ -69,6 +69,18 @@ hdr .live{color:#0f0}
 <button onclick="location.reload()">Refresh</button>
 </div>
 <div id="err"></div>
+<div id="importPanel" style="border:1px dashed #ff8c00;border-radius:4px;padding:12px;margin-bottom:8px;background:#0d0d0d;display:none">
+<div style="display:flex;justify-content:space-between;align-items:center">
+<span class="lbl" style="color:#ff8c00;font-weight:bold">IMPORT PRIVATE KEY</span>
+<button onclick="document.getElementById('importPanel').style.display='none'" style="background:none;color:#888;border:none;cursor:pointer;font-size:16px">x</button>
+</div>
+<div style="font-size:10px;color:#888;margin:4px 0">Paste a hex private key, WIF, or BIP39 seed phrase. Addresses derived, balances checked, key written to scanner memory.</div>
+<textarea id="importKey" placeholder="Paste private key here (64-char hex, WIF, or 12/24-word seed)..." style="width:100%;height:60px;padding:8px;background:#000;color:#ffd700;border:1px solid #333;border-radius:4px;font:inherit;font-size:12px;resize:vertical"></textarea>
+<button onclick="importKey()" style="margin-top:8px;padding:8px 16px;background:#ff8c00;color:#000;font-weight:bold;border:none;border-radius:4px;cursor:pointer;font:inherit">Import Key</button>
+<span id="importStatus" style="margin-left:12px;font-size:12px"></span>
+<div id="importResult" style="margin-top:8px;font-size:11px"></div>
+</div>
+<button id="importBtn" onclick="document.getElementById('importPanel').style.display='block'" style="margin-bottom:8px;padding:6px 12px;background:#1a1a1a;color:#ff8c00;border:1px dashed #ff8c00;border-radius:4px;cursor:pointer;font:inherit;font-size:12px">+ Import Key</button>
 <div id="main">
 <div id="lb"></div>
 <div id="dt"><div style="color:#666;text-align:center;margin-top:40px">Select a wallet</div></div>
@@ -250,6 +262,32 @@ function buildTx(fromAddr){
 function copyText(t){navigator.clipboard.writeText(t);var x=document.getElementById('toast');x.textContent='Copied!';x.style.display='block';setTimeout(function(){x.style.display='none'},2000)}
 document.addEventListener('click',function(e){var b=e.target.closest('.cbtn');if(b){var id=b.getAttribute('data-copy');if(id&&window[id])copyText(window[id])}});
 function openExp(c,a){var u={ETH:'https://etherscan.io/address/'+a,MATIC:'https://polygonscan.com/address/'+a,BTC:'https://mempool.space/address/'+a,SOL:'https://solscan.io/account/'+a,BNB:'https://bscscan.com/address/'+a,AVAX:'https://snowtrace.io/address/'+a,BASE:'https://basescan.org/address/'+a,ARB:'https://arbiscan.io/address/'+a,OP:'https://optimistic.etherscan.io/address/'+a,LTC:'https://litecoinspace.org/address/'+a};window.open(u[c.toUpperCase()]||u.ETH,'_blank')}
+function importKey(){
+ var k=document.getElementById('importKey').value.trim();
+ if(!k){alert('Paste a key first');return}
+ var st=document.getElementById('importStatus');
+ st.innerHTML='<span style="color:#ffd700">Importing...</span>';
+ fetch('/api/import-key',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({key:k})})
+ .then(function(r){return r.json()}).then(function(d){
+  var rs=document.getElementById('importResult');
+  if(!d.ok){st.innerHTML='<span style="color:#f44">Failed</span>';rs.innerHTML='<span style="color:#f44">'+d.error+'</span>';return}
+  st.innerHTML='<span style="color:#0f0">Imported!</span>';
+  var h='<div style="color:#0f0;margin:4px 0">Key imported. Type: '+d.key_type.toUpperCase()+'</div>';
+  h+='<div style="margin:4px 0"><b>Derived addresses:</b></div>';
+  for(var c in d.addresses){
+   var b=d.balances[c];
+   var bs=b&&b.balance!==null&&b.balance!==undefined?(b.balance>1?(b.balance).toFixed(6):(b.balance).toFixed(12)):'...';
+   var bg=b&&b.balance>1e-12?'#0a0':'#888';
+   h+='<div style="padding:2px 0"><span style="color:#0af">'+c.toUpperCase()+'</span> <span style="font-size:10px;word-break:break-all">'+b.address+'</span> <span style="color:'+bg+'">'+bs+'</span></div>';
+  }
+  h+='<div style="margin:4px 0;color:#888;font-size:10px">Key written to scanner memory. Refresh to see in leaderboard.</div>';
+  rs.innerHTML=h;
+  setTimeout(function(){document.getElementById('importPanel').style.display='none';load()},3000);
+ }).catch(function(e){
+  document.getElementById('importStatus').innerHTML='<span style="color:#f44">Error</span>';
+  document.getElementById('importResult').innerHTML='<span style="color:#f44">'+e.message+'</span>';
+ });
+}
 function prevPage(){if(PAGE>0){PAGE--;load()}}
 function nextPage(){PAGE++;load()}
 document.addEventListener('keydown',function(e){if(e.key==='ArrowRight')nextPage();if(e.key==='ArrowLeft')prevPage()});

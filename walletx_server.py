@@ -396,6 +396,113 @@ def api_wallet_detail(address: str):
     return jsonify({"found": True, "address": addr, **best})
 
 
+# ── Import key: paste a private key, derive addresses, check balances ──
+
+@app.route("/api/import-key", methods=["POST"])
+def api_import_key():
+    """Accept a private key (HEX, WIF, or BIP39 seed), derive addresses
+    on all chains, check balances, and write to scanner memory."""
+    try:
+        body = request.get_json(force=True, silent=True) or {}
+    except Exception:
+        body = {}
+    key = (body.get("key") or "").strip()
+    if not key:
+        return jsonify({"ok": False, "error": "No key provided"}), 400
+
+    import crypto_scanner as cs
+    from datetime import datetime, timezone
+
+    hex_keys = []
+    wifs = []
+    seeds = []
+    addrs = {}
+
+    # Auto-detect key type
+    key_clean = key.strip()
+    if key_clean.startswith("0x"):
+        key_clean = key_clean[2:]
+    # Try HEX
+    if len(key_clean) == 64 and all(c in "0123456789abcdefABCDEF" for c in key_clean):
+        try:
+            priv_bytes = bytes.fromhex(key_clean)
+            addrs = cs.priv_to_addresses(priv_bytes)
+            hex_keys = [key_clean]
+        except Exception as e:
+            return jsonify({"ok": False, "error": f"Invalid hex key: {e}"}), 400
+    # Try WIF
+    elif len(key_clean) >= 50 and (key_clean[0] in "5KL"):
+        try:
+            priv_bytes = cs.wif_to_priv_bytes(key_clean)
+            if priv_bytes:
+                addrs = cs.priv_to_addresses(priv_bytes)
+                wifs = [key_clean]
+                # Also get hex
+                hex_keys = [priv_bytes.hex()]
+            else:
+                return jsonify({"ok": False, "error": "Invalid WIF key"}), 400
+        except Exception as e:
+            return jsonify({"ok": False, "error": f"Invalid WIF: {e}"}), 400
+    # Try seed phrase
+    elif " " in key_clean and len(key_clean.split()) in (12, 24):
+        try:
+            addrs = cs.seed_to_addresses(key_clean)
+            seeds = [key_clean]
+        except Exception as e:
+            return jsonify({"ok": False, "error": f"Invalid seed: {e}"}), 400
+    else:
+        return jsonify({"ok": False, "error": f"Unknown key format. Provide 64-char hex, WIF (starts with 5/K/L), or 12/24-word BIP39 seed."}), 400
+
+    if not addrs:
+        return jsonify({"ok": False, "error": "Could not derive any addresses from this key"}), 400
+
+    # Check balances for all derived addresses
+    balances = {}
+    for chain, addr in addrs.items():
+        try:
+            rec = db.get_balance(chain, addr)
+            bal = rec.get("balance") if rec else None
+            balances[chain] = {"address": addr, "balance": bal, "live": bool(rec.get("live")) if rec else False}
+        except Exception:
+            balances[chain] = {"address": addr, "balance": None, "live": False}
+
+    # Write to scanner memory
+    now_ts = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    rec = {
+        "findings": {
+            "wallet": {"hex_keys": hex_keys, "wifs": wifs, "seed_phrases": seeds},
+            "derived_addresses": [{"chain": c, "address": a, "from": "manual_import"} for c, a in addrs.items()],
+            "confidence": "high",
+        },
+        "source": "manual_import",
+        "timestamp": now_ts,
+        "source_uri": "imported via walletx dashboard",
+    }
+    try:
+        with open(MEMORY_FILE, "a", encoding="utf-8") as f:
+            f.write(json.dumps(rec) + "\n")
+    except Exception as e:
+        return jsonify({"ok": False, "error": f"Failed to write memory: {e}"}), 500
+
+    # Count funded chains
+    funded = {c: b for c, b in balances.items() if b["balance"] and b["balance"] > 1e-12}
+    total_funded = sum(b["balance"] for b in funded.values())
+
+    return jsonify({
+        "ok": True,
+        "key_type": "hex" if hex_keys else ("wif" if wifs else "seed"),
+        "hex_keys": hex_keys,
+        "wifs": wifs,
+        "seeds": seeds,
+        "addresses": addrs,
+        "balances": balances,
+        "funded_chains": list(funded.keys()),
+        "total_funded_value": total_funded,
+        "n_funded": len(funded),
+        "written_to_memory": True,
+    })
+
+
 # ── Main ─────────────────────────────────────────────────────────────
 
 def import_existing_cache():
