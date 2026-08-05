@@ -112,6 +112,21 @@ def _is_connectivity_error(exc: BaseException) -> bool:
     return any(kw in msg for kw in keywords)
 
 
+# ── Push notification (termux-notification) ─────────────────────
+def _fire_notification(chain: str, address: str, balance: float) -> None:
+    """Fire Android notification for newly discovered funded wallet."""
+    try:
+        bal_s = f"{balance:,.6f}" if balance < 1e6 else f"{balance/1e6:,.2f}M"
+        addr_s = address[:10] + "..." + address[-8:] if len(address) > 20 else address
+        os.system(
+            f'termux-notification --id walletx --title "💰 Funded: {chain.upper()}" '
+            f'--content "{addr_s}: {bal_s}" --priority high '
+            f'--alert-once --sound default >/dev/null 2>&1'
+        )
+    except Exception:
+        pass
+
+
 # ── Dual network-access gate (NEW + OLD) ──────────────────────────
 # Every balance check runs both tests before firing RPCs:
 #   NEW access — a fresh connectivity probe RIGHT NOW (can we reach the internet?)
@@ -1487,6 +1502,18 @@ def get_balance(chain: str, address: str, force: bool = False) -> Dict[str, Any]
         BALANCE_CACHE[key] = rec
         _mark_cache_dirty()
     save_balance_cache(force=bool(isinstance(balance, (int, float)) and balance > 0))
+
+    # ── SQLite mirror + funded-hit notification ──────────────────
+    try:
+        import balance_db as _bdb
+        _bdb.set_balance(chain, address, rec)
+        if isinstance(balance, (int, float)) and balance > 1e-12:
+            is_new = _bdb.record_hit(chain, address, float(balance))
+            if is_new:
+                _fire_notification(chain, address, float(balance))
+    except Exception:
+        pass
+
     return rec
 
 

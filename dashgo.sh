@@ -37,6 +37,18 @@ echo "[dashgo] stack ensure = background (not blocking UI)"
     fi
     echo $! > "$pidf"
   }
+  # ── WalletX web dashboard (Flask on :8080) ──
+  if ! pgrep -f "walletx_server.py" >/dev/null 2>&1; then
+    _bg "$HOME_DIR/.run_pids/walletx_server.pid" "$HOME_DIR/walletx_server.log" -- python3 "$HOME_DIR/walletx_server.py"
+    echo "[dashgo] walletx web dashboard spawned → http://localhost:8080"
+  fi
+
+  # ── Push notification daemon ──
+  if ! pgrep -f "notify_hits.py" >/dev/null 2>&1; then
+    _bg "$HOME_DIR/.run_pids/notify_hits.pid" "$HOME_DIR/notify_hits.log" -- python3 "$HOME_DIR/notify_hits.py"
+    echo "[dashgo] notification daemon spawned"
+  fi
+
   # ── Auto-decrypt vault files + feed scanner pipeline ──
   if [ -f "$HOME_DIR/auto_decrypt.py" ] && [ -f "$HOME_DIR/.encrypt_passphrase" ]; then
     echo "[dashgo] auto-decrypt vault ..."
