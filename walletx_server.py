@@ -277,9 +277,27 @@ def api_balances():
     sort_by = request.args.get("sort_by", "balance")
     rows, total = db.filter_balances(
         chain=chain, min_balance=min_bal, funded_only=funded_only,
-        limit=limit, offset=offset, sort_by=sort_by,
+        limit=99999, offset=0, sort_by=sort_by,
     )
-    return jsonify({"rows": rows, "total": total})
+    # Filter out addresses with NO key material in scanner memory
+    records = _load_memory()
+    keyed_addrs = set()
+    for rec in records:
+        w = (rec.get("findings") or {}).get("wallet") or {}
+        if w.get("hex_keys") or w.get("wifs") or w.get("seed_phrases"):
+            for d in (rec.get("findings") or {}).get("derived_addresses") or []:
+                if isinstance(d, dict):
+                    keyed_addrs.add((d.get("address") or "").lower())
+            for chain_key in ("btc", "eth", "ltc", "sol", "doge", "xrp", "matic",
+                              "avax", "bnb", "base", "arb", "op", "monad"):
+                for a in (rec.get("findings") or {}).get(chain_key) or []:
+                    if isinstance(a, str):
+                        keyed_addrs.add(a.lower())
+    filtered = [r for r in rows if r["address"].lower() in keyed_addrs]
+    total_filtered = len(filtered)
+    # Apply pagination after filtering
+    filtered = filtered[offset:offset + limit]
+    return jsonify({"rows": filtered, "total": total_filtered})
 
 
 @app.route("/api/search")
