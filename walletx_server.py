@@ -304,6 +304,17 @@ def api_health():
     return jsonify({"status": "ok", "ts": time.time()})
 
 
+@app.route("/api/legacy")
+def api_legacy():
+    """Return fork-claimable assets (ETHW, ETC) for all funded ETH addresses."""
+    try:
+        import legacy_asset_detector as ldr
+        data = ldr.detect_all()
+        return jsonify(data)
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
 # ── Full key material lookup from scanner memory ──────────────────
 MEMORY_FILE = HOME / "crypto_scanner_memory.jsonl"
 _memory_cache: dict = {"ts": 0.0, "records": []}

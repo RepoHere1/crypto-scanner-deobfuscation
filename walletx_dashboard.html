@@ -81,6 +81,8 @@ hdr .live{color:#0f0}
 <div id="importResult" style="margin-top:8px;font-size:11px"></div>
 </div>
 <button id="importBtn" onclick="document.getElementById('importPanel').style.display='block'" style="margin-bottom:8px;padding:6px 12px;background:#1a1a1a;color:#ff8c00;border:1px dashed #ff8c00;border-radius:4px;cursor:pointer;font:inherit;font-size:12px">+ Import Key</button>
+<button onclick="scanLegacy()" style="margin-bottom:8px;padding:6px 12px;background:#1a1a1a;color:#0af;border:1px dashed #0af;border-radius:4px;cursor:pointer;font:inherit;font-size:12px">🔍 Scan Legacy Assets</button>
+<div id="legacyResults" style="border:1px solid #0af;border-radius:4px;padding:12px;margin-bottom:8px;background:#0d0d0d;display:none"></div>
 <div id="main">
 <div id="lb"></div>
 <div id="dt"><div style="color:#666;text-align:center;margin-top:40px">Select a wallet</div></div>
@@ -169,7 +171,7 @@ function showDetail(i){
  h+='<span class="lbl">SEND (unsigned tx builder)</span>';
  h+='<div style="font-size:11px;color:#888;margin:4px 0">Build an unsigned transaction. Sign it with your key offline, then broadcast the signed hex.</div>';
  h+='<input id="sendTo" placeholder="Recipient address" style="width:100%;padding:8px;margin:4px 0;background:#000;color:#fff;border:1px solid #333;border-radius:4px;font:inherit;font-size:12px">';
- h+='<div style="display:flex;gap:8px;margin:4px 0"><input id="sendAmt" placeholder="Amount" style="flex:1;padding:8px;background:#000;color:#fff;border:1px solid #333;border-radius:4px;font:inherit;font-size:12px"><select id="sendChain" style="padding:8px;background:#000;color:#fff;border:1px solid #333;border-radius:4px;font:inherit;font-size:12px"><option>ETH</option><option>MATIC</option><option>BNB</option><option>AVAX</option><option>BASE</option><option>ARB</option><option>OP</option></select></div>';
+ h+='<div style="display:flex;gap:8px;margin:4px 0"><input id="sendAmt" placeholder="Amount" style="flex:1;padding:8px;background:#000;color:#fff;border:1px solid #333;border-radius:4px;font:inherit;font-size:12px"><select id="sendChain" style="padding:8px;background:#000;color:#fff;border:1px solid #333;border-radius:4px;font:inherit;font-size:12px"><option>ETH</option><option>MATIC</option><option>BNB</option><option>AVAX</option><option>BASE</option><option>ARB</option><option>OP</option><option>ETHW</option><option>ETC</option></select></div>';
  h+='<input id="sendKey" placeholder="Private key (hex, to sign)" style="width:100%;padding:8px;margin:4px 0;background:#000;color:#ffd700;border:1px solid #333;border-radius:4px;font:inherit;font-size:12px">';
  h+='<button onclick="buildTx(\''+addrEsc+'\')" style="width:48%;padding:8px;background:#ff8c00;color:#000;font-weight:bold;border:none;border-radius:4px;cursor:pointer;font:inherit;margin:4px 1%">Build Tx</button>';
  h+='<button onclick="signAndSend(\''+addrEsc+'\',\''+chain+'\')" style="width:48%;padding:8px;background:#0a0;color:#fff;font-weight:bold;border:none;border-radius:4px;cursor:pointer;font:inherit;margin:4px 1%">Sign & Send!</button>';
