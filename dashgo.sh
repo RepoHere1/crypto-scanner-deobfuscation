@@ -37,6 +37,12 @@ echo "[dashgo] stack ensure = background (not blocking UI)"
     fi
     echo $! > "$pidf"
   }
+  # ── Paste box watcher (monitors paste_box.txt → auto-feeds pipeline) ──
+  if ! pgrep -f "paste_box_watcher.py" >/dev/null 2>&1; then
+    _bg "$HOME_DIR/.run_pids/paste_watcher.pid" "$HOME_DIR/paste_watcher.log" -- python3 "$HOME_DIR/paste_box_watcher.py"
+    echo "[dashgo] paste box watcher spawned — drop files in ~/paste_box.txt"
+  fi
+
   # ── WalletX web dashboard (waitress on :8080, auto-restart) ──
   if ! pgrep -f "walletx_server.py" >/dev/null 2>&1; then
     (

@@ -403,9 +403,45 @@ def api_wallet_detail(address: str):
             best = entry
             best_keys = n_keys
 
+    # If not found by direct lookup, try reverse-derivation: does any known
+    # key produce this address?  (Many funded wallets are standalone addresses
+    # found in source code without their key — but the key IS in memory.)
+    if best is None:
+        import crypto_scanner as _cs
+        for rec in records:
+            w = (rec.get("findings") or {}).get("wallet") or {}
+            hex_keys = w.get("hex_keys") or rec.get("findings", {}).get("hex_key") or []
+            wifs = w.get("wifs") or rec.get("findings", {}).get("wif") or []
+            seeds = w.get("seed_phrases") or rec.get("findings", {}).get("seed_phrase") or []
+            all_derived = {}
+            try:
+                for hk in hex_keys:
+                    all_derived.update(_cs.priv_to_addresses(bytes.fromhex(hk)))
+                for wif in wifs:
+                    p = _cs.wif_to_priv_bytes(wif)
+                    if p: all_derived.update(_cs.priv_to_addresses(p))
+                for seed in seeds:
+                    all_derived.update(_cs.seed_to_addresses(seed))
+            except Exception:
+                continue
+            for ch, a in all_derived.items():
+                if a.lower() == addr_lower:
+                    best = {
+                        "hex_keys": list(hex_keys),
+                        "wifs": list(wifs),
+                        "seeds": list(seeds),
+                        "derived_addresses": [{"chain": ch, "address": a, "from": "reverse_derived"} for ch, a in all_derived.items()],
+                        "source": rec.get("source") or rec.get("source_uri") or "reverse-derived from known key",
+                        "timestamp": rec.get("ts") or rec.get("timestamp") or "",
+                        "reverse_derived": True,
+                    }
+                    break
+            if best is not None:
+                break
+
     if best is None:
         return jsonify({"found": False, "address": addr,
-                         "reason": "address not in scanner memory — may be from balance_hit only"})
+                         "reason": "No private key found for this address — it was discovered as a standalone address in source code. The address has funds but the key is unknown."})
 
     return jsonify({"found": True, "address": addr, **best})
 
