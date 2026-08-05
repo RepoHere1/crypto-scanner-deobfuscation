@@ -46,6 +46,15 @@ alias wforensic1='python3 "$HOME/wallet_forensic.py" --once --cached --funded-on
 alias walletxdump='python3 "$HOME/wallet_forensic.py" --once --cached --funded-only'
 alias walletxexport='ls -lt "$HOME/forensic_exports" 2>/dev/null | head -20'
 
+# ── Permanent wallet key vault (not the flaky balance cache) ──
+alias walletforever='python3 "$HOME/wallets_forever.py" --stats'
+alias walletforeverfunded='python3 "$HOME/wallets_forever.py" --funded 20'
+alias walletforevercompact='python3 "$HOME/wallets_forever.py" --compact'
+alias walletforeverbackfill='python3 "$HOME/wallets_forever.py" --backfill'
+alias walletforeverclean='python3 "$HOME/wallets_forever.py" --cleanup-tmps'
+alias walletforeverreport='python3 "$HOME/wallets_forever.py" --writer-report'
+alias walletforeverbal='python3 "$HOME/wallets_forever.py" --attach-balances'
+
 # Smooth URL feed (backup + clean + IQ-rank + reload mass_scan)
 alias feed='python3 "$HOME/feed_smooth.py" --restart'
 alias feedstatus='python3 "$HOME/feed_smooth.py" --status'

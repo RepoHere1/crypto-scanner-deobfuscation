@@ -134,6 +134,43 @@ def load_existing_paste_uris() -> Set[str]:
     return seen
 
 
+
+def load_atlas_boost():
+    """Repos + orgs from success atlas (funded-balance attributed)."""
+    uris, orgs = [], set()
+    aq = HOME / ".adaptive_queries.json"
+    boost = HOME / ".learn_boost_targets.txt"
+    atlas = HOME / ".success_atlas.json"
+    try:
+        if aq.exists():
+            data = json.loads(aq.read_text(encoding="utf-8"))
+            for r in data.get("boost_repos") or []:
+                if r and not is_fake(r):
+                    uris.append(r)
+            for o in data.get("boost_orgs") or []:
+                if o:
+                    orgs.add(str(o))
+        if boost.exists():
+            for ln in boost.read_text(encoding="utf-8", errors="ignore").splitlines():
+                s = ln.strip()
+                if s and not s.startswith("#") and not is_fake(s):
+                    uris.append(s)
+                    m = GITHUB_URL_RE.search(s)
+                    if m:
+                        orgs.add(m.group(1))
+        if atlas.exists():
+            data = json.loads(atlas.read_text(encoding="utf-8"))
+            for o, _c in data.get("top_orgs") or []:
+                if o:
+                    orgs.add(str(o))
+            for fam in data.get("path_families") or []:
+                if fam and str(fam).replace("-", "").isalnum():
+                    orgs.add(str(fam))
+    except Exception as e:
+        print(f"  [adapt] atlas boost load: {e}")
+    return uris, orgs
+
+
 def winners_from_outcomes() -> Tuple[List[str], Set[str]]:
     """Return (uris_to_boost, orgs_to_expand)."""
     uris: List[str] = []
@@ -338,7 +375,10 @@ def main() -> int:
     print(f"  existing real paste uris: {len(existing)}")
 
     boost_uris, orgs = winners_from_outcomes()
-    print(f"  outcome winners: {len(set(boost_uris))} uris, {len(orgs)} orgs")
+    atlas_uris, atlas_orgs = load_atlas_boost()
+    boost_uris = list(boost_uris) + list(atlas_uris)
+    orgs = set(orgs) | set(atlas_orgs)
+    print(f"  outcome winners: {len(set(boost_uris))} uris, {len(orgs)} orgs (atlas_orgs={len(atlas_orgs)})")
 
     mined = mine_trufflehog_urls()
     print(f"  mined from findings: {len(set(mined))} uris")

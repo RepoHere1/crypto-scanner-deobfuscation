@@ -14,7 +14,7 @@ if [ -f "$PIDFILE" ] && kill -0 "$(cat "$PIDFILE")" 2>/dev/null; then
     echo "[*] CryptoScanner already running (PID $(cat "$PIDFILE"))"
 else
     rm -f "$PIDFILE"
-    nohup python3 "$HOME/crypto_scanner.py" "$SCAN_RESULTS" > "$HOME/crypto_scanner_scanner.log" 2>&1 &
+    nohup setsid python3 "$HOME/crypto_scanner.py" "$SCAN_RESULTS" > "$HOME/crypto_scanner_scanner.log" 2>&1 </dev/null &
     echo $! > "$PIDFILE"
     echo "CryptoScanner started. Memory: $HOME/crypto_scanner_memory.jsonl"
 fi

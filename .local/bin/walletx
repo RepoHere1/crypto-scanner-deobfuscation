@@ -1,2 +1,2 @@
 #!/data/data/com.termux/files/usr/bin/bash
-exec python3 "$HOME/wallet_forensic.py" --funded-only --idle-sec 120 --tick-sec 2 --batch 24 "$@"
+exec python3 "$HOME/wallet_forensic.py" --funded-only --idle-sec 120 --tick-sec 0.35 --batch 24 "$@"

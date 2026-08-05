@@ -23,6 +23,16 @@ fi
 [ -f "$HOME_DIR/.bashrc" ] && source "$HOME_DIR/.bashrc" 2>/dev/null || true
 export ALCHEMY_API_KEY="${ALCHEMY_API_KEY:-}"
 export ANKR_API_KEY="${ANKR_API_KEY:-}"
+# Load ~/.env so Infura/Etherscan/Alchemy/etc survive Termux restart / boot
+if [ -f "$HOME_DIR/.env" ]; then
+  set -a
+  # shellcheck disable=SC1090
+  . "$HOME_DIR/.env" 2>/dev/null || true
+  set +a
+fi
+export INFURA_API_KEY="${INFURA_API_KEY:-}"
+export ETHERSCAN_API_KEY="${ETHERSCAN_API_KEY:-}"
+export SOLSCAN_API_KEY="${SOLSCAN_API_KEY:-}"
 
 log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*" | tee -a "$LOG"; }
 

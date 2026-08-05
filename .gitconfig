@@ -1,3 +1,12 @@
 [user]
 	email = user@example.com
 	name = Termux User
+[pull]
+	rebase = false
+[push]
+	default = current
+	autoSetupRemote = true
+[advice]
+	diverging = false
+[core]
+	editor = true

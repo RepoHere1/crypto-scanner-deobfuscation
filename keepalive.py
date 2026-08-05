@@ -23,6 +23,7 @@ LOG = HOME / "keepalive.log"
 ADAPTIVE = HOME / "adaptive_throttler.py"
 RUN_THROTTLED = HOME / "run_throttled.py"
 CRYPTO = HOME / "crypto_scanner.py"
+DEOBF = HOME / "deobfuscation_daemon.py"
 LEARN = HOME / "learn_crawl.py"
 TARGET_GEN = HOME / "target_generator.py"
 TARGET_INTEL = HOME / "target_intelligence.py"
@@ -35,9 +36,11 @@ PASTE_TXT = HOME / "paste.txt"
 ADAPTIVE_PID = PID_DIR / "adaptive_scan.pid"
 MASS_PID = PID_DIR / "mass_scan.pid"
 CRYPTO_PID = PID_DIR / "crypto_scanner.pid"
+DEOBF_PID = PID_DIR / "deobfuscation_daemon.pid"
 
 ADAPTIVE_LOG = HOME / "adaptive_scan.log"
 CRYPTO_LOG = HOME / "crypto_scanner_scanner.log"
+DEOBF_LOG = HOME / "deobfuscation_daemon.log"
 LEARN_LOG = HOME / "learn_run.log"
 
 CHECK_EVERY = 45
@@ -234,6 +237,17 @@ def ensure_crypto() -> None:
     _spawn("crypto", [sys.executable, str(CRYPTO), str(scan)], CRYPTO_LOG, CRYPTO_PID)
 
 
+def ensure_deobfuscation() -> None:
+    """Keep the deobfuscation daemon alive — runs always-on from startup."""
+    if _service_alive(DEOBF_PID):
+        return
+    if _pgrep_alive(r"deobfuscation_daemon\.py"):
+        return
+    if not DEOBF.exists():
+        return
+    _spawn("deobfuscation", [sys.executable, str(DEOBF)], DEOBF_LOG, DEOBF_PID)
+
+
 def maybe_refresh_targets() -> None:
     global _last_target
     now = time.time()
@@ -345,11 +359,11 @@ def maybe_daily_funded_report() -> None:
     # Skip spawn entirely outside a generous noon-ish band to save work.
     # The child still re-checks the exact window + once-a-day lock.
     try:
-        hour = int(os.environ.get("REPORT_HOUR") or "12")
+        hour = int(os.environ.get("REPORT_HOUR") or "9")
     except ValueError:
-        hour = 12
+        hour = 9
     local_hour = time.localtime(now).tm_hour
-    # Allow 11,12,13 local so slow devices / late boots still fire.
+    # Allow +/-1 hour band so slow devices / late boots still fire.
     if local_hour not in {hour, (hour - 1) % 24, (hour + 1) % 24}:
         return
     log("daily funded report — checking send window")
@@ -425,6 +439,7 @@ def run_loop() -> int:
             online = _wifi_ok()
             if not online:
                 log("wifi probe failed — still ensuring local scanners")
+            ensure_deobfuscation()
             ensure_adaptive()
             ensure_crypto()
             if online:
@@ -482,6 +497,27 @@ def status() -> int:
     print(f"adaptive:    {'RUNNING pid=' + str(ap) if ap_ok else 'STOPPED'}")
     mp = _find_mass_pid()
     print(f"mass:        {'RUNNING pid=' + str(mp) + ' (under adaptive)' if mp else 'STOPPED'}")
+    dp = _read_pid(DEOBF_PID)
+    dp_ok = bool(dp and _pid_alive(dp))
+    if not dp_ok:
+        try:
+            r = subprocess.run(["pgrep", "-f", r"deobfuscation_daemon\.py"], capture_output=True, text=True, timeout=5)
+            for line in (r.stdout or "").splitlines():
+                try:
+                    p = int(line.strip())
+                except ValueError:
+                    continue
+                try:
+                    cmd = Path(f"/proc/{p}/cmdline").read_bytes().replace(b"\x00", b" ").decode("utf-8", "ignore")
+                except OSError:
+                    continue
+                if "deobfuscation_daemon.py" in cmd and "python" in cmd:
+                    dp, dp_ok = p, True
+                    break
+        except Exception:
+            pass
+    print(f"deobfuscation: {'RUNNING pid=' + str(dp) if dp_ok else 'STOPPED'}")
+
     cp = _read_pid(CRYPTO_PID)
     cp_ok = bool(cp and _pid_alive(cp))
     if not cp_ok:
