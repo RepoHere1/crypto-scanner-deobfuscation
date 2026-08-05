@@ -318,6 +318,31 @@ def api_scanner_status():
     return jsonify(data)
 
 
+@app.route("/api/refresh-balances", methods=["POST"])
+def api_refresh_balances():
+    """Force live RPC balance check on all addresses and update SQLite.
+    Runs in a thread so it doesn't block the dashboard."""
+    import threading
+    def _do_refresh():
+        try:
+            import crypto_scanner as cs
+            rows, _ = db.filter_balances(funded_only=False, limit=99999, sort_by="ts")
+            updated = 0
+            for r in rows:
+                try:
+                    rec = cs.get_balance(r["chain"], r["address"], force=True)
+                    db.set_balance(r["chain"], r["address"], rec)
+                    updated += 1
+                except Exception:
+                    pass
+            print(f"[refresh] Updated {updated} balances via live RPC")
+        except Exception as e:
+            print(f"[refresh] Failed: {e}")
+    t = threading.Thread(target=_do_refresh, daemon=True)
+    t.start()
+    return jsonify({"ok": True, "message": "Balance refresh started in background — check /api/stats in a few seconds"})
+
+
 @app.route("/api/health")
 def api_health():
     return jsonify({"status": "ok", "ts": time.time()})

@@ -211,8 +211,19 @@ function showDetail(i){
  var addrEnc=encodeURIComponent(addr);
  fetch('/api/wallet/'+addrEnc).then(function(r){return r.json()}).then(function(kd){
   var ks=document.getElementById('key');
-  if(!kd.found){ks.innerHTML='<div class="sec"><span class="lbl">KEYS</span><span class="val" style="color:#888">'+kd.reason+'</span></div>';return}
-  var kh='<div class="sec"><span class="lbl">KEY MATERIAL (FULL)</span></div>';
+  if(!kd.found){
+   ks.innerHTML='<div class="sec" style="border:1px solid #f44;border-radius:4px;padding:12px;background:#1a0000">'+
+    '<span class="lbl" style="color:#f44">⚠ CONTRACT ADDRESS — NO PRIVATE KEY</span>'+
+    '<div class="val" style="color:#f88;font-size:11px;margin-top:4px">'+kd.reason+'</div>'+
+    '<div style="color:#888;font-size:10px;margin-top:4px">This address was found in source code as a reference. It has a balance on-chain but is a smart contract, token, bridge, or system address — not a wallet anyone controls with a private key.</div></div>';return}
+  var hasKeys=(kd.hex_keys&&kd.hex_keys.length)||(kd.wifs&&kd.wifs.length)||(kd.seeds&&kd.seeds.length);
+  if(!hasKeys){
+   ks.innerHTML='<div class="sec" style="border:1px solid #ffd700;border-radius:4px;padding:12px;background:#1a1a00">'+
+    '<span class="lbl" style="color:#ffd700">⚠ NO KEY MATERIAL FOUND</span>'+
+    '<div class="val" style="color:#ff8c00;font-size:11px;margin-top:4px">Address found in scanner memory but has no private key, WIF, or BIP39 seed associated with it.</div>'+
+    '<div style="color:#888;font-size:10px;margin-top:4px">Source: '+(kd.source||'unknown')+' · Found: '+(kd.timestamp||'unknown')+'</div></div>';return}
+  var kh='<div class="sec" style="border:1px solid #0f0;border-radius:4px;padding:12px;background:#001a00">'+
+   '<span class="lbl" style="color:#0f0">🔑 PRIVATE KEY MATERIAL (FULL — NEVER TRUNCATED)</span></div>';
   if(kd.hex_keys&&kd.hex_keys.length){
    kh+='<div class="sec"><span class="lbl">HEX PRIVATE KEYS ('+kd.hex_keys.length+')</span>';
    kd.hex_keys.forEach(function(k,j){kh+='<div><pre>['+(j+1)+'] '+k+'</pre><button onclick="copyText(\''+k+'\')" style="font-size:10px;padding:2px 6px;background:#1a1a1a;color:#ff8c00;border:1px solid #ff8c00;border-radius:2px;cursor:pointer">Copy</button></div>'});
