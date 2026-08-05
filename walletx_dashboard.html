@@ -137,18 +137,57 @@ function showDetail(i){
  else if(bal>1e6)bs=(bal/1e6).toFixed(6)+'M';
  else if(bal>1)bs=bal.toFixed(6);
  else bs=bal.toFixed(12);
+ var addr=(w.address||''),chain=(w.chain||'eth'),addrEsc=addr.replace(/'/g,"&#39;");
  var h='';
  h+='<div class="sec"><span class="lbl">RANK</span><span class="val">#'+(PAGE*PERPAGE+i+1)+' / '+TOTAL+'</span></div>';
- h+='<div class="sec"><span class="lbl">CHAIN</span><span class="val">'+(w.chain||'?').toUpperCase()+'</span></div>';
- h+='<div class="sec"><span class="lbl">ADDRESS</span><span class="val" style="font-size:11px">'+(w.address||'')+'</span></div>';
+ h+='<div class="sec"><span class="lbl">CHAIN</span><span class="val">'+chain.toUpperCase()+'</span></div>';
+ h+='<div class="sec"><span class="lbl">ADDRESS</span><span class="val" style="font-size:11px;word-break:break-all">'+addr+'</span></div>';
  h+='<div class="sec"><span class="lbl">BALANCE</span><span class="val">'+bs+'</span></div>';
  h+='<div class="sec"><span class="lbl">CHECKED</span><span class="val">'+(w.checked_at||'unknown')+'</span></div>';
- h+='<div class="sec"><span class="lbl">STATUS</span><span class="val">'+(w.live?'LIVE':'CACHED')+' '+(w.settled?'SETTLED':'')+'</span></div>';
- h+='<div class="btns"><button onclick="copyText(\''+(w.address||'').replace(/'/g,"&#39;")+'\')">Copy Address</button><button onclick="openExp(\''+(w.chain||'eth')+'\',\''+(w.address||'').replace(/'/g,"&#39;")+'\')">Explorer</button></div>';
- h+='<div id="key" style="margin-top:16px"><span style="color:#888">Loading keys...</span></div>';
+ h+='<div class="btns" style="margin-bottom:12px"><button onclick="copyText(\''+addrEsc+'\')">Copy</button><button onclick="openExp(\''+chain+'\',\''+addrEsc+'\')">Explorer</button></div>';
+ // ── RECEIVE panel ──────────────────────────────────────────
+ h+='<div class="sec" style="border:1px solid #ff8c00;border-radius:4px;padding:12px;background:#0d0d0d">';
+ h+='<span class="lbl">RECEIVE</span>';
+ h+='<div style="text-align:center;margin:8px 0"><img src="https://api.qrserver.com/v1/create-qr-code/?size=180x180&color=ff8c00&bgcolor=000&data='+encodeURIComponent(addr)+'" width="180" height="180" alt="QR" style="border:2px solid #333;border-radius:4px"></div>';
+ h+='<div style="font-size:10px;word-break:break-all;color:#ffd700;background:#000;padding:8px;border-radius:4px;margin:8px 0">'+addr+'</div>';
+ h+='<button onclick="copyText(\''+addrEsc+'\')" style="width:100%;padding:8px;background:#ff8c00;color:#000;font-weight:bold;border:none;border-radius:4px;cursor:pointer;font:inherit">Copy Address</button>';
+ h+='</div>';
+ // ── SEND panel ─────────────────────────────────────────────
+ h+='<div class="sec" style="border:1px solid #333;border-radius:4px;padding:12px;background:#0d0d0d;margin-top:12px">';
+ h+='<span class="lbl">SEND (unsigned tx builder)</span>';
+ h+='<div style="font-size:11px;color:#888;margin:4px 0">Build an unsigned transaction. Sign it with your key offline, then broadcast the signed hex.</div>';
+ h+='<input id="sendTo" placeholder="Recipient address" style="width:100%;padding:8px;margin:4px 0;background:#000;color:#fff;border:1px solid #333;border-radius:4px;font:inherit;font-size:12px">';
+ h+='<div style="display:flex;gap:8px;margin:4px 0"><input id="sendAmt" placeholder="Amount" style="flex:1;padding:8px;background:#000;color:#fff;border:1px solid #333;border-radius:4px;font:inherit;font-size:12px"><select id="sendChain" style="padding:8px;background:#000;color:#fff;border:1px solid #333;border-radius:4px;font:inherit;font-size:12px"><option>ETH</option><option>MATIC</option><option>BNB</option><option>AVAX</option><option>BASE</option><option>ARB</option><option>OP</option></select></div>';
+ h+='<button onclick="buildTx(\''+addrEsc+'\')" style="width:100%;padding:8px;background:#ff8c00;color:#000;font-weight:bold;border:none;border-radius:4px;cursor:pointer;font:inherit;margin:4px 0">Build Transaction</button>';
+ h+='<div id="txOut" style="font-size:10px;color:#0f0;background:#000;padding:8px;border-radius:4px;margin-top:8px;word-break:break-all;display:none"></div>';
+ h+='</div>';
+ // ── SWAP / BRIDGE links ────────────────────────────────────
+ h+='<div class="sec" style="border:1px solid #333;border-radius:4px;padding:12px;background:#0d0d0d;margin-top:12px">';
+ h+='<span class="lbl">SWAP / BRIDGE</span>';
+ h+='<div style="display:flex;flex-wrap:wrap;gap:6px;margin-top:6px">';
+ h+='<a href="https://app.1inch.io/#/1/unified/swap/ETH/'+addr+'" target="_blank" style="padding:6px 10px;background:#1a1a1a;color:#ff8c00;border:1px solid #ff8c00;border-radius:4px;text-decoration:none;font-size:11px">1inch</a>';
+ h+='<a href="https://app.uniswap.org/swap?outputCurrency='+addr+'" target="_blank" style="padding:6px 10px;background:#1a1a1a;color:#ff8c00;border:1px solid #ff8c00;border-radius:4px;text-decoration:none;font-size:11px">Uniswap</a>';
+ h+='<a href="https://pancakeswap.finance/swap?outputCurrency='+addr+'" target="_blank" style="padding:6px 10px;background:#1a1a1a;color:#ff8c00;border:1px solid #ff8c00;border-radius:4px;text-decoration:none;font-size:11px">PancakeSwap</a>';
+ h+='<a href="https://portalbridge.com/#/transfer" target="_blank" style="padding:6px 10px;background:#1a1a1a;color:#ff8c00;border:1px solid #ff8c00;border-radius:4px;text-decoration:none;font-size:11px">Portal Bridge</a>';
+ h+='<a href="https://jumper.exchange/" target="_blank" style="padding:6px 10px;background:#1a1a1a;color:#ff8c00;border:1px solid #ff8c00;border-radius:4px;text-decoration:none;font-size:11px">Jumper</a>';
+ h+='<a href="https://app.odos.xyz/" target="_blank" style="padding:6px 10px;background:#1a1a1a;color:#ff8c00;border:1px solid #ff8c00;border-radius:4px;text-decoration:none;font-size:11px">Odos</a>';
+ h+='</div></div>';
+ // ── BALANCES across chains ─────────────────────────────────
+ h+='<div id="multiBal" class="sec" style="border:1px solid #333;border-radius:4px;padding:12px;background:#0d0d0d;margin-top:12px">';
+ h+='<span class="lbl">BALANCES ACROSS CHAINS</span><span style="color:#888;font-size:11px"> loading...</span></div>';
+ // ── KEY material ───────────────────────────────────────────
+ h+='<div id="key" style="margin-top:12px"><span style="color:#888">Loading keys...</span></div>';
  d.innerHTML=h;
- var addr=encodeURIComponent(w.address||'');
- fetch('/api/wallet/'+addr).then(function(r){return r.json()}).then(function(kd){
+ // Fetch cross-chain balances
+ fetch('/api/search?q='+encodeURIComponent(addr)+'&limit=20').then(function(r){return r.json()}).then(function(dd){
+  var mb=document.getElementById('multiBal'),rows=dd.rows||[],h='<span class="lbl">BALANCES ACROSS CHAINS ('+rows.length+' chains)</span>';
+  if(rows.length===0){h+='<div style="color:#888;font-size:11px">No balances found</div>'}
+  else{rows.forEach(function(r){var b=r.balance;var bs=b>1e6?(b/1e6).toFixed(4)+'M':b>1?(b).toFixed(4):b>1e-8?b.toFixed(8):'0';h+='<div style="display:flex;justify-content:space-between;padding:4px 0;border-bottom:1px solid #1a1a1a;font-size:12px"><span style="color:#0af">'+r.chain.toUpperCase()+'</span><span style="color:#0f0">'+bs+'</span></div>'})}
+  mb.innerHTML=h;
+ }).catch(function(){document.getElementById('multiBal').innerHTML='<span class="lbl">BALANCES</span><span style="color:#888"> unavailable</span>'});
+ // Fetch key material
+ var addrEnc=encodeURIComponent(addr);
+ fetch('/api/wallet/'+addrEnc).then(function(r){return r.json()}).then(function(kd){
   var ks=document.getElementById('key');
   if(!kd.found){ks.innerHTML='<div class="sec"><span class="lbl">KEYS</span><span class="val" style="color:#888">'+kd.reason+'</span></div>';return}
   var kh='<div class="sec"><span class="lbl">KEY MATERIAL (FULL)</span></div>';
@@ -171,6 +210,36 @@ function showDetail(i){
   if(kd.timestamp){kh+='<div class="sec"><span class="lbl">FOUND</span><span class="val">'+kd.timestamp+'</span></div>'}
   ks.innerHTML=kh;
  }).catch(function(e){document.getElementById('key').innerHTML='<span style="color:#f44">Key lookup failed</span>'});
+}
+
+function buildTx(fromAddr){
+ var to=document.getElementById('sendTo').value.trim();
+ var amt=document.getElementById('sendAmt').value.trim();
+ var ch=document.getElementById('sendChain').value.toLowerCase();
+ if(!to||!amt){alert('Enter recipient address and amount');return}
+ var out=document.getElementById('txOut');out.style.display='block';
+ var wei='0x'+(parseFloat(amt)*1e18).toString(16);
+ out.innerHTML='<div style="margin:4px 0"><b>Unsigned Transaction</b></div>'+
+  '<div>From: <span style="color:#ffd700">'+fromAddr+'</span></div>'+
+  '<div>To: <span style="color:#ffd700">'+to+'</span></div>'+
+  '<div>Value: <span style="color:#0f0">'+amt+' '+ch.toUpperCase()+'</span> ('+wei+' wei)</div>'+
+  '<div style="margin:4px 0;color:#888;font-size:10px">Sign this tx with your private key offline. Use ethers.js, web3.py, or a hardware wallet. Paste signed hex to broadcast.</div>'+
+  '<div style="margin:8px 0;padding:8px;background:#000;border:1px solid #333;border-radius:4px;font-size:10px;word-break:break-all;color:#ffd700">'+
+  'eth_sendRawTransaction params: {"from":"'+fromAddr+'","to":"'+to+'","value":"'+wei+'"}<br><br>'+
+  'Python signing:<br>'+
+  'from web3 import Web3<br>'+
+  'w3 = Web3(Web3.HTTPProvider("https://rpc.ankr.com/'+ch+'"))<br>'+
+  'signed = w3.eth.account.sign_transaction({<br>'+
+  '  "from": "'+fromAddr+'",<br>'+
+  '  "to": "'+to+'",<br>'+
+  '  "value": '+Math.floor(parseFloat(amt)*1e18)+',<br>'+
+  '  "gas": 21000,<br>'+
+  '  "gasPrice": w3.eth.gas_price,<br>'+
+  '  "nonce": w3.eth.get_transaction_count("'+fromAddr+'"),<br>'+
+  '  "chainId": 1<br>'+
+  '}, PRIVATE_KEY)<br>'+
+  'w3.eth.send_raw_transaction(signed.rawTransaction)'+
+  '</div>';
 }
 
 function copyText(t){navigator.clipboard.writeText(t);var x=document.getElementById('toast');x.textContent='Copied!';x.style.display='block';setTimeout(function(){x.style.display='none'},2000)}
