@@ -690,7 +690,7 @@ def api_send():
     gas_estimate_wei = 21000 * 50_000_000_000  # ~0.00105 ETH
     if live_bal_wei < value_wei + gas_estimate_wei:
         return jsonify({"ok": False,
-            "error": f"Insufficient funds: live balance is {live_bal_eth:.6f} ETH, need {float(value_eth):.6f} ETH + ~0.00105 ETH gas. Cache may be stale."}), 500
+            "error": f"Insufficient funds: live balance is {live_bal_eth:.6f} {chain.upper()}, need {float(value_eth):.6f} {chain.upper()} + ~0.00105 {chain.upper()} gas. Cache may be stale."}), 500
 
     # Get nonce (try each RPC)
     nonce = None
