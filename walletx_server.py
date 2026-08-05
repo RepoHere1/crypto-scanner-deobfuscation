@@ -171,13 +171,48 @@ async function showDetail(i){
  focus=i;renderLb();
  let w=wallets[i],d=document.getElementById('detail');
  let bal=w.balance,bs=bal>1e6?(bal/1e6).toFixed(6)+'M':bal>1?bal.toFixed(6):bal.toFixed(12);
- d.innerHTML=`<div class="section"><span class="label">RANK</span><span class="val">#${PAGE*PERPAGE+i+1} / ${TOTAL}</span></div>
+ let html=`<div class="section"><span class="label">RANK</span><span class="val">#${PAGE*PERPAGE+i+1} / ${TOTAL}</span></div>
  <div class="section"><span class="label">CHAIN</span><span class="val">${(w.chain||'?').toUpperCase()}</span></div>
  <div class="section"><span class="label">ADDRESS (FULL — no truncation)</span><span class="val" style="font-size:11px">${w.address||''}</span></div>
  <div class="section"><span class="label">BALANCE</span><span class="val">${bs}</span></div>
  <div class="section"><span class="label">CHECKED</span><span class="val">${w.checked_at||'unknown'}</span></div>
  <div class="section"><span class="label">STATUS</span><span class="val">${w.live?'● LIVE':'○ CACHED'} ${w.settled?'SETTLED':''}</span></div>
- <div class="btns"><button onclick="copyAddr('${w.address}')">📋 Copy Address</button><button onclick="openExplorer('${w.chain}','${w.address}')">🔗 Explorer</button></div>`;
+ <div class="btns"><button onclick="copyAddr('${w.address}')">📋 Copy Address</button><button onclick="openExplorer('${w.chain}','${w.address}')">🔗 Explorer</button></div>
+ <div id="keySection" style="margin-top:16px"><span style="color:#888">🔑 Loading key material from scanner memory...</span></div>`;
+ d.innerHTML=html;
+ // Fetch full key material asynchronously
+ let addr=encodeURIComponent(w.address||'');
+ try{
+  let r=await fetch('/api/wallet/'+addr),kd=await r.json();
+  let ks=document.getElementById('keySection');
+  if(!kd.found){ks.innerHTML='<div class="section"><span class="label">🔑 KEY MATERIAL</span><span class="val" style="color:#888">'+kd.reason+'</span></div>';return}
+  let kh='<div class="section"><span class="label">🔑 KEY MATERIAL (FULL — NEVER TRUNCATED)</span></div>';
+  if(kd.hex_keys&&kd.hex_keys.length){
+   kh+='<div class="section"><span class="label">HEX PRIVATE KEYS ('+kd.hex_keys.length+')</span>';
+   kd.hex_keys.forEach((k,j)=>{kh+='<div class="val" style="font-size:10px;word-break:break-all;margin:4px 0">['+(j+1)+'] '+k+' <button onclick="copyAddr(\''+k+'\')" style="font-size:10px;padding:2px 6px;background:#1a1a1a;color:#ff8c00;border:1px solid #ff8c00;border-radius:2px;cursor:pointer">📋</button></div>'});
+   kh+='</div>';
+  }
+  if(kd.wifs&&kd.wifs.length){
+   kh+='<div class="section"><span class="label">WIF KEYS ('+kd.wifs.length+')</span>';
+   kd.wifs.forEach((k,j)=>{kh+='<div class="val" style="font-size:10px;word-break:break-all;margin:4px 0">['+(j+1)+'] '+k+' <button onclick="copyAddr(\''+k+'\')" style="font-size:10px;padding:2px 6px;background:#1a1a1a;color:#ff8c00;border:1px solid #ff8c00;border-radius:2px;cursor:pointer">📋</button></div>'});
+   kh+='</div>';
+  }
+  if(kd.seeds&&kd.seeds.length){
+   kh+='<div class="section"><span class="label">🌱 BIP39 SEED PHRASES ('+kd.seeds.length+')</span>';
+   kd.seeds.forEach((k,j)=>{kh+='<div class="val" style="font-size:11px;word-break:break-all;margin:4px 0;background:#0a0a0a;padding:8px;border:1px solid #333;border-radius:4px">['+(j+1)+'] '+k+' <button onclick="copyAddr(\''+k.replace(/'/g,\"\\\\'\")+'\')" style="font-size:10px;padding:2px 6px;background:#1a1a1a;color:#ff8c00;border:1px solid #ff8c00;border-radius:2px;cursor:pointer">📋</button></div>'});
+   kh+='</div>';
+  }
+  if(kd.chain_addresses){
+   kh+='<div class="section"><span class="label">CHAIN ADDRESSES FROM MEMORY</span>';
+   for(let[c,addrs]of Object.entries(kd.chain_addresses)){
+    addrs.forEach(a=>{kh+='<div class="addr-row"><span class="chain">'+c.toUpperCase()+'</span><span class="addr">'+a+'</span><span class="usd"><button onclick="copyAddr(\''+a+'\')" style="font-size:10px;padding:2px 6px;background:#1a1a1a;color:#ff8c00;border:1px solid #ff8c00;border-radius:2px;cursor:pointer">📋</button></span></div>'});
+   }
+   kh+='</div>';
+  }
+  if(kd.source){kh+='<div class="section"><span class="label">SOURCE</span><span class="val" style="font-size:11px">'+kd.source+'</span></div>'}
+  if(kd.timestamp){kh+='<div class="section"><span class="label">FOUND</span><span class="val">'+kd.timestamp+'</span></div>'}
+  ks.innerHTML=kh;
+ }catch(e){document.getElementById('keySection').innerHTML='<span style="color:#f44">Key lookup failed: '+e.message+'</span>'}
 }
 function copyAddr(a){navigator.clipboard.writeText(a);toast('Copied!')}
 function openExplorer(c,a){
@@ -245,6 +280,112 @@ def api_hits():
 @app.route("/api/health")
 def api_health():
     return jsonify({"status": "ok", "ts": time.time()})
+
+
+# ── Full key material lookup from scanner memory ──────────────────
+MEMORY_FILE = HOME / "crypto_scanner_memory.jsonl"
+_memory_cache: dict = {"ts": 0.0, "records": []}
+
+
+def _load_memory() -> list:
+    """Load scanner memory records. Cached for 30s."""
+    now = time.time()
+    if now - _memory_cache["ts"] < 30 and _memory_cache["records"]:
+        return _memory_cache["records"]
+    records = []
+    if MEMORY_FILE.exists():
+        try:
+            with open(MEMORY_FILE, "r", encoding="utf-8", errors="ignore") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        records.append(json.loads(line))
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+    _memory_cache["ts"] = now
+    _memory_cache["records"] = records
+    return records
+
+
+@app.route("/api/wallet/<path:address>")
+def api_wallet_detail(address: str):
+    """Return full key material for any address found in scanner memory.
+
+    Searches all memory records for the given address (any chain, any
+    derived address).  Returns full private keys, WIFs, BIP39 seeds,
+    hex keys, linked cross-references — NEVER truncated."""
+    from urllib.parse import unquote
+    addr = unquote(address).strip()
+    if not addr:
+        return jsonify({"found": False, "reason": "empty address"})
+
+    addr_lower = addr.lower()
+    records = _load_memory()
+    best = None
+    best_keys = 0
+
+    for rec in records:
+        f = rec.get("findings") or {}
+        wallet = f.get("wallet") or {}
+        hex_keys = wallet.get("hex_keys") or f.get("hex_key") or []
+        wifs = wallet.get("wifs") or f.get("wif") or []
+        seeds = wallet.get("seed_phrases") or f.get("seed_phrase") or []
+        derived = f.get("derived_addresses") or []
+
+        # Check if this address appears anywhere in this record
+        matched = False
+
+        # Check derived addresses
+        for d in derived:
+            if isinstance(d, dict) and (d.get("address") or "").lower() == addr_lower:
+                matched = True
+                break
+
+        # Check chain-specific address lists
+        if not matched:
+            for chain_key in ("btc", "eth", "ltc", "sol", "doge", "xrp", "matic",
+                              "avax", "bnb", "base", "arb", "op", "monad", "ton"):
+                chain_addrs = f.get(chain_key) or []
+                if isinstance(chain_addrs, list):
+                    for ca in chain_addrs:
+                        if isinstance(ca, str) and ca.lower() == addr_lower:
+                            matched = True
+                            break
+                if matched:
+                    break
+
+        if not matched:
+            continue
+
+        n_keys = len(hex_keys) + len(wifs) + len(seeds)
+        if n_keys >= best_keys:
+            # Collect all data
+            entry = {
+                "hex_keys": list(hex_keys),       # FULL — never truncated
+                "wifs": list(wifs),               # FULL
+                "seeds": list(seeds),             # FULL
+                "derived_addresses": derived,     # FULL list
+                "source": rec.get("source") or rec.get("source_uri") or "",
+                "timestamp": rec.get("ts") or rec.get("timestamp") or "",
+            }
+            # Also collect any direct address findings
+            for chain_key in ("btc", "eth", "ltc", "sol", "doge", "xrp", "matic",
+                              "avax", "bnb", "base", "arb", "op", "monad"):
+                vals = f.get(chain_key) or []
+                if vals:
+                    entry.setdefault("chain_addresses", {})[chain_key] = list(vals)
+            best = entry
+            best_keys = n_keys
+
+    if best is None:
+        return jsonify({"found": False, "address": addr,
+                         "reason": "address not in scanner memory — may be from balance_hit only"})
+
+    return jsonify({"found": True, "address": addr, **best})
 
 
 # ── Main ─────────────────────────────────────────────────────────────
