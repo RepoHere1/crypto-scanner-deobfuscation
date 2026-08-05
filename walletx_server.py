@@ -242,6 +242,9 @@ load();
 @app.route("/")
 def index():
     from flask import Response
+    dash = HOME / "walletx_dashboard.html"
+    if dash.exists():
+        return Response(dash.read_text(encoding="utf-8"), mimetype="text/html")
     return Response(HTML, mimetype="text/html")
 
 
