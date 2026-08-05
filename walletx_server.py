@@ -299,6 +299,25 @@ def api_hits():
     return jsonify(db.get_recent_hits(limit=limit))
 
 
+@app.route("/api/scanner-status")
+def api_scanner_status():
+    """Return live scanner progress so the dashboard shows real-time activity."""
+    sf = HOME / "crypto_scanner_status.txt"
+    data = {"scanner_alive": False, "processed": 0, "findings": 0, "memory_mb": 0,
+            "queue": 0, "offset": 0, "status_age_sec": -1}
+    if sf.exists():
+        try:
+            for part in sf.read_text().strip().split(","):
+                if "=" in part:
+                    k, v = part.split("=", 1)
+                    data[k.strip()] = v.strip()
+            data["scanner_alive"] = True
+            data["status_age_sec"] = time.time() - sf.stat().st_mtime
+        except Exception:
+            pass
+    return jsonify(data)
+
+
 @app.route("/api/health")
 def api_health():
     return jsonify({"status": "ok", "ts": time.time()})

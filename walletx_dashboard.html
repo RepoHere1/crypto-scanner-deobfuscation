@@ -61,6 +61,7 @@ hdr .live{color:#0f0}
 <div class="stat" id="clock">--</div>
 </hdr>
 <div id="stats"></div>
+<div id="scannerBar" style="font-size:10px;color:#888;padding:4px 8px;margin-bottom:4px;background:#0a0a0a;border-radius:4px">Scanner: --</div>
 <div id="bar">
 <input type="text" id="q" placeholder="Search address fragment...">
 <select id="chainFilter"><option value="">All chains</option><option>ETH</option><option>MATIC</option><option>BTC</option><option>SOL</option><option>BNB</option><option>AVAX</option><option>BASE</option><option>ARB</option><option>OP</option><option>LTC</option><option>DOGE</option><option>XRP</option><option>MONAD</option></select>
@@ -315,8 +316,17 @@ function importKey(){
 function prevPage(){if(PAGE>0){PAGE--;load()}}
 function nextPage(){PAGE++;load()}
 document.addEventListener('keydown',function(e){if(e.key==='ArrowRight')nextPage();if(e.key==='ArrowLeft')prevPage()});
+function updateScannerBar(){
+ fetch('/api/scanner-status').then(function(r){return r.json()}).then(function(d){
+  var age=d.status_age_sec<60?Math.round(d.status_age_sec)+'s ago':Math.round(d.status_age_sec/60)+'m ago';
+  var alive=d.scanner_alive?'●':'○';
+  var color=d.status_age_sec<120?'#0f0':'#ffd700';
+  document.getElementById('scannerBar').innerHTML='<span style="color:'+color+'">'+alive+'</span> Scanner: '+d.processed+' processed | '+d.memory_mb+'MB | queue '+d.queue+' | '+age;
+ });
+}
 load();
 setInterval(load,10000);
+setInterval(updateScannerBar,5000);
 </script>
 </body>
 </html>
