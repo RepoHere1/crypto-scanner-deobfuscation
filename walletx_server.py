@@ -199,7 +199,11 @@ async function showDetail(i){
   }
   if(kd.seeds&&kd.seeds.length){
    kh+='<div class="section"><span class="label">🌱 BIP39 SEED PHRASES ('+kd.seeds.length+')</span>';
-   kd.seeds.forEach((k,j)=>{kh+='<div class="val" style="font-size:11px;word-break:break-all;margin:4px 0;background:#0a0a0a;padding:8px;border:1px solid #333;border-radius:4px">['+(j+1)+'] '+k+' <button onclick="copyAddr(\''+k.replace(/'/g,\"\\\\'\")+'\')" style="font-size:10px;padding:2px 6px;background:#1a1a1a;color:#ff8c00;border:1px solid #ff8c00;border-radius:2px;cursor:pointer">📋</button></div>'});
+   kd.seeds.forEach((k,j)=>{
+    let id='seed_'+j+'_'+Date.now();
+    window['_seed_'+id]=k;
+    kh+='<div class="val" style="font-size:11px;word-break:break-all;margin:4px 0;background:#0a0a0a;padding:8px;border:1px solid #333;border-radius:4px">['+(j+1)+'] '+k+' <button data-copy-id="seed_'+id+'" class="copyBtn" style="font-size:10px;padding:2px 6px;background:#1a1a1a;color:#ff8c00;border:1px solid #ff8c00;border-radius:2px;cursor:pointer">📋</button></div>';
+   });
    kh+='</div>';
   }
   if(kd.chain_addresses){
@@ -215,6 +219,7 @@ async function showDetail(i){
  }catch(e){document.getElementById('keySection').innerHTML='<span style="color:#f44">Key lookup failed: '+e.message+'</span>'}
 }
 function copyAddr(a){navigator.clipboard.writeText(a);toast('Copied!')}
+document.addEventListener('click',function(e){let b=e.target.closest('.copyBtn');if(b){let id=b.getAttribute('data-copy-id');if(id&&window['_seed_'+id]){navigator.clipboard.writeText(window['_seed_'+id]);toast('Copied!')}}})
 function openExplorer(c,a){
  let urls={ETH:`https://etherscan.io/address/${a}`,MATIC:`https://polygonscan.com/address/${a}`,BTC:`https://mempool.space/address/${a}`,SOL:`https://solscan.io/account/${a}`,BNB:`https://bscscan.com/address/${a}`,AVAX:`https://snowtrace.io/address/${a}`,BASE:`https://basescan.org/address/${a}`,ARB:`https://arbiscan.io/address/${a}`,OP:`https://optimistic.etherscan.io/address/${a}`,LTC:`https://litecoinspace.org/address/${a}`};
  window.open(urls[c.toUpperCase()]||urls.ETH,'_blank');
