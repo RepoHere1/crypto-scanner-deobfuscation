@@ -570,10 +570,20 @@ def validate_scanner_memory(memory_path: str = None) -> dict:
             except Exception:
                 continue
             f_data = rec.get("findings", {})
-            wallet = f_data.get("wallet", {}) if isinstance(f_data, dict) else {}
+            if not isinstance(f_data, dict):
+                continue
+            wallet = f_data.get("wallet", {}) if isinstance(f_data.get("wallet"), dict) else {}
 
-            # Support both plural and singular field names
-            for hk in (wallet.get("hex_keys") or wallet.get("hex_key") or []):
+            # Keys can be at findings.hex_key (singular, top-level) OR findings.wallet.hex_keys (plural)
+            hex_sources = []
+            for src in [wallet.get("hex_keys", []), wallet.get("hex_key", []),
+                        f_data.get("hex_key", []), f_data.get("hex_keys", [])]:
+                if isinstance(src, list):
+                    hex_sources.extend(src)
+                elif isinstance(src, str) and src:
+                    hex_sources.append(src)
+
+            for hk in hex_sources:
                 if isinstance(hk, str):
                     hk = hk.strip()
                     if hk and hk not in hex_keys:
@@ -584,13 +594,29 @@ def validate_scanner_memory(memory_path: str = None) -> dict:
                         if h and h not in hex_keys:
                             hex_keys[h] = rec.get("source", "unknown")
 
-            for wk in (wallet.get("wifs") or wallet.get("wif") or []):
+            wif_sources = []
+            for src in [wallet.get("wifs", []), wallet.get("wif", []),
+                        f_data.get("wif", []), f_data.get("wifs", [])]:
+                if isinstance(src, list):
+                    wif_sources.extend(src)
+                elif isinstance(src, str) and src:
+                    wif_sources.append(src)
+
+            for wk in wif_sources:
                 if isinstance(wk, str):
                     wk = wk.strip()
                     if wk and wk not in wif_keys:
                         wif_keys[wk] = rec.get("source", "unknown")
 
-            for sk in (wallet.get("seed_phrases") or wallet.get("seed_phrase") or []):
+            seed_sources = []
+            for src in [wallet.get("seed_phrases", []), wallet.get("seed_phrase", []),
+                        f_data.get("seed_phrase", []), f_data.get("seed_phrases", [])]:
+                if isinstance(src, list):
+                    seed_sources.extend(src)
+                elif isinstance(src, str) and src:
+                    seed_sources.append(src)
+
+            for sk in seed_sources:
                 if isinstance(sk, str):
                     sk = sk.strip()
                     if sk and sk not in seed_phrases:
