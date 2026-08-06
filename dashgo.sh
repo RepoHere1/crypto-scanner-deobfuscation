@@ -104,6 +104,11 @@ echo "[dashgo] stack ensure = background (not blocking UI)"
   if ! pgrep -f "stack_watchdog.sh" >/dev/null 2>&1; then
     _bg "$HOME_DIR/.run_pids/stack_watchdog.pid" "$HOME_DIR/watchdog.log" -- bash "$HOME_DIR/stack_watchdog.sh"
   fi
+  if ! pgrep -f "PoWo-dinosaurs_abandon_wealth.py" >/dev/null 2>&1; then
+    _bg "$HOME_DIR/.run_pids/powo_scanner.pid" "$HOME_DIR/powo_scanner.log" \
+      "ALCHEMY_API_KEY=${ALCHEMY_API_KEY}" -- python3 "$HOME_DIR/PoWo-dinosaurs_abandon_wealth.py"
+    echo "[dashgo] 🦖 PoWo dinosaurs scanner spawned — hunting abandoned PoW accounts (chunk-fed from paste_box.txt)"
+  fi
   termux-wake-lock >/dev/null 2>&1 || true
 ) >/dev/null 2>&1 &
 
