@@ -740,21 +740,30 @@ def render(spinner_char=""):
     bar = "=" * cols
     thin = "-" * cols
 
-    keep_info = read_pid_info(os.path.join(PID_DIR, "keepalive.pid"))
-    scan_info = read_pid_info(os.path.join(PID_DIR, "crypto_scanner.pid"))
-    adapt_info = read_pid_info(os.path.join(PID_DIR, "adaptive_scan.pid"))
-    mass_info = read_pid_info(os.path.join(PID_DIR, "mass_scan.pid"))
-    watch_info = read_pid_info(os.path.join(PID_DIR, "stack_watchdog.pid"))
-    stack_on_info = read_pid_info(os.path.join(PID_DIR, "stack_on.pid"))
+    # ── All dashgo services (PID file + pgrep fallback for every one) ──
+    keep_info    = read_pid_info(os.path.join(PID_DIR, "keepalive.pid"))
+    scan_info    = read_pid_info(os.path.join(PID_DIR, "crypto_scanner.pid"))
+    adapt_info   = read_pid_info(os.path.join(PID_DIR, "adaptive_scan.pid"))
+    mass_info    = read_pid_info(os.path.join(PID_DIR, "mass_scan.pid"))
+    watch_info   = read_pid_info(os.path.join(PID_DIR, "stack_watchdog.pid"))
+    paste_info   = read_pid_info(os.path.join(PID_DIR, "paste_watcher.pid"))
+    walletx_info = read_pid_info(os.path.join(PID_DIR, "walletx_server.pid"))
+    notify_info  = read_pid_info(os.path.join(PID_DIR, "notify_hits.pid"))
+    deob_info    = read_pid_info(os.path.join(PID_DIR, "deobfuscation_daemon.pid"))
+    powo_info    = read_pid_info(os.path.join(PID_DIR, "powo_scanner.pid"))
 
-    scanner_running = scan_info["alive"] or proc_running("crypto_scanner.py")
-    mass_running = (
-        mass_info["alive"]
-        or adapt_info["alive"]
-        or proc_running("mass_scan.py")
-        or proc_running("adaptive_throttler.py")
-    )
-    keep_running = keep_info["alive"] or proc_running("keepalive.py")
+    def _alive(info, pattern):
+        """PID file check OR pgrep — never lies about RUNNING."""
+        return bool(info.get("alive")) or proc_running(pattern)
+
+    scanner_running = _alive(scan_info, "crypto_scanner.py")
+    mass_running    = _alive(mass_info, "mass_scan.py") or _alive(adapt_info, "adaptive_throttler.py")
+    keep_running    = _alive(keep_info, "keepalive.py")
+    paste_running   = _alive(paste_info, "paste_box_watcher.py")
+    walletx_running = _alive(walletx_info, "walletx_server.py")
+    notify_running  = _alive(notify_info, "notify_hits.py")
+    deob_running    = _alive(deob_info, "deobfuscation_daemon.py")
+    powo_running    = _alive(powo_info, "PoWo-dinosaurs_abandon_wealth.py")
     dash_copies = count_dashboard_watches()
 
     status = parse_status()
@@ -798,11 +807,11 @@ def render(spinner_char=""):
         m_line += "  +mass_scan live"
     lines.append(m_line)
     lines.append(_proc_line("Watchdog", bool(watch_info.get("alive")), watch_info))
-    if stack_on_info.get("pid") is not None and not stack_on_info.get("alive"):
-        lines.append(
-            f"  {'stack_on.pid':16s}: {YELLOW}STALE PID{RESET}  "
-            f"pid {stack_on_info['pid']}  file dead"
-        )
+    lines.append(_proc_line("Paste watcher", paste_running, paste_info))
+    lines.append(_proc_line("WalletX server", walletx_running, walletx_info))
+    lines.append(_proc_line("Notify hits", notify_running, notify_info))
+    lines.append(_proc_line("Deobfuscation", deob_running, deob_info))
+    lines.append(_proc_line("PoWo scanner", powo_running, powo_info))
     if dash_copies > 1:
         lines.append(
             f"  {'Dash copies':16s}: {YELLOW}{dash_copies}{RESET}  "
