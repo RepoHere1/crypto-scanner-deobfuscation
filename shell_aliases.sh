@@ -19,6 +19,8 @@ alias dashw='python3 "$HOME/dashboard.py" --watch'
 alias dashgo='bash "$HOME/dashgo.sh"'
 alias dashall='bash "$HOME/dashgo.sh"'
 
+alias kalshilive='python3 "$HOME/the_ease.py" --live'
+
 alias walletview='python3 "$HOME/wallet_view.py" --watch --page-size 8 --page-sec 8'
 alias walletall='python3 "$HOME/wallet_view.py" --once --all --cached'
 alias walletpage='python3 "$HOME/wallet_view.py" --once --cached --page'
@@ -35,9 +37,10 @@ alias keepstop='python3 "$HOME/keepalive.py" --stop'
 # Forensic static examiner (does NOT replace walletview rotator)
 alias walletforensic='python3 "$HOME/wallet_forensic.py" --idle-sec 120 --tick-sec 0.35 --batch 24'
 alias wforensic='python3 "$HOME/wallet_forensic.py" --idle-sec 120 --tick-sec 0.35 --batch 24'
-# ── WalletX TUI Dashboard (NEW — orange/black/white theme, buttons, animations) ──
-alias walletx='python3 "$HOME/walletx_tui.py" --funded-only --batch 24'
-alias walletxall='python3 "$HOME/walletx_tui.py" --batch 24'
+# ── WalletX TUI Dashboard (keyed-only by default, funded-only, orange/black/white) ──
+alias walletx='python3 "$HOME/walletx_tui.py" --funded-only --keyed-only --batch 24'
+alias walletxall='python3 "$HOME/walletx_tui.py" --no-keyed-only --batch 24'
+alias walletxkeyed='python3 "$HOME/walletx_tui.py" --funded-only --keyed-only --batch 24'
 alias walletxlegacy='python3 "$HOME/wallet_forensic.py" --funded-only --idle-sec 120 --tick-sec 0.35 --batch 24'
 # Android device wallet scanner
 alias walletscan='python3 "$HOME/android_wallet_scanner.py"'
