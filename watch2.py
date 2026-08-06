@@ -48,11 +48,11 @@ CYAN = "\033[96m"
 RESET = "\033[0m"
 
 SERVICES = [
-    ("mass_scan", "mass_scan.pid"),
-    ("adaptive", "adaptive_scan.pid"),
-    ("crypto", "crypto_scanner.pid"),
-    ("deobf", "deobfuscation_daemon.pid"),
-    ("watchdog", "stack_watchdog.pid"),
+    ("mass_scan", "mass_scan.pid", r"mass_scan\.py"),
+    ("adaptive", "adaptive_scan.pid", r"adaptive_throttler\.py"),
+    ("crypto", "crypto_scanner.pid", r"crypto_scanner\.py"),
+    ("deobf", "deobfuscation_daemon.pid", r"deobfuscation_daemon\.py"),
+    ("watchdog", "stack_watchdog.pid", r"stack_watchdog\.sh|perpetual_watchdog"),
 ]
 
 
@@ -61,15 +61,26 @@ def clear():
     sys.stdout.flush()
 
 
-def is_running(pid_file: Path) -> tuple[bool, str]:
-    if not pid_file.exists():
-        return False, "-"
-    try:
-        pid = pid_file.read_text().strip().splitlines()[0].strip()
-        os.kill(int(pid), 0)
-        return True, pid
-    except Exception:
-        return False, "?"
+def is_running(pid_file: Path, pattern: str = "") -> tuple[bool, str]:
+    if pid_file.exists():
+        try:
+            pid = pid_file.read_text().strip().splitlines()[0].strip()
+            os.kill(int(pid), 0)
+            return True, pid
+        except Exception:
+            pass
+    if pattern:
+        # Fall back to live process lookup when the pid file is stale/absent.
+        try:
+            import subprocess
+            r = subprocess.run(["pgrep", "-f", pattern],
+                               capture_output=True, text=True, timeout=5)
+            pids = [p for p in r.stdout.split() if p.isdigit()]
+            if pids:
+                return True, pids[0]
+        except Exception:
+            pass
+    return False, "-"
 
 
 def fsize(path: Path) -> str:
@@ -181,8 +192,8 @@ def render(show_wallet: bool = True) -> str:
     lines.append(f"{BOLD}  SERVICES{RESET}")
     lines.append(thin)
     any_up = False
-    for name, pf in SERVICES:
-        up, pid = is_running(PID_DIR / pf)
+    for name, pf, pat in SERVICES:
+        up, pid = is_running(PID_DIR / pf, pat)
         any_up = any_up or up
         state = f"{GREEN}RUN{RESET}" if up else f"{RED}OFF{RESET}"
         lines.append(f"  {name:10} {state}  pid={pid}")
