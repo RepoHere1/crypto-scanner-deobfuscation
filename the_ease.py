@@ -63,10 +63,28 @@ class Game:
     def underdog_price(self) -> float:
         return self.no_ask if self.favored_side == "yes" else self.yes_ask
 
+    volume: float = 0.0
+
+    @property
+    def mid_price(self) -> float:
+        """Market-implied probability midpoint."""
+        return (self.yes_ask + self.no_ask) / 2
+
     @property
     def odds_gap(self) -> float:
         """How close are the odds?  Smaller = more contested game."""
         return abs(self.yes_ask - self.no_ask)
+
+    @property
+    def underdog_edge(self) -> float:
+        """How much potential upside the underdog has (0.5 - underdog_price)."""
+        return max(0.0, 0.5 - self.underdog_price)
+
+    @property
+    def liquidity_score(self) -> float:
+        """Combined bid/ask spread depth as a signal quality measure."""
+        spread = abs(self.yes_ask - self.yes_bid) + abs(self.no_ask - self.no_bid)
+        return max(0.0, 2.0 - spread) if spread < 2.0 else 0.0
 
     def pick(self, side: str) -> tuple[str, float]:
         if side == "yes":
@@ -199,6 +217,40 @@ def discover_by_category() -> tuple[str, list[Game], dict[str, int], bool]:
     return best_cat, games, counts, True
 
 
+# ── SmartPicker: data-driven underdog selection ─────────────────────────────
+
+class SmartPicker:
+    """Picks underdogs using live market signals instead of blind closeness ranking.
+
+    Scores each game on:
+      - underdog_edge:   how far below 50¢ the underdog is (more upside)
+      - liquidity_score: tight bid/ask spread = quality signal
+      - mid_price:       adjust for market direction
+
+    Returns the top N games ranked by composite score.
+    """
+
+    @staticmethod
+    def score(game: Game) -> float:
+        """Composite score — higher = better underdog bet."""
+        edge = game.underdog_edge         # 0.0 – 0.5, bigger = more upside
+        liquidity = game.liquidity_score   # 0.0 – 2.0, bigger = tighter market
+        mid = game.mid_price               # market-implied probability
+
+        # Boost games where the market leans slightly toward "no" (underdog=yes)
+        # or slightly toward "yes" (underdog=no) — contrarian edge
+        contrarian = abs(mid - 0.45)  # peak at extreme market conviction
+
+        return (edge * 3.0 + liquidity * 1.5 + contrarian * 0.5) / (game.odds_gap + 0.02)
+
+    @classmethod
+    def pick_underdogs(cls, games: list[Game], n: int = 5) -> list[tuple[int, Game, float]]:
+        """Return (rank, game, score) for the top N underdog candidates."""
+        scored = [(i, g, cls.score(g)) for i, g in enumerate(games)]
+        scored.sort(key=lambda x: -x[2])
+        return [(rank + 1, g, s) for rank, (_, g, s) in enumerate(scored[:n])]
+
+
 # ── Combo ticket ──────────────────────────────────────────────────────────
 
 @dataclass
@@ -220,17 +272,14 @@ class ComboTicket:
 
 
 class TheEase:
-    """THE-EASE: 5 combo tickets, cycling the underdog through the closest-odds games.
+    """THE-EASE with SmartPicker: 5 combo tickets, data-driven underdog selection.
 
-    For a category with N games (N ≥ 4):
-      1. Rank games by |yes_ask - no_ask| ascending (closest odds first).
-      2. Combo 1: all favorites, but game at rank 1 → underdog.
-      3. Combo 2: all favorites, but game at rank 2 → underdog.
-      4. … repeat through rank 5.
-      5. Each combo costs $1.00 total, split equally across all N legs.
+    Uses live market signals (underdog edge, liquidity, price direction)
+    instead of simple odds-gap ranking to pick which games get the underdog leg.
+    Each combo costs $1.00 total, split equally across all N legs.
     """
 
-    CLOSENESS_LABELS = ["CLOSEST", "2ND-CLOSEST", "3RD-CLOSEST", "4TH-CLOSEST", "5TH-CLOSEST"]
+    PICK_LABELS = ["TOP-PICK", "2ND-PICK", "3RD-PICK", "4TH-PICK", "5TH-PICK"]
 
     def __init__(self, games: list[Game]):
         if len(games) < 4:
@@ -239,14 +288,13 @@ class TheEase:
         self.tickets: list[ComboTicket] = []
 
     def run(self) -> list[ComboTicket]:
-        ranked = sorted(self.games, key=lambda g: g.odds_gap)
-        n_tickets = min(5, len(ranked))
         n_legs = len(self.games)
+        picks = SmartPicker.pick_underdogs(self.games, n=5)
+        picked_games = {g for _, g, _ in picks}
 
         tickets = []
-        for i in range(n_tickets):
-            underdog_game = ranked[i]
-            label = self.CLOSENESS_LABELS[i]
+        for rank, underdog_game, score in picks:
+            label = self.PICK_LABELS[rank - 1]
 
             legs = []
             for g in self.games:
@@ -269,14 +317,16 @@ class TheEase:
                     "role": role,
                     "icon": icon,
                     "odds_gap": g.odds_gap,
+                    "underdog_edge": round(g.underdog_edge, 3),
+                    "score": round(score, 3) if g is underdog_game else 0,
                     "close_time": g.close_time,
                 })
 
             cost_per = round(1.00 / n_legs, 4)
             tickets.append(ComboTicket(
-                number=i + 1,
-                closeness_rank=i + 1,
-                label=label,
+                number=rank,
+                closeness_rank=rank,
+                label=f"{label}  (score:{score:.2f})",
                 legs=legs,
                 total_cost=1.00,
                 cost_per_leg=cost_per,
@@ -325,13 +375,13 @@ def halftime_gate(games: list[Game]) -> tuple[bool, str]:
 
     halftime_pst = halftime - timedelta(hours=7)  # UTC → PST (UTC-7)
     if now >= halftime:
-        return True, f"✓ Halftime passed ({halftime_pst.strftime('%H:%M PST')})"
+        return True, f"✓ Halftime passed ({halftime_pst.strftime('%a %b %d %H:%M PST')})"
     else:
         wait_secs = (halftime - now).total_seconds()
         if wait_secs < 60:
             return False, f"⏳ {int(wait_secs)}s until halftime"
         wait_min = int(wait_secs / 60)
-        return False, f"⏳ ~{wait_min}min until halftime ({halftime_pst.strftime('%H:%M PST')})"
+        return False, f"⏳ ~{wait_min}min until halftime ({halftime_pst.strftime('%a %b %d %H:%M PST')})"
 
 
 def wait_until_8am() -> None:
@@ -545,6 +595,16 @@ def save_ease_state(state: dict) -> None:
         json.dump(state, f, indent=2, default=str)
 
 
+def _pst_display(iso_str: str) -> str:
+    """Convert UTC ISO timestamp string to PST display: '2026-08-06 11:45 PST'."""
+    try:
+        dt = datetime.fromisoformat(iso_str.replace("Z", "+00:00"))
+        pst = dt - timedelta(hours=7)
+        return pst.strftime('%Y-%m-%d %H:%M PST')
+    except (ValueError, TypeError):
+        return iso_str[:19] if iso_str else "?"
+
+
 def record_daily_run(category: str, games_count: int, tickets: list[ComboTicket],
                      live: bool) -> dict:
     """Record today's run in the state file.  Returns updated state."""
@@ -571,18 +631,48 @@ def record_daily_run(category: str, games_count: int, tickets: list[ComboTicket]
     return state
 
 
-def print_running_total():
-    """Print running total across all days — survives reboots."""
+def print_running_total(live_only: bool | None = None):
+    """Print running total — survives reboots.
+
+    live_only=True  → show only LIVE runs
+    live_only=False → show only DRY runs
+    live_only=None  → show ALL runs (--history mode)
+    """
     state = load_ease_state()
     runs = state.get("runs", {})
     br = load_bankroll()
 
+    mode_label = ""
+    if live_only is True:
+        mode_label = f"  [{RD}LIVE ONLY{R}]"
+    elif live_only is False:
+        mode_label = f"  [{CY}DRY ONLY{R}]"
+
     print(f"\n  {B}{WH}╔══════════════════════════════════════════════════════════════╗{R}")
     print(f"  {B}{WH}║  KALSHI-COMBO — RUNNING TOTAL  (persists across reboots)         ║{R}")
-    print(f"  {B}{WH}╚══════════════════════════════════════════════════════════════╝{R}\n")
+    print(f"  {B}{WH}╚══════════════════════════════════════════════════════════════╝{R}{mode_label}\n")
 
     if not runs:
         print(f"  {DIM}No runs recorded yet.{R}\n")
+        return
+
+    # Filter by mode
+    filtered = {}
+    for day, r in runs.items():
+        is_live = r.get("live", False)
+        if live_only is None or is_live == live_only:
+            filtered[day] = r
+
+    if not filtered:
+        tag = "LIVE" if live_only else "DRY" if live_only is False else ""
+        print(f"  {DIM}No {tag} runs recorded yet.{R}\n")
+        # Still show bankroll
+        bal = br["balance"]
+        bal_color = GR if bal >= 50 else YE if bal >= 20 else RD
+        started = br.get("started_at", "?")[:10]
+        print(f"  {B}Bankroll:{R}    {bal_color}${bal:,.2f}{R}  (started {started})")
+        print(f"  {B}Total spent:{R} ${br.get('total_spent', 0):,.2f}")
+        print()
         return
 
     print(f"  {B}{'DATE':<12s} {'CAT':<10s} {'GAMES':>5s} {'TIX':>4s} {'SPENT':>7s} {'MODE':>8s}{R}")
@@ -593,8 +683,8 @@ def print_running_total():
     total_live = 0
     total_dry = 0
 
-    for day in sorted(runs.keys()):
-        r = runs[day]
+    for day in sorted(filtered.keys()):
+        r = filtered[day]
         cat = r.get("category", "?")
         games = r.get("games", 0)
         tix = r.get("combos", r.get("ticket_count", 0))
@@ -735,7 +825,7 @@ def run_once(live: bool, skip_gate: bool,
 
     # Record in state
     record_daily_run(category, len(games), tickets, live)
-    print_running_total()
+    print_running_total(live_only=live)
 
     return 0
 
@@ -746,12 +836,13 @@ def daemon_loop(live: bool, poll_secs: int = 60) -> int:
 
     Survives reboots via .ease_state.json — if today already ran, skip.
     """
+    mode_badge = f"{RD}LIVE{R}" if live else f"{CY}DRY-RUN{R}"
     print(f"\n  {B}{WH}╔══════════════════════════════════════════════════════════════╗{R}")
-    print(f"  {B}{WH}║  KALSHI-COMBO  (THE-EASE)  —  {datetime.now().strftime('%Y-%m-%d %H:%M')}  (perpetual)          ║{R}")
+    print(f"  {B}{WH}║  KALSHI-COMBO  {mode_badge}  {datetime.now().strftime('%Y-%m-%d %H:%M')}  (perpetual)         ║{R}")
     print(f"  {B}{WH}╚══════════════════════════════════════════════════════════════╝{R}")
 
     # Show running total on startup
-    print_running_total()
+    print_running_total(live_only=live)
 
     # ── Perpetual outer loop ──────────────────────────────────────────
     while True:
@@ -763,7 +854,7 @@ def daemon_loop(live: bool, poll_secs: int = 60) -> int:
             state = load_ease_state()
             td = date.today().isoformat()
             run = state["runs"][td]
-            print(f"  {GR}✓ TODAY COMPLETE{R} — {run['status']} run at {run['placed_at'][:19]}")
+            print(f"  {GR}✓ TODAY COMPLETE{R} — {run['status']} run at {_pst_display(run['placed_at'])}")
             print(f"  {DIM}Daemon idle.  Waiting for midnight…{R}\n")
 
             # Sleep in 1-hour chunks until past midnight
@@ -781,7 +872,8 @@ def daemon_loop(live: bool, poll_secs: int = 60) -> int:
         # Wait for 8 AM today
         wait_until_8am()
 
-        print(f"\n  {GR}▶  DAEMON ACTIVE{R} — polling Kalshi every {poll_secs}s\n")
+        mode_tag = f"{RD}LIVE{R}" if live else f"{CY}DRY-RUN{R}"
+        print(f"\n  {GR}▶  DAEMON ACTIVE  [{mode_tag}]{R} — polling Kalshi every {poll_secs}s\n")
 
         # ── Polling loop for today ──────────────────────────────────
         fail_streak = 0
@@ -791,7 +883,7 @@ def daemon_loop(live: bool, poll_secs: int = 60) -> int:
                 state = load_ease_state()
                 td2 = date.today().isoformat()
                 run = state["runs"][td2]
-                print(f"\n  {GR}✓ RUN RECORDED{R} — {run['status']} ({run['placed_at'][:19]})")
+                print(f"\n  {GR}✓ RUN RECORDED{R} — {run['status']} ({_pst_display(run['placed_at'])})")
                 print(f"  {DIM}Done for today.  Will wait for midnight.{R}\n")
                 break  # exit polling loop → outer loop checks today_already_ran
 
@@ -928,7 +1020,7 @@ def main():
 
     # Record run
     record_daily_run(category, len(games), tickets, live)
-    print_running_total()
+    print_running_total(live_only=live)
 
     # Loop mode — perpetual: run when gate opens, then wait for tomorrow
     if args.loop > 0 and not (live and ready):
@@ -967,7 +1059,7 @@ def main():
                     print(f"  {B}Bankroll:{R} {bc2}${br2['balance']:,.2f}{R}")
 
                 record_daily_run(category2, len(games2), tickets2, live)
-                print_running_total()
+                print_running_total(live_only=live)
                 # Perpetual: wait for midnight, then re-enter loop for tomorrow
                 td_today = date.today().isoformat()
                 print(f"\n  {DIM}Loop: waiting for midnight to reset for tomorrow…{R}")
@@ -1035,7 +1127,7 @@ def main():
                       f"{B}Cost:{R} ${total:.2f}")
                 print(f"  {B}Bankroll:{R} {bc}${br['balance']:,.2f}{R}")
             record_daily_run(category, len(games), tickets, live)
-            print_running_total()
+            print_running_total(live_only=live)
 
     return 0
 
