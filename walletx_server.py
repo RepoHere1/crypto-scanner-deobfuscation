@@ -1542,6 +1542,268 @@ def api_balance_live():
     return jsonify(result)
 
 
+# ── Vault API ───────────────────────────────────────────────────────
+VAULT_DB = HOME / "wallets_forever.db"
+
+
+def _vault_conn():
+    import sqlite3
+    c = sqlite3.connect(str(VAULT_DB), timeout=10)
+    c.execute("""CREATE TABLE IF NOT EXISTS wallets (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        key_type TEXT NOT NULL,
+        key_value TEXT NOT NULL,
+        address TEXT,
+        chain TEXT,
+        balance REAL DEFAULT 0,
+        balance_checked_at TEXT,
+        proof_verified INTEGER DEFAULT 0,
+        imported_at TEXT NOT NULL
+    )""")
+    c.execute("""CREATE UNIQUE INDEX IF NOT EXISTS idx_wallets_key
+        ON wallets(key_type, key_value)""")
+    c.commit()
+    return c
+
+
+@app.route("/api/vault/import", methods=["POST"])
+def api_vault_import():
+    """Bulk import keys — auto-detect BIP39/hex/WIF/PEM, derive addresses, check balances."""
+    try:
+        body = request.get_json(force=True, silent=True) or {}
+    except Exception:
+        body = {}
+    raw = (body.get("raw") or "").strip()
+    if not raw:
+        return _api_error("No key data provided", 400)
+
+    import re, threading, queue
+    from datetime import datetime, timezone
+
+    # ── Extract key candidates ──────────────────────────────────
+    # Split by whitespace, newlines, commas, semicolons
+    tokens = re.split(r'[\s,;]+', raw)
+    # Also look for PEM blocks
+    pem_blocks = re.findall(r'-----BEGIN[^-]*PRIVATE KEY-----.*?-----END[^-]*PRIVATE KEY-----', raw, re.DOTALL)
+    tokens = [t for t in tokens if t] + pem_blocks
+
+    candidates: list[dict] = []
+    seen = set()
+
+    # BIP39 wordlist for detection
+    bip39_words = None
+    try:
+        from mnemonic import Mnemonic
+        bip39_words = frozenset(Mnemonic("english").wordlist)
+    except Exception:
+        bip39_words = frozenset()
+
+    for tok in tokens:
+        tok = tok.strip().strip('"').strip("'")
+        if not tok or tok in seen:
+            continue
+        seen.add(tok)
+
+        kt = None
+        # PEM
+        if tok.startswith("-----BEGIN") and "PRIVATE KEY" in tok:
+            kt = "pem"
+        # WIF (base58, ~51-52 chars, starts with 5/K/L)
+        elif re.match(r'^[5KL][1-9A-HJ-NP-Za-km-z]{50,51}$', tok):
+            kt = "wif"
+        # Hex private key (64 chars)
+        elif re.match(r'^(0x)?[a-fA-F0-9]{64}$', tok.replace("0x", "")):
+            kt = "hex"
+        # BIP39 seed phrase (12/15/18/21/24 words)
+        elif bip39_words:
+            words = tok.lower().split()
+            if len(words) in (12, 15, 18, 21, 24) and all(w in bip39_words for w in words):
+                kt = "seed"
+        # Raw bytes hex (any length divisible by 2)? Skip.
+        else:
+            continue
+
+        candidates.append({"type": kt, "value": tok})
+
+    if not candidates:
+        return jsonify({"ok": True, "found": 0, "imported": 0, "funded": 0, "empty": 0,
+                        "errors": 0, "samples": [], "message": "No valid keys found in input"})
+
+    # ── Derive addresses and check balances ─────────────────────
+    import crypto_scanner as cs
+    now_utc = datetime.now(timezone.utc).isoformat()
+    results: list[dict] = []
+    imported = 0
+    funded = 0
+    empty = 0
+    errs = 0
+
+    conn = _vault_conn()
+
+    for cand in candidates:
+        try:
+            kt = cand["type"]
+            kv = cand["value"]
+            addresses: dict[str, str] = {}
+
+            if kt == "hex":
+                hk = kv.lower().replace("0x", "")
+                if len(hk) != 64:
+                    continue
+                raw_bytes = bytes.fromhex(hk)
+                addresses = cs.priv_to_addresses(raw_bytes) or {}
+            elif kt == "wif":
+                pk = cs.wif_to_priv_bytes(kv)
+                if pk:
+                    addresses = cs.priv_to_addresses(pk) or {}
+            elif kt == "seed":
+                addresses = cs.seed_to_addresses(kv) or {}
+            elif kt == "pem":
+                # Extract raw key bytes from PEM
+                import base64
+                b64 = kv.replace("-----BEGIN", "").replace("PRIVATE KEY-----", "")
+                b64 = b64.replace("-----END", "").replace("-----", "")
+                b64 = re.sub(r'\s+', '', b64)
+                try:
+                    raw_bytes = base64.b64decode(b64)
+                    # Try to extract the 32-byte key (usually last 32 bytes for secp256k1)
+                    if len(raw_bytes) >= 32:
+                        raw_bytes = raw_bytes[-32:]
+                    addresses = cs.priv_to_addresses(raw_bytes) or {}
+                except Exception:
+                    errs += 1
+                    continue
+
+            if not addresses:
+                errs += 1
+                continue
+
+            # Check balance for each derived address
+            for chain_name, addr in addresses.items():
+                if not addr:
+                    continue
+                bal = 0.0
+                try:
+                    rec = cs.get_balance(chain_name, addr, force=False)
+                    bal = float(rec.get("balance", 0) or 0)
+                except Exception:
+                    pass
+
+                proof_ok = 1  # We derived the address from the key = proof
+
+                # Upsert into vault
+                try:
+                    conn.execute(
+                        """INSERT OR REPLACE INTO wallets
+                        (key_type, key_value, address, chain, balance, balance_checked_at, proof_verified, imported_at)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                        (kt, kv, addr, chain_name, round(bal, 12), now_utc, proof_ok, now_utc),
+                    )
+                    conn.commit()
+                except Exception:
+                    pass
+
+                imported += 1
+                if bal > 1e-12:
+                    funded += 1
+                else:
+                    empty += 1
+
+                results.append({
+                    "type": kt,
+                    "preview": kv[:20] + ("…" if len(kv) > 20 else ""),
+                    "address": addr,
+                    "chain": chain_name,
+                    "balance": round(bal, 8),
+                    "funded": bal > 1e-12,
+                })
+
+        except Exception:
+            errs += 1
+            continue
+
+    conn.close()
+
+    return jsonify({
+        "ok": True,
+        "found": len(candidates),
+        "imported": imported,
+        "funded": funded,
+        "empty": empty,
+        "errors": errs,
+        "samples": results[:20],
+    })
+
+
+@app.route("/api/vault/list")
+def api_vault_list():
+    """List all keys in the forever vault."""
+    try:
+        conn = _vault_conn()
+        rows = conn.execute(
+            "SELECT id, key_type, key_value, address, chain, balance, proof_verified, imported_at "
+            "FROM wallets ORDER BY balance DESC, imported_at DESC LIMIT 500"
+        ).fetchall()
+        conn.close()
+        out = []
+        for r in rows:
+            out.append({
+                "id": r[0], "key_type": r[1], "key_value": r[2],
+                "address": r[3], "chain": r[4], "balance": r[5],
+                "proof_verified": bool(r[6]), "imported_at": r[7],
+            })
+        return jsonify({"rows": out, "total": len(out)})
+    except Exception as e:
+        return _api_error(str(e), 500)
+
+
+@app.route("/api/vault/stats")
+def api_vault_stats():
+    """Vault summary stats."""
+    try:
+        conn = _vault_conn()
+        total = conn.execute("SELECT COUNT(*) FROM wallets").fetchone()[0]
+        funded = conn.execute("SELECT COUNT(*) FROM wallets WHERE balance > 1e-12").fetchone()[0]
+        verified = conn.execute("SELECT COUNT(*) FROM wallets WHERE proof_verified = 1").fetchone()[0]
+        conn.close()
+        return jsonify({"total": total, "funded": funded, "verified": verified})
+    except Exception as e:
+        return _api_error(str(e), 500)
+
+
+@app.route("/api/vault/delete", methods=["POST"])
+def api_vault_delete():
+    """Delete a single key from the vault."""
+    try:
+        body = request.get_json(force=True, silent=True) or {}
+    except Exception:
+        body = {}
+    kid = body.get("id")
+    if not kid:
+        return _api_error("Missing id", 400)
+    try:
+        conn = _vault_conn()
+        conn.execute("DELETE FROM wallets WHERE id = ?", (int(kid),))
+        conn.commit()
+        conn.close()
+        return jsonify({"ok": True})
+    except Exception as e:
+        return _api_error(str(e), 500)
+
+
+@app.route("/api/vault/clear", methods=["POST"])
+def api_vault_clear():
+    """Delete ALL keys from the vault."""
+    try:
+        conn = _vault_conn()
+        conn.execute("DELETE FROM wallets")
+        conn.commit()
+        conn.close()
+        return jsonify({"ok": True})
+    except Exception as e:
+        return _api_error(str(e), 500)
+
+
 # ── Main ─────────────────────────────────────────────────────────────
 
 def import_existing_cache():

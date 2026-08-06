@@ -4,366 +4,611 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,user-scalable=no">
 <meta name="apple-mobile-web-app-capable" content="yes">
-<meta name="mobile-web-app-capable" content="yes">
-<meta name="theme-color" content="#000000">
-<title>WalletX</title>
+<meta name="theme-color" content="#0d1117">
+<title>WalletX · Vault</title>
 <style>
+/* ══════════════════════════════════════════════════════════════
+   WALLETX — Replit Dark Theme · Orange Accents · Card Layout
+   ══════════════════════════════════════════════════════════════ */
+:root {
+  --bg:        #0d1117;
+  --surface:   #161b22;
+  --card:      #1a1e27;
+  --border:    #30363d;
+  --text:      #e6edf3;
+  --dim:       #8b949e;
+  --orange:    #ff8c00;
+  --orange-bg: #2a1a00;
+  --green:     #3fb950;
+  --red:       #f85149;
+  --blue:      #58a6ff;
+  --gold:      #d2991d;
+  --radius:    8px;
+}
 *{margin:0;padding:0;box-sizing:border-box}
-body{background:#000;color:#fff;font:14px/1.5 monospace;overflow-x:hidden}
-#app{max-width:100%;margin:0 auto;padding:8px}
-hdr{display:flex;align-items:center;gap:12px;padding:12px 8px;border-bottom:2px solid #ff8c00;margin-bottom:8px;flex-wrap:wrap}
-hdr .logo{font-size:22px;font-weight:bold;color:#ff8c00}
-hdr .stat{font-size:12px;color:#888}
-hdr .stat .val{color:#ffd700}
-hdr .live{color:#0f0}
-#stats{display:flex;gap:16px;flex-wrap:wrap;padding:8px;background:#111;border-radius:4px;margin-bottom:8px}
-#stats .s{font-size:11px;color:#888}
-#stats .s .n{color:#ffd700;font-weight:bold}
-#bar{display:flex;gap:8px;padding:8px 0;flex-wrap:wrap}
-#bar input,#bar select,#bar button{padding:8px 12px;background:#1a1a1a;color:#fff;border:1px solid #333;border-radius:4px;font:inherit}
-#bar input{flex:1;min-width:200px}
-#bar button{background:#ff8c00;color:#000;font-weight:bold;border:none;cursor:pointer}
-#main{display:flex;gap:8px;height:calc(100vh - 200px)}
-#lb{flex:1;overflow-y:auto;border:1px solid #333;border-radius:4px;background:#0a0a0a;min-width:280px}
-#dt{flex:1;overflow-y:auto;border:1px solid #333;border-radius:4px;background:#0a0a0a;min-width:280px;padding:12px}
-.wal{padding:8px 12px;border-bottom:1px solid #1a1a1a;cursor:pointer;display:flex;gap:8px;align-items:center;font-size:13px}
-.wal:hover{background:#1a1a1a}
-.wal.on{background:#2a1a00;border-left:3px solid #ff8c00}
-.wal .r{color:#ff8c00;font-weight:bold;min-width:32px}
-.wal .c{color:#0af;min-width:40px;font-size:11px}
-.wal .bal{color:#0f0;text-align:right;min-width:100px}
-.wal .adr{color:#999;font-size:11px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:200px}
-#dt .sec{margin-bottom:16px}
-#dt .lbl{color:#ff8c00;font-weight:bold;display:block;margin-bottom:4px}
-#dt .val{word-break:break-all;font-size:13px;line-height:1.6;color:#ffd700}
-#dt .btns{display:flex;gap:8px;flex-wrap:wrap;margin-top:8px}
-#dt .btns button{padding:6px 12px;background:#1a1a1a;color:#ff8c00;border:1px solid #ff8c00;border-radius:4px;cursor:pointer;font:inherit;font-size:12px}
-#dt .btns button:hover{background:#2a1a00}
-#key pre{white-space:pre-wrap;word-break:break-all;font-size:10px;color:#ffd700;background:#0a0a0a;padding:8px;border:1px solid #333;border-radius:4px;margin:4px 0}
-.nav{display:flex;gap:8px;justify-content:center;padding:12px}
-.nav button{padding:10px 24px;background:#ff8c00;color:#000;font-weight:bold;border:none;border-radius:4px;cursor:pointer;font:inherit;font-size:14px}
-.nav button:disabled{opacity:.4}
-.nav .pg{color:#888;font-size:13px;align-self:center}
-#toast{position:fixed;bottom:20px;right:20px;background:#ff8c00;color:#000;padding:12px 20px;border-radius:4px;font-weight:bold;display:none;z-index:99}
-#err{color:#f44;padding:8px}
-@media(max-width:768px){#main{flex-direction:column;height:auto}#lb,#dt{max-height:50vh}}
+body{
+  background:var(--bg);color:var(--text);
+  font:13px/1.5 system-ui,-apple-system,'Segoe UI',sans-serif;
+  overflow-x:hidden;min-height:100vh;
+}
+#app{max-width:1100px;margin:0 auto;padding:12px}
+
+/* Header */
+header{
+  display:flex;align-items:center;gap:12px;
+  padding:16px 20px;margin-bottom:8px;
+  background:var(--surface);border:1px solid var(--border);
+  border-radius:var(--radius);
+}
+header .logo{font-size:20px;font-weight:700;color:var(--orange)}
+header .logo span{color:var(--dim);font-size:12px;font-weight:400;margin-left:6px}
+header .stat{font-size:11px;color:var(--dim);margin-left:auto}
+header .stat b{color:var(--text);font-weight:600}
+
+/* Tabs */
+#tabs{
+  display:flex;gap:2px;margin-bottom:8px;
+  background:var(--surface);border:1px solid var(--border);
+  border-radius:var(--radius);padding:4px;overflow-x:auto;
+}
+#tabs button{
+  padding:10px 18px;background:transparent;color:var(--dim);
+  border:none;border-radius:6px;cursor:pointer;
+  font:inherit;font-size:13px;font-weight:500;
+  transition:all .15s;white-space:nowrap;
+}
+#tabs button:hover{color:var(--text);background:var(--card)}
+#tabs button.active{background:var(--orange);color:#000;font-weight:700}
+
+/* Panels */
+.panel{display:none}
+.panel.active{display:block}
+.card{
+  background:var(--card);border:1px solid var(--border);
+  border-radius:var(--radius);padding:16px;margin-bottom:8px;
+}
+
+/* Stats row */
+.stats{display:flex;gap:12px;flex-wrap:wrap;margin-bottom:8px}
+.stats .stat-card{
+  flex:1;min-width:100px;padding:12px 16px;
+  background:var(--surface);border:1px solid var(--border);
+  border-radius:var(--radius);text-align:center;
+}
+.stat-card .n{font-size:22px;font-weight:700;color:var(--green)}
+.stat-card .l{font-size:11px;color:var(--dim);margin-top:2px}
+.stat-card.warn .n{color:var(--orange)}
+.stat-card.hit .n{color:var(--gold)}
+
+/* Search bar */
+.bar{display:flex;gap:8px;margin-bottom:8px;flex-wrap:wrap}
+.bar input,.bar select,.bar button,.bar textarea{
+  padding:8px 12px;background:var(--surface);color:var(--text);
+  border:1px solid var(--border);border-radius:var(--radius);
+  font:inherit;font-size:13px;outline:none;
+  transition:border-color .15s;
+}
+.bar input:focus,.bar select:focus,.bar textarea:focus{border-color:var(--orange)}
+.bar input{flex:1;min-width:120px}
+.btn{
+  padding:8px 16px;border:none;border-radius:var(--radius);
+  cursor:pointer;font:inherit;font-size:13px;font-weight:600;
+  transition:all .15s;
+}
+.btn-o{background:var(--orange);color:#000}
+.btn-o:hover{filter:brightness(1.15)}
+.btn-o:active{filter:brightness(.9)}
+.btn-o:disabled{opacity:.4;cursor:default}
+.btn-d{background:var(--surface);color:var(--text);border:1px solid var(--border)}
+.btn-d:hover{background:var(--card)}
+.btn-r{background:transparent;color:var(--red);border:1px solid var(--red)}
+
+/* Wallet list */
+#leaderboard{overflow-y:auto;max-height:calc(100vh - 420px)}
+.wallet{
+  padding:10px 14px;border-bottom:1px solid var(--border);
+  cursor:pointer;display:flex;gap:8px;align-items:center;font-size:12px;
+  transition:background .1s;
+}
+.wallet:hover{background:var(--surface)}
+.wallet.active{background:var(--orange-bg);border-left:3px solid var(--orange)}
+.wallet .r{color:var(--orange);font-weight:700;min-width:22px;font-size:12px}
+.wallet .c{color:var(--blue);min-width:32px;font-size:10px;text-transform:uppercase}
+.wallet .bal{color:var(--green);text-align:right;min-width:80px;font-weight:600}
+.wallet .addr{color:var(--dim);font-size:10px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:160px}
+
+/* Vault table */
+.vault-table{width:100%;border-collapse:collapse;font-size:11px}
+.vault-table th{
+  text-align:left;padding:8px 10px;color:var(--dim);font-weight:600;
+  border-bottom:2px solid var(--border);font-size:10px;text-transform:uppercase;
+}
+.vault-table td{padding:8px 10px;border-bottom:1px solid var(--border)}
+.vault-table tr:hover{background:var(--surface)}
+.vault-table .type{color:var(--blue);font-weight:600}
+.vault-table .key{font-family:'SF Mono','Fira Code',monospace;font-size:10px;word-break:break-all;max-width:200px}
+.vault-table .addr{font-family:'SF Mono','Fira Code',monospace;font-size:10px;color:var(--dim)}
+.vault-table .bal{color:var(--green);font-weight:700;text-align:right}
+.vault-table .bal.zero{color:var(--dim)}
+.vault-table .proof{color:var(--green);font-size:16px;text-align:center}
+.vault-table .proof.fail{color:var(--red)}
+.vault-table .actions{text-align:right}
+
+/* Vault import */
+.vault-import{width:100%;min-height:140px;font:11px 'SF Mono','Fira Code',monospace;
+  background:var(--surface);color:var(--green);border:1px solid var(--border);
+  border-radius:var(--radius);padding:12px;resize:vertical;
+}
+.vault-import:focus{border-color:var(--orange)}
+
+/* Detail panel */
+#detail{padding:12px}
+#detail .section{margin-bottom:14px}
+#detail .label{color:var(--orange);font-weight:700;font-size:11px;text-transform:uppercase;margin-bottom:4px;display:block}
+#detail .val{word-break:break-all;font-size:12px;line-height:1.7;color:var(--gold);font-family:'SF Mono','Fira Code',monospace}
+
+/* Toast */
+#toast{
+  position:fixed;bottom:20px;left:50%;transform:translateX(-50%);
+  background:var(--orange);color:#000;padding:10px 24px;
+  border-radius:20px;font-weight:700;font-size:13px;
+  display:none;z-index:999;box-shadow:0 4px 20px rgba(255,140,0,.3);
+}
+.result-box{
+  background:var(--surface);border:1px solid var(--border);
+  border-radius:var(--radius);padding:12px;margin-top:8px;font-size:11px;
+  font-family:'SF Mono','Fira Code',monospace;white-space:pre-wrap;word-break:break-all;
+}
+.spin{animation:spin 1s linear infinite}
+@keyframes spin{to{transform:rotate(360deg)}}
+.flex{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+
+/* Responsive */
+@media(max-width:600px){
+  .stats{flex-direction:column}
+  .wallet .addr{display:none}
+  #leaderboard{max-height:calc(100vh - 520px)}
+}
 </style>
 </head>
 <body>
 <div id="app">
-<hdr>
-<div class="logo">&#x1F525; WALLETX</div>
-<div class="stat">Total: <span class="val" id="stTotal">-</span></div>
-<div class="stat">Funded: <span class="val" id="stFunded">-</span></div>
-<div class="stat">Hits: <span class="val" id="stHits">-</span></div>
-<div class="stat" id="stLive">-</div>
-<span style="flex:1"></span>
-<div class="stat" id="clock">--</div>
-</hdr>
-<div id="stats"></div>
-<div id="scannerBar" style="font-size:10px;color:#888;padding:4px 8px;margin-bottom:4px;background:#0a0a0a;border-radius:4px">Scanner: --</div>
-<div id="bar">
-<input type="text" id="q" placeholder="Search address fragment...">
-<select id="chainFilter"><option value="">All chains</option><option>ETH</option><option>MATIC</option><option>BTC</option><option>SOL</option><option>BNB</option><option>AVAX</option><option>BASE</option><option>ARB</option><option>OP</option><option>LTC</option><option>DOGE</option><option>XRP</option><option>MONAD</option></select>
-<select id="sortBy"><option value="balance">Balance</option><option value="ts">Recent</option><option value="chain">Chain</option></select>
-<button onclick="load()">Filter</button>
-<button onclick="location.reload()">Refresh</button>
+
+<header>
+  <div class="logo">🦖 WalletX <span>v2 · Vault Edition</span></div>
+  <div class="stat" id="hdrStats">Loading…</div>
+</header>
+
+<div id="tabs">
+  <button class="active" onclick="switchTab('wallets',this)">💰 Wallets</button>
+  <button onclick="switchTab('vault',this)">📦 Vault</button>
+  <button onclick="switchTab('send',this)">📤 Send</button>
+  <button onclick="switchTab('receive',this)">📥 Receive</button>
+  <button onclick="switchTab('swap',this)">🔄 Swap</button>
+  <button onclick="switchTab('bridge',this)">🌉 Bridge</button>
 </div>
-<div id="err"></div>
-<div id="importPanel" style="border:1px dashed #ff8c00;border-radius:4px;padding:12px;margin-bottom:8px;background:#0d0d0d;display:none">
-<div style="display:flex;justify-content:space-between;align-items:center">
-<span class="lbl" style="color:#ff8c00;font-weight:bold">IMPORT PRIVATE KEY</span>
-<button onclick="document.getElementById('importPanel').style.display='none'" style="background:none;color:#888;border:none;cursor:pointer;font-size:16px">x</button>
+
+<!-- ═══════════════════ WALLETS TAB ═══════════════════ -->
+<div id="tab-wallets" class="panel active">
+  <div class="stats" id="wstat"></div>
+  <div class="bar">
+    <input id="q" placeholder="Search address…" onkeyup="if(event.key==='Enter')load()">
+    <select id="sortBy" onchange="load()">
+      <option value="balance">Balance ↓</option><option value="chain">Chain</option>
+      <option value="ts">Recent</option>
+    </select>
+    <select id="chainFilter" onchange="load()">
+      <option value="">All chains</option>
+      <option>eth</option><option>btc</option><option>sol</option>
+      <option>matic</option><option>bnb</option><option>base</option>
+      <option>arb</option><option>avax</option>
+    </select>
+    <button class="btn btn-o" onclick="load()">🔍 Search</button>
+    <button class="btn btn-d" onclick="doRefresh()">🔄 Refresh</button>
+  </div>
+  <div id="leaderboard"></div>
+  <div class="flex" style="justify-content:center;gap:12px;padding:8px">
+    <button class="btn btn-d" onclick="prevPage()">◀ Prev</button>
+    <span id="pageInfo" style="color:var(--dim);font-size:12px">Page 1</span>
+    <button class="btn btn-d" onclick="nextPage()">Next ▶</button>
+  </div>
+  <div id="detail" class="card" style="margin-top:8px;min-height:100px">
+    <div style="color:var(--dim);text-align:center;padding:40px">👆 Select a wallet to see keys &amp; details</div>
+  </div>
 </div>
-<div style="font-size:10px;color:#888;margin:4px 0">Paste a hex private key, WIF, or BIP39 seed phrase. Addresses derived, balances checked, key written to scanner memory.</div>
-<textarea id="importKey" placeholder="Paste private key here (64-char hex, WIF, or 12/24-word seed)..." style="width:100%;height:60px;padding:8px;background:#000;color:#ffd700;border:1px solid #333;border-radius:4px;font:inherit;font-size:12px;resize:vertical"></textarea>
-<button onclick="importKey()" style="margin-top:8px;padding:8px 16px;background:#ff8c00;color:#000;font-weight:bold;border:none;border-radius:4px;cursor:pointer;font:inherit">Import Key</button>
-<span id="importStatus" style="margin-left:12px;font-size:12px"></span>
-<div id="importResult" style="margin-top:8px;font-size:11px"></div>
+
+<!-- ═══════════════════ VAULT TAB ═══════════════════ -->
+<div id="tab-vault" class="panel">
+  <div class="stats" id="vstat"></div>
+  <div class="card">
+    <div style="font-weight:700;color:var(--orange);margin-bottom:8px">🔑 Bulk Import Keys</div>
+    <textarea class="vault-import" id="vaultPaste" placeholder="Paste BIP39 seed phrases, hex private keys, WIF keys, or PEM — one per line or separated by spaces…
+Examples:
+  abandon ability able about above absent absorb abstract absurd abuse access accident …
+  0x4c0883a69102937d6231471b5dbb6204fe5129617082792ae468d01a3f362318
+  5KQwrPbwdL6PhXujxW37FSSQZ1JiwsST4cqQzDeyXtP79zkvFD3
+  -----BEGIN EC PRIVATE KEY----- … -----END EC PRIVATE KEY-----"></textarea>
+    <div class="flex" style="margin-top:8px;justify-content:space-between">
+      <span style="color:var(--dim);font-size:11px" id="vaultHint">Paste any crypto key format — auto-detected</span>
+      <button class="btn btn-o" id="vaultImportBtn" onclick="doVaultImport()">⚡ Import &amp; Scan Now</button>
+    </div>
+    <div id="vaultResult" class="result-box" style="display:none"></div>
+  </div>
+
+  <div class="card">
+    <div style="font-weight:700;color:var(--orange);margin-bottom:8px">🗄️ Forever Vault <span style="font-size:11px;color:var(--dim);font-weight:400">— key → address proof</span></div>
+    <div class="flex" style="justify-content:space-between;margin-bottom:8px">
+      <span style="color:var(--dim);font-size:11px" id="vaultCount">Loading…</span>
+      <div class="flex" style="gap:4px">
+        <button class="btn btn-d" onclick="loadVault()">🔄 Refresh</button>
+        <button class="btn btn-r" onclick="doVaultClear()" style="font-size:11px">🗑 Clear All</button>
+      </div>
+    </div>
+    <div style="overflow-x:auto">
+      <table class="vault-table" id="vaultTable">
+        <thead><tr>
+          <th>Type</th><th>Key Preview</th><th>Address</th><th>Chain</th>
+          <th>Balance</th><th>Proof</th><th></th>
+        </tr></thead>
+        <tbody id="vaultBody">
+          <tr><td colspan="7" style="text-align:center;color:var(--dim);padding:20px">Loading vault…</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
 </div>
-<button id="importBtn" onclick="document.getElementById('importPanel').style.display='block'" style="margin-bottom:8px;padding:6px 12px;background:#1a1a1a;color:#ff8c00;border:1px dashed #ff8c00;border-radius:4px;cursor:pointer;font:inherit;font-size:12px">+ Import Key</button>
-<button onclick="scanLegacy()" style="margin-bottom:8px;padding:6px 12px;background:#1a1a1a;color:#0af;border:1px dashed #0af;border-radius:4px;cursor:pointer;font:inherit;font-size:12px">🔍 Scan Legacy Assets</button>
-<div id="legacyResults" style="border:1px solid #0af;border-radius:4px;padding:12px;margin-bottom:8px;background:#0d0d0d;display:none"></div>
-<div id="main">
-<div id="lb"></div>
-<div id="dt"><div style="color:#666;text-align:center;margin-top:40px">Select a wallet</div></div>
+
+<!-- ═══════════════════ SEND TAB ═══════════════════ -->
+<div id="tab-send" class="panel">
+  <div class="card">
+    <div class="form-row"><label style="color:var(--orange);font-weight:700;font-size:11px;text-transform:uppercase">Chain</label>
+      <select id="sendChain" class="bar" style="width:100%;margin-top:4px">
+        <option value="eth">ETH</option><option value="btc">BTC</option><option value="sol">SOL</option>
+        <option value="matic">MATIC</option><option value="bnb">BNB</option><option value="base">BASE</option>
+      </select></div>
+    <div class="form-row" style="margin-top:8px"><label style="color:var(--orange);font-weight:700;font-size:11px;text-transform:uppercase">Private Key</label>
+      <input id="sendKey" type="password" placeholder="Hex private key" style="width:100%;margin-top:4px" class="bar"></div>
+    <div class="form-row" style="margin-top:8px"><label style="color:var(--orange);font-weight:700;font-size:11px;text-transform:uppercase">To Address</label>
+      <input id="sendTo" placeholder="Destination address" style="width:100%;margin-top:4px" class="bar"></div>
+    <div class="form-row" style="margin-top:8px"><label style="color:var(--orange);font-weight:700;font-size:11px;text-transform:uppercase">Amount</label>
+      <input id="sendAmt" placeholder="0.001" type="number" step="any" style="width:100%;margin-top:4px" class="bar"></div>
+    <button class="btn btn-o" onclick="doSend()" style="margin-top:12px;width:100%">📤 Send Transaction</button>
+    <div id="sendResult" class="result-box" style="display:none"></div>
+  </div>
 </div>
-<div class="nav">
-<button onclick="prevPage()" id="btnPrev">Prev</button>
-<span class="pg" id="pgInfo">Page 1</span>
-<button onclick="nextPage()" id="btnNext">Next</button>
+
+<!-- ═══════════════════ RECEIVE TAB ═══════════════════ -->
+<div id="tab-receive" class="panel">
+  <div class="card">
+    <div class="form-row"><label style="color:var(--orange);font-weight:700;font-size:11px;text-transform:uppercase">Private Key</label>
+      <input id="recvKey" type="password" placeholder="64-char hex private key or seed phrase" style="width:100%;margin-top:4px" class="bar"></div>
+    <button class="btn btn-o" onclick="doReceive()" style="margin-top:12px;width:100%">📥 Derive All Addresses</button>
+    <div id="recvResult" class="result-box" style="display:none"></div>
+  </div>
 </div>
+
+<!-- ═══════════════════ SWAP TAB ═══════════════════ -->
+<div id="tab-swap" class="panel">
+  <div class="card">
+    <div class="form-row"><label style="color:var(--orange);font-weight:700;font-size:11px;text-transform:uppercase">Chain</label>
+      <select id="swapChain" onchange="updateSwapTokens()" style="width:100%;margin-top:4px" class="bar">
+        <option value="eth">ETH</option><option value="matic">MATIC</option>
+        <option value="bnb">BNB</option><option value="base">BASE</option><option value="arb">ARB</option>
+      </select></div>
+    <div class="form-row" style="margin-top:8px"><label style="color:var(--orange);font-weight:700;font-size:11px;text-transform:uppercase">From</label>
+      <select id="swapFrom" style="width:100%;margin-top:4px" class="bar"></select></div>
+    <div class="form-row" style="margin-top:8px"><label style="color:var(--orange);font-weight:700;font-size:11px;text-transform:uppercase">To</label>
+      <select id="swapTo" style="width:100%;margin-top:4px" class="bar"></select></div>
+    <div class="form-row" style="margin-top:8px"><label style="color:var(--orange);font-weight:700;font-size:11px;text-transform:uppercase">Amount</label>
+      <input id="swapAmt" placeholder="0.01" type="number" step="any" style="width:100%;margin-top:4px" class="bar"></div>
+    <div class="form-row" style="margin-top:8px"><label style="color:var(--orange);font-weight:700;font-size:11px;text-transform:uppercase">Wallet Address</label>
+      <input id="swapAddr" placeholder="Your wallet address" style="width:100%;margin-top:4px" class="bar"></div>
+    <button class="btn btn-o" onclick="doSwapQuote()" style="margin-top:12px;width:100%">🔄 Get Quote</button>
+    <div id="swapResult" class="result-box" style="display:none"></div>
+  </div>
 </div>
+
+<!-- ═══════════════════ BRIDGE TAB ═══════════════════ -->
+<div id="tab-bridge" class="panel">
+  <div class="card">
+    <div class="form-row"><label style="color:var(--orange);font-weight:700;font-size:11px;text-transform:uppercase">From Chain</label>
+      <select id="bridgeFrom" style="width:100%;margin-top:4px" class="bar">
+        <option value="eth">ETH</option><option value="matic">MATIC</option><option value="bnb">BNB</option>
+        <option value="avax">AVAX</option><option value="base">BASE</option><option value="arb">ARB</option>
+      </select></div>
+    <div class="form-row" style="margin-top:8px"><label style="color:var(--orange);font-weight:700;font-size:11px;text-transform:uppercase">To Chain</label>
+      <select id="bridgeTo" style="width:100%;margin-top:4px" class="bar">
+        <option value="base">BASE</option><option value="arb">ARB</option><option value="matic">MATIC</option>
+        <option value="bnb">BNB</option><option value="eth">ETH</option>
+      </select></div>
+    <div class="form-row" style="margin-top:8px"><label style="color:var(--orange);font-weight:700;font-size:11px;text-transform:uppercase">Token</label>
+      <input id="bridgeToken" value="ETH" placeholder="ETH/USDC" style="width:100%;margin-top:4px" class="bar"></div>
+    <div class="form-row" style="margin-top:8px"><label style="color:var(--orange);font-weight:700;font-size:11px;text-transform:uppercase">Amount</label>
+      <input id="bridgeAmt" placeholder="0.01" type="number" step="any" style="width:100%;margin-top:4px" class="bar"></div>
+    <div class="form-row" style="margin-top:8px"><label style="color:var(--orange);font-weight:700;font-size:11px;text-transform:uppercase">Address</label>
+      <input id="bridgeAddr" placeholder="Your wallet address" style="width:100%;margin-top:4px" class="bar"></div>
+    <button class="btn btn-o" onclick="doBridgeQuote()" style="margin-top:12px;width:100%">🌉 Get Bridge Quote</button>
+    <div id="bridgeResult" class="result-box" style="display:none"></div>
+  </div>
+</div>
+
 <div id="toast"></div>
+</div>
+
 <script>
-var PAGE=0,PERPAGE=50,TOTAL=0,focus=null,wallets=[];
+// ═══════════════════════════════════════════════════════════════
+// TAB SWITCHING
+// ═══════════════════════════════════════════════════════════════
+function switchTab(name,btn){
+  document.querySelectorAll('#tabs button').forEach(b=>b.classList.remove('active'));
+  document.querySelectorAll('.panel').forEach(p=>p.classList.remove('active'));
+  document.getElementById('tab-'+name).classList.add('active');
+  if(btn)btn.classList.add('active');
+  if(name==='wallets')load();
+  if(name==='vault'){loadVaultStats();loadVault();}
+}
 
-function load(){
- var u='/api/balances?limit='+PERPAGE+'&offset='+(PAGE*PERPAGE)+'&funded_only=true&keyed_only=true&sort_by='+document.getElementById('sortBy').value;
- var c=document.getElementById('chainFilter').value;if(c)u+='&chain='+c;
- var q=document.getElementById('q').value;if(q)u='/api/search?q='+encodeURIComponent(q)+'&limit='+PERPAGE+'&offset='+(PAGE*PERPAGE)+'&keyed_only=true';
- fetch(u).then(function(r){return r.json()}).then(function(d){
-  wallets=d.rows||d;TOTAL=d.total||wallets.length;
-  return fetch('/api/stats');
- }).then(function(r){return r.json()}).then(function(s){
-  document.getElementById('stTotal').textContent=s.total;
-  document.getElementById('stFunded').textContent=s.nonzero;
-  document.getElementById('stHits').textContent=s.hits;
-  var live=s.last_check_ts&&(Date.now()/1000-s.last_check_ts)<300;
-  document.getElementById('stLive').innerHTML=live?'<span class="live">&#x25CF; LIVE</span>':'<span style="color:#666">&#x25CB; CACHED</span>';
-  document.getElementById('clock').textContent=new Date().toISOString().slice(11,19)+' UTC';
-  var sh='';
-  if(s.chain_totals)for(var c in s.chain_totals)sh+='<span class="s"><span class="n">'+c+'</span> '+s.chain_totals[c].toFixed(2)+'</span> ';
-  document.getElementById('stats').innerHTML=sh;
-  renderLb();
-  document.getElementById('pgInfo').textContent='Page '+(PAGE+1)+' / '+Math.ceil(TOTAL/PERPAGE)+' ('+TOTAL+' total)';
-  document.getElementById('btnPrev').disabled=PAGE<=0;
-  document.getElementById('btnNext').disabled=(PAGE+1)*PERPAGE>=TOTAL;
-  document.getElementById('err').innerHTML='';
- }).catch(function(e){
-  document.getElementById('err').innerHTML='Load failed: '+e.message;
+// ═══════════════════════════════════════════════════════════════
+// SHARED
+// ═══════════════════════════════════════════════════════════════
+function toast(m){
+  let t=document.getElementById('toast');t.textContent=m;t.style.display='block';
+  setTimeout(()=>t.style.display='none',2200);
+}
+function copyAddr(a){navigator.clipboard.writeText(a).then(()=>toast('Copied!'));}
+function fmtBal(n){if(n===null||n===undefined)return'$0.00';let v=Number(n);if(v<0.0001&&v>0)return'<0.0001';return v.toFixed(v<1?6:2);}
+
+// ═══════════════════════════════════════════════════════════════
+// WALLETS TAB
+// ═══════════════════════════════════════════════════════════════
+let PAGE=0,PERPAGE=50,TOTAL=0,focus=null,wallets=[],autoTimer=null;
+
+async function load(){
+ try{
+  let u=`/api/balances?limit=${PERPAGE}&offset=${PAGE*PERPAGE}&funded_only=true&keyed_only=true&sort_by=${document.getElementById('sortBy').value}`;
+  let c=document.getElementById('chainFilter').value;if(c)u+=`&chain=${c}`;
+  if(document.getElementById('q').value)u=`/api/search?q=${encodeURIComponent(document.getElementById('q').value)}&limit=${PERPAGE}&offset=${PAGE*PERPAGE}`;
+  let r=await fetch(u),d=await r.json();
+  wallets=d.rows||[];TOTAL=d.total||0;
+  let s=await fetch('/api/stats').then(r=>r.json());
+  document.getElementById('wstat').innerHTML=
+    `<div class="stat-card"><div class="n">${s.keyed_funded||s.nonzero||0}</div><div class="l">💰 Funded Wallets</div></div>`+
+    `<div class="stat-card hit"><div class="n">${s.keyed_total||s.total||0}</div><div class="l">🔑 Keyed Addresses</div></div>`+
+    `<div class="stat-card warn"><div class="n">${s.hits||0}</div><div class="l">✨ Total Hits</div></div>`;
+  document.getElementById('hdrStats').innerHTML=`<b>${s.keyed_funded||s.nonzero||0}</b> funded · <b>${s.keyed_total||s.total||0}</b> keyed · <b>${s.hits||0}</b> hits`;
+  renderLB();
+ }catch(e){console.error(e)}
+}
+function renderLB(){
+ let lb=document.getElementById('leaderboard'),html='';
+ wallets.forEach((w,i)=>{
+  let bal=w.total_usd||w.balance||0,cls=focus&&focus.address===w.address?' active':'';
+  html+=`<div class="wallet${cls}" onclick="showDetail(${i})">
+    <span class="r">${PAGE*PERPAGE+i+1}</span>
+    <span class="c">${(w.chain||'?').toUpperCase()}</span>
+    <span class="bal">$${fmtBal(bal)}</span>
+    <span class="addr">${w.address||'?'}</span>
+  </div>`;
  });
-}
-
-function renderLb(){
- var lb=document.getElementById('lb'),h='';
- wallets.forEach(function(w,i){
-  var bal=w.balance,bs;
-  if(!bal&&bal!==0)bs='...';
-  else if(bal>1e6)bs=(bal/1e6).toFixed(1)+'M';
-  else if(bal>1)bs=bal.toFixed(2);
-  else bs=bal.toFixed(8);
-  var addr=w.address||'',as=addr.length>24?addr.slice(0,12)+'...'+addr.slice(-10):addr;
-  h+='<div class="wal'+(focus===i?' on':'')+'" onclick="showDetail('+i+')">';
-  h+='<span class="r">#'+(PAGE*PERPAGE+i+1)+'</span>';
-  h+='<span class="c">'+(w.chain||'?').toUpperCase()+'</span>';
-  h+='<span class="bal">'+bs+'</span>';
-  h+='<span class="adr" title="'+addr+'">'+as+'</span>';
-  h+='</div>';
- });
- lb.innerHTML=h||'<div style="color:#666;padding:12px">No wallets found</div>';
-}
-
-function showDetail(i){
- focus=i;renderLb();
- var w=wallets[i],d=document.getElementById('dt');
- var bal=w.balance,bs;
- if(!bal&&bal!==0)bs='...';
- else if(bal>1e6)bs=(bal/1e6).toFixed(6)+'M';
- else if(bal>1)bs=bal.toFixed(6);
- else bs=bal.toFixed(12);
- var addr=(w.address||''),chain=(w.chain||'eth'),addrEsc=addr.replace(/'/g,"&#39;");
- var h='';
- h+='<div class="sec"><span class="lbl">RANK</span><span class="val">#'+(PAGE*PERPAGE+i+1)+' / '+TOTAL+'</span></div>';
- h+='<div class="sec"><span class="lbl">CHAIN</span><span class="val">'+chain.toUpperCase()+'</span></div>';
- h+='<div class="sec"><span class="lbl">ADDRESS</span><span class="val" style="font-size:11px;word-break:break-all">'+addr+'</span></div>';
- h+='<div class="sec"><span class="lbl">BALANCE</span><span class="val">'+bs+'</span></div>';
- h+='<div class="sec"><span class="lbl">CHECKED</span><span class="val">'+(w.checked_at||'unknown')+'</span></div>';
- h+='<div class="btns" style="margin-bottom:12px"><button onclick="copyText(\''+addrEsc+'\')">Copy</button><button onclick="openExp(\''+chain+'\',\''+addrEsc+'\')">Explorer</button></div>';
- // ── RECEIVE panel ──────────────────────────────────────────
- h+='<div class="sec" style="border:1px solid #ff8c00;border-radius:4px;padding:12px;background:#0d0d0d">';
- h+='<span class="lbl">RECEIVE</span>';
- h+='<div style="text-align:center;margin:8px 0"><img src="https://api.qrserver.com/v1/create-qr-code/?size=180x180&color=ff8c00&bgcolor=000&data='+encodeURIComponent(addr)+'" width="180" height="180" alt="QR" style="border:2px solid #333;border-radius:4px"></div>';
- h+='<div style="font-size:10px;word-break:break-all;color:#ffd700;background:#000;padding:8px;border-radius:4px;margin:8px 0">'+addr+'</div>';
- h+='<button onclick="copyText(\''+addrEsc+'\')" style="width:100%;padding:8px;background:#ff8c00;color:#000;font-weight:bold;border:none;border-radius:4px;cursor:pointer;font:inherit">Copy Address</button>';
- h+='</div>';
- // ── SEND panel ─────────────────────────────────────────────
- h+='<div class="sec" style="border:1px solid #333;border-radius:4px;padding:12px;background:#0d0d0d;margin-top:12px">';
- h+='<span class="lbl">SEND (unsigned tx builder)</span>';
- h+='<div style="font-size:11px;color:#888;margin:4px 0">Build an unsigned transaction. Sign it with your key offline, then broadcast the signed hex.</div>';
- h+='<input id="sendTo" placeholder="Recipient address" style="width:100%;padding:8px;margin:4px 0;background:#000;color:#fff;border:1px solid #333;border-radius:4px;font:inherit;font-size:12px">';
- h+='<div style="display:flex;gap:8px;margin:4px 0"><input id="sendAmt" placeholder="Amount" style="flex:1;padding:8px;background:#000;color:#fff;border:1px solid #333;border-radius:4px;font:inherit;font-size:12px"><select id="sendChain" style="padding:8px;background:#000;color:#fff;border:1px solid #333;border-radius:4px;font:inherit;font-size:12px"><option>ETH</option><option>MATIC</option><option>BNB</option><option>AVAX</option><option>BASE</option><option>ARB</option><option>OP</option><option>ETHW</option><option>ETC</option></select></div>';
- h+='<input id="sendKey" placeholder="Private key (hex, to sign)" style="width:100%;padding:8px;margin:4px 0;background:#000;color:#ffd700;border:1px solid #333;border-radius:4px;font:inherit;font-size:12px">';
- h+='<button onclick="buildTx(\''+addrEsc+'\')" style="width:48%;padding:8px;background:#ff8c00;color:#000;font-weight:bold;border:none;border-radius:4px;cursor:pointer;font:inherit;margin:4px 1%">Build Tx</button>';
- h+='<button onclick="signAndSend(\''+addrEsc+'\',\''+chain+'\')" style="width:48%;padding:8px;background:#0a0;color:#fff;font-weight:bold;border:none;border-radius:4px;cursor:pointer;font:inherit;margin:4px 1%">Sign & Send!</button>';
- h+='<div id="txOut" style="font-size:10px;color:#0f0;background:#000;padding:8px;border-radius:4px;margin-top:8px;word-break:break-all;display:none"></div>';
- h+='</div>';
- // ── SWAP / BRIDGE links (chain-aware) ─────────────────────
- var chMap={eth:'1',matic:'137',bnb:'56',avax:'43114',base:'8453',arb:'42161',op:'10'};
- var cid=chMap[chain]||'1';
- var uniChains={eth:'mainnet',matic:'polygon',bnb:'bnb',avax:'avalanche',base:'base',arb:'arbitrum',op:'optimism'};
- var uc=uniChains[chain]||'mainnet';
- h+='<div class="sec" style="border:1px solid #333;border-radius:4px;padding:12px;background:#0d0d0d;margin-top:12px">';
- h+='<span class="lbl">SWAP / BRIDGE on '+chain.toUpperCase()+'</span>';
- h+='<div style="font-size:10px;color:#888;margin:4px 0">Opens DEX on the correct chain. Connect your wallet there to swap.</div>';
- h+='<div style="display:flex;flex-wrap:wrap;gap:6px;margin-top:6px">';
- h+='<a href="https://app.1inch.io/#/'+cid+'/unified/swap" target="_blank" style="padding:6px 10px;background:#1a1a1a;color:#ff8c00;border:1px solid #ff8c00;border-radius:4px;text-decoration:none;font-size:11px">1inch</a>';
- h+='<a href="https://app.uniswap.org/swap?chain='+uc+'" target="_blank" style="padding:6px 10px;background:#1a1a1a;color:#ff8c00;border:1px solid #ff8c00;border-radius:4px;text-decoration:none;font-size:11px">Uniswap</a>';
- h+='<a href="https://pancakeswap.finance/swap?chain='+(chain==='bnb'?'bsc':uc)+'" target="_blank" style="padding:6px 10px;background:#1a1a1a;color:#ff8c00;border:1px solid #ff8c00;border-radius:4px;text-decoration:none;font-size:11px">PancakeSwap</a>';
- h+='<a href="https://portalbridge.com/" target="_blank" style="padding:6px 10px;background:#1a1a1a;color:#ff8c00;border:1px solid #ff8c00;border-radius:4px;text-decoration:none;font-size:11px">Portal Bridge</a>';
- h+='<a href="https://jumper.exchange/" target="_blank" style="padding:6px 10px;background:#1a1a1a;color:#ff8c00;border:1px solid #ff8c00;border-radius:4px;text-decoration:none;font-size:11px">Jumper</a>';
- h+='<a href="https://app.odos.xyz/?chain='+cid+'" target="_blank" style="padding:6px 10px;background:#1a1a1a;color:#ff8c00;border:1px solid #ff8c00;border-radius:4px;text-decoration:none;font-size:11px">Odos</a>';
- h+='</div></div>';
- // ── BALANCES across chains ─────────────────────────────────
- h+='<div id="multiBal" class="sec" style="border:1px solid #333;border-radius:4px;padding:12px;background:#0d0d0d;margin-top:12px">';
- h+='<span class="lbl">BALANCES ACROSS CHAINS</span><span style="color:#888;font-size:11px"> loading...</span></div>';
- // ── KEY material ───────────────────────────────────────────
- h+='<div id="key" style="margin-top:12px"><span style="color:#888">Loading keys...</span></div>';
- d.innerHTML=h;
- // Fetch cross-chain balances
- fetch('/api/search?q='+encodeURIComponent(addr)+'&limit=20').then(function(r){return r.json()}).then(function(dd){
-  var mb=document.getElementById('multiBal'),rows=dd.rows||[],h='<span class="lbl">BALANCES ACROSS CHAINS ('+rows.length+' chains)</span>';
-  if(rows.length===0){h+='<div style="color:#888;font-size:11px">No balances found</div>'}
-  else{rows.forEach(function(r){var b=r.balance;var bs=b>1e6?(b/1e6).toFixed(4)+'M':b>1?(b).toFixed(4):b>1e-8?b.toFixed(8):'0';h+='<div style="display:flex;justify-content:space-between;padding:4px 0;border-bottom:1px solid #1a1a1a;font-size:12px"><span style="color:#0af">'+r.chain.toUpperCase()+'</span><span style="color:#0f0">'+bs+'</span></div>'})}
-  mb.innerHTML=h;
- }).catch(function(){document.getElementById('multiBal').innerHTML='<span class="lbl">BALANCES</span><span style="color:#888"> unavailable</span>'});
- // Fetch key material
- var addrEnc=encodeURIComponent(addr);
- fetch('/api/wallet/'+addrEnc).then(function(r){return r.json()}).then(function(kd){
-  var ks=document.getElementById('key');
-  if(!kd.found){
-   // No key = does not belong in WalletX — drop from view
-   ks.innerHTML='<div class="sec" style="color:#666;font-size:12px">No private key for this address — hidden from WalletX.</div>';
-   // Remove this card from leaderboard if it slipped through
-   try{ wallets.splice(i,1); TOTAL=Math.max(0,TOTAL-1); focus=null; renderLb();
-        document.getElementById('detail').innerHTML='<div style="color:#666;text-align:center;margin-top:40px">Select a keyed wallet</div>';
-   }catch(e){}
-   return}
-  var hasKeys=(kd.hex_keys&&kd.hex_keys.length)||(kd.wifs&&kd.wifs.length)||(kd.seeds&&kd.seeds.length);
-  if(!hasKeys){
-   ks.innerHTML='<div class="sec" style="color:#666;font-size:12px">No key material — removed.</div>';
-   try{ wallets.splice(i,1); TOTAL=Math.max(0,TOTAL-1); focus=null; renderLb();
-        document.getElementById('detail').innerHTML='<div style="color:#666;text-align:center;margin-top:40px">Select a keyed wallet</div>';
-   }catch(e){}
-   return}
-  var kh='<div class="sec" style="border:1px solid #0f0;border-radius:4px;padding:12px;background:#001a00">'+
-   '<span class="lbl" style="color:#0f0">🔑 PRIVATE KEY MATERIAL (FULL — NEVER TRUNCATED)</span></div>';
-  if(kd.hex_keys&&kd.hex_keys.length){
-   kh+='<div class="sec"><span class="lbl">HEX PRIVATE KEYS ('+kd.hex_keys.length+')</span>';
-   kd.hex_keys.forEach(function(k,j){kh+='<div><pre>['+(j+1)+'] '+k+'</pre><button onclick="copyText(\''+k+'\')" style="font-size:10px;padding:2px 6px;background:#1a1a1a;color:#ff8c00;border:1px solid #ff8c00;border-radius:2px;cursor:pointer">Copy</button></div>'});
-   kh+='</div>';
-  }
-  if(kd.wifs&&kd.wifs.length){
-   kh+='<div class="sec"><span class="lbl">WIF KEYS ('+kd.wifs.length+')</span>';
-   kd.wifs.forEach(function(k,j){kh+='<div><pre>['+(j+1)+'] '+k+'</pre><button onclick="copyText(\''+k+'\')" style="font-size:10px;padding:2px 6px;background:#1a1a1a;color:#ff8c00;border:1px solid #ff8c00;border-radius:2px;cursor:pointer">Copy</button></div>'});
-   kh+='</div>';
-  }
-  if(kd.seeds&&kd.seeds.length){
-   kh+='<div class="sec"><span class="lbl">SEED PHRASES ('+kd.seeds.length+')</span>';
-   kd.seeds.forEach(function(k,j){var sid='s'+j+Date.now();window[sid]=k;kh+='<div><pre>['+(j+1)+'] '+k+'</pre><button data-copy="'+sid+'" class="cbtn" style="font-size:10px;padding:2px 6px;background:#1a1a1a;color:#ff8c00;border:1px solid #ff8c00;border-radius:2px;cursor:pointer">Copy</button></div>'});
-   kh+='</div>';
-  }
-  if(kd.source){kh+='<div class="sec"><span class="lbl">SOURCE</span><span class="val" style="font-size:11px">'+kd.source+'</span></div>'}
-  if(kd.timestamp){kh+='<div class="sec"><span class="lbl">FOUND</span><span class="val">'+kd.timestamp+'</span></div>'}
-  ks.innerHTML=kh;
- }).catch(function(e){document.getElementById('key').innerHTML='<span style="color:#f44">Key lookup failed</span>'});
-}
-
-function buildTx(fromAddr){
- var to=document.getElementById('sendTo').value.trim();
- var amt=document.getElementById('sendAmt').value.trim();
- var ch=document.getElementById('sendChain').value.toLowerCase();
- if(!to||!amt){alert('Enter recipient address and amount');return}
- var out=document.getElementById('txOut');out.style.display='block';
- var wei='0x'+(parseFloat(amt)*1e18).toString(16);
- out.innerHTML='<div style="margin:4px 0"><b>Unsigned Transaction</b></div>'+
-  '<div>From: <span style="color:#ffd700">'+fromAddr+'</span></div>'+
-  '<div>To: <span style="color:#ffd700">'+to+'</span></div>'+
-  '<div>Value: <span style="color:#0f0">'+amt+' '+ch.toUpperCase()+'</span> ('+wei+' wei)</div>'+
-  '<div style="margin:4px 0;color:#888;font-size:10px">Sign this tx with your private key offline. Use ethers.js, web3.py, or a hardware wallet. Paste signed hex to broadcast.</div>'+
-  '<div style="margin:8px 0;padding:8px;background:#000;border:1px solid #333;border-radius:4px;font-size:10px;word-break:break-all;color:#ffd700">'+
-  'eth_sendRawTransaction params: {"from":"'+fromAddr+'","to":"'+to+'","value":"'+wei+'"}<br><br>'+
-  'Python signing:<br>'+
-  'from web3 import Web3<br>'+
-  'w3 = Web3(Web3.HTTPProvider("https://rpc.ankr.com/'+ch+'"))<br>'+
-  'signed = w3.eth.account.sign_transaction({<br>'+
-  '  "from": "'+fromAddr+'",<br>'+
-  '  "to": "'+to+'",<br>'+
-  '  "value": '+Math.floor(parseFloat(amt)*1e18)+',<br>'+
-  '  "gas": 21000,<br>'+
-  '  "gasPrice": w3.eth.gas_price,<br>'+
-  '  "nonce": w3.eth.get_transaction_count("'+fromAddr+'"),<br>'+
-  '  "chainId": 1<br>'+
-  '}, PRIVATE_KEY)<br>'+
-  'w3.eth.send_raw_transaction(signed.rawTransaction)'+
-  '</div>';
-}
-
-function _parseJsonResponse(r){
- return r.text().then(function(t){
-  var ct=(r.headers.get('content-type')||'');
-  if(!t){
-   throw new Error('Empty response (HTTP '+r.status+')');
-  }
-  try{
-   var d=JSON.parse(t);
-   d._http=r.status;
-   return d;
-  }catch(e){
-   var snip=t.replace(/\s+/g,' ').slice(0,180);
-   throw new Error('Server returned non-JSON (HTTP '+r.status+(ct?'; '+ct:'')+'): '+snip);
-  }
- });
-}
-function signAndSend(fromAddr,chain){
- var pk=document.getElementById('sendKey').value.trim();
- var to=document.getElementById('sendTo').value.trim();
- var amt=document.getElementById('sendAmt').value.trim();
- var ch=(document.getElementById('sendChain').value||'eth').toLowerCase();
- if(ch==='ethw'||ch==='etc'){alert(ch.toUpperCase()+' send not supported via this button yet');return}
- if(!pk){alert('Paste your private key first');return}
- if(!to||!amt){alert('Enter recipient and amount');return}
- if(isNaN(parseFloat(amt))||parseFloat(amt)<=0){alert('Amount must be a positive number');return}
- var out=document.getElementById('txOut');out.style.display='block';
- out.innerHTML='<span style="color:#ffd700">Signing and broadcasting on '+ch.toUpperCase()+'...</span>';
- fetch('/api/send',{
-   method:'POST',
-   headers:{'Content-Type':'application/json','Accept':'application/json'},
-   body:JSON.stringify({private_key:pk,to:to,value_eth:parseFloat(amt),chain:ch,from:fromAddr||''})
- })
- .then(_parseJsonResponse).then(function(d){
-  if(!d.ok){out.innerHTML='<span style="color:#f44">Failed: '+(d.error||JSON.stringify(d))+'</span>';return}
-  out.innerHTML='<div style="color:#0f0;font-size:12px"><b>SENT!</b></div>'+
-   '<div>TX: <a href="'+(d.explorer||'#')+'" target="_blank" style="color:#ff8c00">'+d.tx_hash+'</a></div>'+
-   '<div>From: '+d.from+'</div>'+
-   '<div>To: '+d.to+'</div>'+
-   '<div>Value: '+d.value_eth+' '+(d.chain||ch).toUpperCase()+'</div>'+
-   '<div style="margin-top:4px"><a href="'+(d.explorer||'#')+'" target="_blank" style="color:#0af">View on Explorer</a></div>';
- }).catch(function(e){out.innerHTML='<span style="color:#f44">Error: '+(e&&e.message?e.message:e)+'</span>'});
-}
-function copyText(t){navigator.clipboard.writeText(t);var x=document.getElementById('toast');x.textContent='Copied!';x.style.display='block';setTimeout(function(){x.style.display='none'},2000)}
-document.addEventListener('click',function(e){var b=e.target.closest('.cbtn');if(b){var id=b.getAttribute('data-copy');if(id&&window[id])copyText(window[id])}});
-function openExp(c,a){var u={ETH:'https://etherscan.io/address/'+a,MATIC:'https://polygonscan.com/address/'+a,BTC:'https://mempool.space/address/'+a,SOL:'https://solscan.io/account/'+a,BNB:'https://bscscan.com/address/'+a,AVAX:'https://snowtrace.io/address/'+a,BASE:'https://basescan.org/address/'+a,ARB:'https://arbiscan.io/address/'+a,OP:'https://optimistic.etherscan.io/address/'+a,LTC:'https://litecoinspace.org/address/'+a};window.open(u[c.toUpperCase()]||u.ETH,'_blank')}
-function importKey(){
- var k=document.getElementById('importKey').value.trim();
- if(!k){alert('Paste a key first');return}
- var st=document.getElementById('importStatus');
- st.innerHTML='<span style="color:#ffd700">Importing...</span>';
- fetch('/api/import-key',{method:'POST',headers:{'Content-Type':'application/json','Accept':'application/json'},body:JSON.stringify({key:k})})
- .then(_parseJsonResponse).then(function(d){
-  var rs=document.getElementById('importResult');
-  if(!d.ok){st.innerHTML='<span style="color:#f44">Failed</span>';rs.innerHTML='<span style="color:#f44">'+d.error+'</span>';return}
-  st.innerHTML='<span style="color:#0f0">Imported!</span>';
-  var h='<div style="color:#0f0;margin:4px 0">Key imported. Type: '+d.key_type.toUpperCase()+'</div>';
-  h+='<div style="margin:4px 0"><b>Derived addresses:</b></div>';
-  for(var c in d.addresses){
-   var b=d.balances[c];
-   var bs=b&&b.balance!==null&&b.balance!==undefined?(b.balance>1?(b.balance).toFixed(6):(b.balance).toFixed(12)):'...';
-   var bg=b&&b.balance>1e-12?'#0a0':'#888';
-   h+='<div style="padding:2px 0"><span style="color:#0af">'+c.toUpperCase()+'</span> <span style="font-size:10px;word-break:break-all">'+b.address+'</span> <span style="color:'+bg+'">'+bs+'</span></div>';
-  }
-  h+='<div style="margin:4px 0;color:#888;font-size:10px">Key written to scanner memory. Refresh to see in leaderboard.</div>';
-  rs.innerHTML=h;
-  setTimeout(function(){document.getElementById('importPanel').style.display='none';load()},3000);
- }).catch(function(e){
-  document.getElementById('importStatus').innerHTML='<span style="color:#f44">Error</span>';
-  document.getElementById('importResult').innerHTML='<span style="color:#f44">'+e.message+'</span>';
- });
+ lb.innerHTML=html||'<div style="color:var(--dim);text-align:center;padding:40px">No funded wallets yet — keep scanning</div>';
+ document.getElementById('pageInfo').textContent=`Page ${PAGE+1} · ${TOTAL} total`;
 }
 function prevPage(){if(PAGE>0){PAGE--;load()}}
-function nextPage(){PAGE++;load()}
-document.addEventListener('keydown',function(e){if(e.key==='ArrowRight')nextPage();if(e.key==='ArrowLeft')prevPage()});
-function updateScannerBar(){
- fetch('/api/scanner-status').then(function(r){return r.json()}).then(function(d){
-  var age=d.status_age_sec<60?Math.round(d.status_age_sec)+'s ago':Math.round(d.status_age_sec/60)+'m ago';
-  var alive=d.scanner_alive?'●':'○';
-  var color=d.status_age_sec<120?'#0f0':'#ffd700';
-  document.getElementById('scannerBar').innerHTML='<span style="color:'+color+'">'+alive+'</span> Scanner: '+d.processed+' processed | '+d.memory_mb+'MB | queue '+d.queue+' | '+age;
+function nextPage(){if((PAGE+1)*PERPAGE<TOTAL){PAGE++;load()}}
+
+async function showDetail(i){
+ focus=wallets[i];renderLB();
+ let d=document.getElementById('detail');
+ try{
+  let r=await fetch('/api/wallet/'+focus.address),kd=await r.json();
+  d.innerHTML=
+    `<div class="section"><span class="label">Address</span><span class="val">${focus.address} <button class="btn btn-d" style="font-size:10px;padding:2px 8px;margin-left:8px" onclick="copyAddr('${focus.address}')">📋 Copy</button></span></div>`+
+    `<div class="section"><span class="label">Balance</span><span class="val">$${fmtBal(kd.total_usd||focus.total_usd||0)}</span></div>`;
+  if(kd.keys&&kd.keys.length){
+   d.innerHTML+=`<div class="section"><span class="label">🔑 Private Keys (${kd.keys.length})</span>`;
+   kd.keys.forEach(k=>{
+    d.innerHTML+=`<div class="val" style="font-size:11px;margin-bottom:4px">
+      <span style="color:var(--blue)">${k.type||'hex'}</span>: ${k.value||k}
+      <button class="btn btn-d" style="font-size:9px;padding:1px 6px;margin-left:4px" onclick="copyAddr('${(k.value||k).replace(/'/g,"\\'")}')">📋</button>
+    </div>`;
+   });
+   d.innerHTML+=`</div>`;
+  }
+  if(kd.chains){
+   d.innerHTML+=`<div class="section"><span class="label">🌐 Chain Balances</span>`;
+   Object.entries(kd.chains).forEach(([ch,bal])=>{
+    d.innerHTML+=`<div class="val">${ch.toUpperCase()}: ${Number(bal).toFixed(8)} <span style="color:${Number(bal)>0?'var(--green)':'var(--dim)'}">${Number(bal)>0?'● funded':'○ empty'}</span></div>`;
+   });
+   d.innerHTML+=`</div>`;
+  }
+ }catch(e){d.innerHTML=`<div style="color:var(--red)">Error loading details: ${e}</div>`}
+}
+
+async function doRefresh(){
+ toast('🔄 Refreshing balances…');
+ try{await fetch('/api/refresh-balances',{method:'POST'});toast('✅ Refresh started — check back in a few seconds')}
+ catch(e){toast('❌ Refresh failed')}
+}
+
+// ═══════════════════════════════════════════════════════════════
+// VAULT TAB
+// ═══════════════════════════════════════════════════════════════
+async function loadVaultStats(){
+ try{
+  let r=await fetch('/api/vault/stats'),d=await r.json();
+  document.getElementById('vstat').innerHTML=
+    `<div class="stat-card"><div class="n">${d.total||0}</div><div class="l">🔑 Keys in Vault</div></div>`+
+    `<div class="stat-card hit"><div class="n">${d.funded||0}</div><div class="l">💰 Funded</div></div>`+
+    `<div class="stat-card"><div class="n">${d.verified||0}</div><div class="l">✅ Verified Proofs</div></div>`;
+  document.getElementById('vaultCount').textContent=`${d.total||0} keys stored · ${d.funded||0} funded · ${d.verified||0} address proofs verified`;
+ }catch(e){}
+}
+
+async function loadVault(){
+ try{
+  let r=await fetch('/api/vault/list'),d=await r.json();
+  let rows=d.rows||[],html='';
+  rows.forEach(v=>{
+   let balCls=v.balance>0?'':' zero';
+   let proofIcon=v.proof_verified?'✅':'❌';
+   let proofCls=v.proof_verified?'proof':'proof fail';
+   html+=`<tr>
+     <td class="type">${v.key_type||'?'}</td>
+     <td class="key" title="${v.key_value||''}">${(v.key_value||'').slice(0,24)}…</td>
+     <td class="addr">${(v.address||'').slice(0,14)}… <button class="btn btn-d" style="font-size:8px;padding:1px 4px" onclick="copyAddr('${(v.address||'').replace(/'/g,"\\'")}')">📋</button></td>
+     <td style="color:var(--blue);font-size:10px">${(v.chain||'?').toUpperCase()}</td>
+     <td class="bal${balCls}">$${fmtBal(v.balance)}</td>
+     <td class="${proofCls}" title="${v.proof_verified?'Key→Address verified':'Not verified'}">${proofIcon}</td>
+     <td class="actions"><button class="btn btn-r" style="font-size:9px;padding:2px 6px" onclick="doVaultDelete('${v.id}')">🗑</button></td>
+   </tr>`;
+  });
+  document.getElementById('vaultBody').innerHTML=html||
+    '<tr><td colspan="7" style="text-align:center;color:var(--dim);padding:20px">Vault is empty — paste keys above and import</td></tr>';
+  loadVaultStats();
+ }catch(e){console.error(e)}
+}
+
+async function doVaultImport(){
+ let txt=document.getElementById('vaultPaste').value.trim();
+ if(!txt){toast('⚠️ Paste keys first');return}
+ let btn=document.getElementById('vaultImportBtn');
+ btn.disabled=true;btn.textContent='⏳ Scanning…';
+ document.getElementById('vaultResult').style.display='block';
+ document.getElementById('vaultResult').textContent='Detecting key types, deriving addresses, checking balances…';
+ try{
+  let resp=await fetch('/api/vault/import',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({raw:text})});
+  let d=await resp.json();
+  if(d.ok){
+   document.getElementById('vaultResult').textContent=
+     `✅ Import complete!\n\n`+
+     `   Keys found:   ${d.found||0}\n`+
+     `   Imported:     ${d.imported||0}\n`+
+     `   Funded:       ${d.funded||0} 💰\n`+
+     `   Empty ($0.00): ${d.empty||0} 💀\n`+
+     `   Errors:       ${d.errors||0}\n\n`+
+     (d.samples||[]).map(s=>`   ${s.type}: ${s.preview} → ${s.address} → ${s.balance>0?'💎 $'+fmtBal(s.balance):'💀 $0.00'}`).join('\n');
+   document.getElementById('vaultPaste').value='';
+   loadVault();
+   toast(`✅ ${d.imported||0} keys imported · ${d.funded||0} funded!`);
+  }else{
+   document.getElementById('vaultResult').textContent='❌ Import failed: '+(d.error||'unknown');
+   toast('❌ Import failed');
+  }
+ }catch(e){
+  document.getElementById('vaultResult').textContent='❌ Error: '+e;
+  toast('❌ Import error');
+ }
+ btn.disabled=false;btn.textContent='⚡ Import & Scan Now';
+}
+
+async function doVaultDelete(id){
+ if(!confirm('Delete this key from the vault?'))return;
+ try{
+  await fetch('/api/vault/delete',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id})});
+  toast('🗑 Deleted');
+  loadVault();
+ }catch(e){toast('❌ Delete failed')}
+}
+
+async function doVaultClear(){
+ if(!confirm('⚠️ Delete ALL keys from the forever vault? This cannot be undone.'))return;
+ try{
+  await fetch('/api/vault/clear',{method:'POST'});
+  toast('🗑 Vault cleared');
+  loadVault();
+ }catch(e){toast('❌ Clear failed')}
+}
+
+// ═══════════════════════════════════════════════════════════════
+// SEND TAB
+// ═══════════════════════════════════════════════════════════════
+async function doSend(){
+ let chain=document.getElementById('sendChain').value;
+ let key=document.getElementById('sendKey').value.trim();
+ let to=document.getElementById('sendTo').value.trim();
+ let amt=document.getElementById('sendAmt').value;
+ if(!key||!to||!amt){toast('⚠️ Fill all fields');return}
+ document.getElementById('sendResult').style.display='block';
+ document.getElementById('sendResult').textContent='Sending…';
+ try{
+  let resp=await fetch('/api/send-multi',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({chain,private_key:key,to,amount:parseFloat(amt)})});
+  let d=await resp.json();
+  document.getElementById('sendResult').textContent=d.ok?`✅ Sent! TX: ${d.txid||d.result||'ok'}`:`❌ ${d.error||'Failed'}`;
+ }catch(e){document.getElementById('sendResult').textContent='❌ '+e}
+}
+
+// ═══════════════════════════════════════════════════════════════
+// RECEIVE TAB
+// ═══════════════════════════════════════════════════════════════
+async function doReceive(){
+ let key=document.getElementById('recvKey').value.trim();
+ if(!key){toast('⚠️ Enter a private key');return}
+ document.getElementById('recvResult').style.display='block';
+ document.getElementById('recvResult').textContent='Deriving addresses…';
+ try{
+  let resp=await fetch('/api/receive',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({private_key:key})});
+  let d=await resp.json();
+  if(d.error){document.getElementById('recvResult').textContent='❌ '+d.error;return}
+  let out='📥 Derived Addresses:\n\n';
+  Object.entries(d.addresses||d).forEach(([ch,addr])=>{
+   if(typeof addr==='string')out+=`  ${ch.toUpperCase()}: ${addr}\n`;
+  });
+  document.getElementById('recvResult').textContent=out;
+ }catch(e){document.getElementById('recvResult').textContent='❌ '+e}
+}
+
+// ═══════════════════════════════════════════════════════════════
+// SWAP TAB
+// ═══════════════════════════════════════════════════════════════
+let swapTokens={eth:['ETH','USDC','USDT','DAI','WBTC'],matic:['MATIC','USDC','USDT','WETH'],bnb:['BNB','USDC','USDT','BUSD'],base:['ETH','USDC','USDbC'],arb:['ETH','USDC','USDT','ARB']};
+function updateSwapTokens(){
+ let ch=document.getElementById('swapChain').value,toks=swapTokens[ch]||['ETH'];
+ ['swapFrom','swapTo'].forEach(id=>{
+  let s=document.getElementById(id);s.innerHTML=toks.map(t=>`<option>${t}</option>`).join('');
  });
 }
+updateSwapTokens();
+
+async function doSwapQuote(){
+ let ch=document.getElementById('swapChain').value;
+ let fromT=document.getElementById('swapFrom').value;
+ let toT=document.getElementById('swapTo').value;
+ let amt=document.getElementById('swapAmt').value;
+ let addr=document.getElementById('swapAddr').value.trim();
+ if(!amt||!addr){toast('⚠️ Fill amount and address');return}
+ document.getElementById('swapResult').style.display='block';
+ document.getElementById('swapResult').textContent='Fetching quote…';
+ try{
+  let u=`/api/swap/quote?chain=${ch}&from_token=${fromT}&to_token=${toT}&amount=${amt}&from_addr=${addr}`;
+  let r=await fetch(u),d=await r.json();
+  document.getElementById('swapResult').textContent=JSON.stringify(d,null,2);
+ }catch(e){document.getElementById('swapResult').textContent='❌ '+e}
+}
+
+// ═══════════════════════════════════════════════════════════════
+// BRIDGE TAB
+// ═══════════════════════════════════════════════════════════════
+async function doBridgeQuote(){
+ let fc=document.getElementById('bridgeFrom').value;
+ let tc=document.getElementById('bridgeTo').value;
+ let tok=document.getElementById('bridgeToken').value;
+ let amt=document.getElementById('bridgeAmt').value;
+ let addr=document.getElementById('bridgeAddr').value.trim();
+ if(!amt||!addr){toast('⚠️ Fill amount and address');return}
+ document.getElementById('bridgeResult').style.display='block';
+ document.getElementById('bridgeResult').textContent='Fetching bridge quote…';
+ try{
+  let u=`/api/bridge/quote?from_chain=${fc}&to_chain=${tc}&from_token=${tok}&to_token=${tok}&amount=${amt}&from_addr=${addr}`;
+  let r=await fetch(u),d=await r.json();
+  document.getElementById('bridgeResult').textContent=JSON.stringify(d,null,2);
+ }catch(e){document.getElementById('bridgeResult').textContent='❌ '+e}
+}
+
+// ═══════════════════════════════════════════════════════════════
+// INIT
+// ═══════════════════════════════════════════════════════════════
 load();
-setInterval(load,10000);
-setInterval(updateScannerBar,5000);
+if(!autoTimer)autoTimer=setInterval(()=>{if(document.getElementById('tab-wallets').classList.contains('active'))load()},8000);
 </script>
 </body>
 </html>
