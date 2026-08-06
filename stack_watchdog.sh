@@ -118,7 +118,7 @@ while true; do
     [ -s "$SCAN_FILE" ] || SCAN_FILE="$HOME_DIR/.trufflehog_results.jsonl"
     : >> "$SCAN_FILE"
     _spawn "$PID_DIR/crypto_scanner.pid" "$HOME_DIR/crypto_scanner_scanner.log" \
-      "BALANCE_WORKERS=${BALANCE_WORKERS:-4}" "MASS_SCAN_JOBS=${MASS_SCAN_JOBS:-2}" \
+      "BALANCE_WORKERS=${BALANCE_WORKERS:-4}" "MASS_SCAN_JOBS=${MASS_SCAN_JOBS:-1}" \
       "SCAN_LINE_MAX_BYTES=${SCAN_LINE_MAX_BYTES:-65536}" \
       "SCAN_TEXT_MAX_CHARS=${SCAN_TEXT_MAX_CHARS:-24000}" \
       "SCAN_LINE_SLEEP=${SCAN_LINE_SLEEP:-0.01}" \
@@ -130,7 +130,7 @@ while true; do
     if ! _alive_pidfile "$PID_DIR/mass_scan.pid" && ! pgrep -f "mass_scan.py" >/dev/null 2>&1; then
       if [ -f "$HOME_DIR/adaptive_throttler.py" ]; then
         _spawn "$PID_DIR/adaptive_scan.pid" "$HOME_DIR/adaptive_scan.log" \
-          "MASS_SCAN_JOBS=${MASS_SCAN_JOBS:-2}" "BALANCE_WORKERS=${BALANCE_WORKERS:-4}" \
+          "MASS_SCAN_JOBS=${MASS_SCAN_JOBS:-1}" "BALANCE_WORKERS=${BALANCE_WORKERS:-4}" \
           -- python3 "$HOME_DIR/adaptive_throttler.py"
         echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] restarted adaptive pid=$(cat "$PID_DIR/adaptive_scan.pid")" >>"$LOG"
       elif [ -f "$HOME_DIR/run_throttled.py" ]; then
