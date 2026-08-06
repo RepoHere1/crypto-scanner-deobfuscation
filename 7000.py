@@ -20,7 +20,7 @@ Major improvements in v3.0:
   • Token rotator with configurable per-platform budgets and header-based resets
 
 Usage:
-    python 7000.py                             # default: 50000 targets
+    python 7000.py                             # default: 100000 targets
     python 7000.py --target 10000              # custom target count
     python 7000.py --engines github,gitlab     # only specific engines
     python 7000.py --output paste_box.txt      # custom output file
@@ -1852,8 +1852,8 @@ def main():
     ap = argparse.ArgumentParser(
         description="7000.py v3.0 — Multi-engine secret-surface discovery scraper"
     )
-    ap.add_argument("--target", "-t", type=int, default=50000,
-                    help="Target number of repos/projects to discover (default: 50000)")
+    ap.add_argument("--target", "-t", type=int, default=100000,
+                    help="Target number of repos/projects to discover (default: 100000)")
     ap.add_argument("--output", "-o", type=str, default="",
                     help="Output file (default: paste_box.txt)")
     ap.add_argument("--food", "-f", type=str, default="",
