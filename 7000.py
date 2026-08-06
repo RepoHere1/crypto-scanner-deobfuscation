@@ -670,6 +670,7 @@ class OutputWriter:
         self._food_seen: Set[str] = set()
         self.total_written = 0
         self.total_skipped = 0
+        self.total_seen = 0
         self.engine_counts: Dict[str, int] = {}
         self._resume_loaded = 0
 
@@ -752,6 +753,7 @@ class OutputWriter:
         line = self._mkline(url, owner, repo, topic, source)
 
         with self._lock:
+            self.total_seen += 1
             # Dedup check
             if not self.no_dedup:
                 if food_line in self._food_seen or line in self._food_seen:
@@ -763,11 +765,12 @@ class OutputWriter:
                 self._food_seen.add(food_line)
             self._food_seen.add(line)
 
-            # Write output line
+            # Write output line (fsync for durability on Android/Termux)
             try:
                 if self._fh is not None:
                     self._fh.write(line + "\n")
                     self._fh.flush()
+                    os.fsync(self._fh.fileno())
             except Exception as e:
                 cprint(f"[!] Failed to write line: {e}", color=C_BRED)
                 return False
@@ -915,11 +918,17 @@ def scrape_gitlab(out: OutputWriter, token_rotator: TokenRotator,
 
         items = http_request(url, headers=headers, timeout=30,
                              token_rotator=token_rotator, throttle=throttle)
-        if not items or (isinstance(items, dict) and items.get("_error")):
-            err = items.get("_error", "unknown") if isinstance(items, dict) else "no response"
-            cprint(f"   gitlab API error: {err}", color=C_RED)
+        # Empty list = no results for this query (not an error)
+        if isinstance(items, list) and len(items) == 0:
             break
-        if not isinstance(items, list) or len(items) == 0:
+        # Dict with _error = real API or connection error
+        if isinstance(items, dict) and items.get("_error"):
+            err = items.get("_error", "unknown")
+            code = items.get("_code", "")
+            cprint(f"   gitlab API error ({code}): {err}", color=C_RED)
+            break
+        if not isinstance(items, list):
+            cprint(f"   gitlab unexpected response type: {type(items).__name__}", color=C_RED)
             break
 
         for item in items:
@@ -1765,7 +1774,7 @@ def run(args) -> None:
                and consecutive_empty < 15):
             topic = unique_topics[topic_index]
             topic_index += 1
-            prev_count = out.total_written
+            prev_seen = out.total_seen
 
             if engine == "github":
                 scrape_github(out, gh_rotator, topic, target, deep=args.deep, throttle=throttle)
@@ -1784,7 +1793,7 @@ def run(args) -> None:
             elif engine == "postman":
                 scrape_postman(out, topic, target, tokens["postman_key"], throttle=throttle)
 
-            topic_empty = (out.total_written == prev_count)
+            topic_empty = (out.total_seen == prev_seen)
             if not topic_empty:
                 consecutive_empty = 0
             else:
@@ -1794,7 +1803,7 @@ def run(args) -> None:
             time.sleep(0.3 + random.uniform(0, 0.3))
 
         eng_done = out.engine_counts.get(engine, 0) - prev_engine_count
-        cprint(f"[{engine}] done: +{eng_done} new targets (total: {out.total_written}/{target})", color=C_GREEN)
+        cprint(f"[{engine}] done: +{eng_done} new (seen: {out.total_seen}, written: {out.total_written}/{target})", color=C_GREEN)
 
     # ── Launch API engines in parallel ──────────────────────────
     if api_engines:
