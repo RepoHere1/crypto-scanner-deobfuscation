@@ -2021,6 +2021,18 @@ def tail_file(path: str, start_offset: int = 0):
                 time.sleep(idle_sleep)
 
 
+def _multi_tail(sources, starts):
+    """Tail multiple scan files in sequence through the same hit logic.
+
+    Lets the crypto scanner also consume the deobfuscation daemon's output
+    ('.trufflehog_deobfuscated.jsonl') so deobfuscated secrets reach the same
+    detection -> balance -> notify path as raw scan input.
+    """
+    for path, start in zip(sources, starts):
+        for line, offset in tail_file(path, start_offset=int(start or 0)):
+            yield line, offset
+
+
 def main():
     scan_path = SCAN_FILE
     if not os.path.exists(scan_path):
@@ -2178,9 +2190,29 @@ def main():
     ckpt_every = float(os.environ.get("SCAN_CHECKPOINT_SEC", "30"))
     line_throttle = float(os.environ.get("SCAN_LINE_SLEEP", "0.01"))
 
+    # Deobfuscation integration: also scan the deobfuscation daemon's output
+    # through the exact same detection -> balance -> notify path, so previously
+    # hidden (deobfuscated) secrets reach the final results / notify layer too.
+    _sources = [scan_path]
+    _starts = [int(start_offset or 0)]
+    _deobf = os.path.join(os.path.expanduser("~"), ".trufflehog_deobfuscated.jsonl")
+    if os.path.exists(_deobf):
+        try:
+            _dsz = os.path.getsize(_deobf)
+        except OSError:
+            _dsz = 0
+        if _dsz > 0:
+            _keep = int(os.environ.get("SCAN_CATCHUP_BYTES", str(64 * 1024 * 1024)))
+            _sources.append(_deobf)
+            _starts.append(max(0, _dsz - _keep))
+            logger.info(
+                "Deobfuscation integration: also scanning %s (tail %d MB)",
+                _deobf, _keep // (1024 * 1024),
+            )
+
     try:
         _line_count = 0
-        for line, byte_offset in tail_file(scan_path, start_offset=start_offset):
+        for line, byte_offset in _multi_tail(_sources, _starts):
             _line_count += 1
             if _line_count % 50 == 0:
                 low = check_disk_space()

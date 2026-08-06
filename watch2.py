@@ -35,6 +35,9 @@ MASS_LOG = HOME / "run_throttled_out.log"
 ADAPT_LOG = HOME / "adaptive_scan.log"
 TH_RESULTS = HOME / ".trufflehog_results.jsonl"
 TH_MASS = HOME / ".trufflehog_mass_results.jsonl"
+DEOBF_LOG = HOME / "deobfuscation_daemon.log"
+DEOBF_FILE = HOME / ".trufflehog_deobfuscated.jsonl"
+DEOBF_RAW = HOME / "deobfuscated_secrets.txt"
 
 BOLD = "\033[1m"
 DIM = "\033[2m"
@@ -48,6 +51,7 @@ SERVICES = [
     ("mass_scan", "mass_scan.pid"),
     ("adaptive", "adaptive_scan.pid"),
     ("crypto", "crypto_scanner.pid"),
+    ("deobf", "deobfuscation_daemon.pid"),
     ("watchdog", "stack_watchdog.pid"),
 ]
 
@@ -215,6 +219,8 @@ def render(show_wallet: bool = True) -> str:
     for label, path in [
         ("trufflehog", TH_RESULTS),
         ("mass results", TH_MASS),
+        ("deobf out", DEOBF_FILE),
+        ("deobf secrets", DEOBF_RAW),
         ("memory", MEMORY),
         ("bal cache", CACHE),
         ("bal hits", HITS),
@@ -271,7 +277,7 @@ def render(show_wallet: bool = True) -> str:
     # Log tails
     lines.append(f"{BOLD}  LOG TAIL{RESET}")
     lines.append(thin)
-    for label, path in [("launch", LAUNCH_LOG), ("crypto", SCAN_LOG), ("mass", MASS_LOG), ("adapt", ADAPT_LOG)]:
+    for label, path in [("launch", LAUNCH_LOG), ("crypto", SCAN_LOG), ("mass", MASS_LOG), ("adapt", ADAPT_LOG), ("deobf", DEOBF_LOG)]:
         rows = tail_text(path, 2)
         if not rows:
             continue
