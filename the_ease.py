@@ -86,6 +86,14 @@ class Game:
         spread = abs(self.yes_ask - self.yes_bid) + abs(self.no_ask - self.no_bid)
         return max(0.0, 2.0 - spread) if spread < 2.0 else 0.0
 
+    def __hash__(self) -> int:
+        return hash(self.ticker)
+
+    def __eq__(self, other: object) -> bool:
+        if not isinstance(other, Game):
+            return NotImplemented
+        return self.ticker == other.ticker
+
     def pick(self, side: str) -> tuple[str, float]:
         if side == "yes":
             return ("YES", self.yes_ask)
