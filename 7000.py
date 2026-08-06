@@ -14,7 +14,8 @@ Major improvements in v3.0:
   • Rate-limit detection with proper Retry-After / X-RateLimit-Reset backoff
   • CPU/RAM throttle with configurable ceilings (default 90%)
   • Only confirmed-live bucket and Bitbucket probe results written to food
-  • Expanded 250+ keyword list covering crypto, infra, DevOps, cloud, DBs
+  • Expanded 370+ diversified keyword list covering crypto, infra, DevOps, cloud, DBs,
+    mobile, firmware, IoT, automotive, OSINT, red-team, forensics, supply-chain
   • JSONL output option, pipe-escaping for the default format
   • consecutive_empty bailout raised to 15, tied to total (not net-new) results
   • Token rotator with configurable per-platform budgets and header-based resets
@@ -156,186 +157,270 @@ class ResourceThrottle:
 
 
 # =============================================================================
-# COMPREHENSIVE SEARCH TOPICS  (250+ high-signal terms, tiered)
+# COMPREHENSIVE SEARCH TOPICS  (300+ diversified low-overlap terms, tiered)
+# =============================================================================
+# Design principles:
+#   1. One canonical keyword per concept — no synonym clusters
+#   2. Favor specific technical terms over generic single-words
+#   3. Each keyword should surface a *different* repo set, not remix the same top hits
+#   4. Drop saturated broad terms ("bitcoin","aws") — they only return already-seen repos
 # =============================================================================
 
 CRYPTO_TOPICS: List[str] = [
-    # ── Wallet / Key Material ───────────────────────────────────
-    "wallet.dat", "wallet-backup", "keystore-file", "keystore-json",
-    "seed-phrase", "seed-words", "mnemonic-phrase", "mnemonic-code",
-    "recovery-phrase", "restore-wallet", "import-wallet",
-    "hd-wallet", "bip32", "bip39", "bip44", "bip84", "bip141",
-    "xprv", "xpub", "ypub", "zpub", "tpub",
-    "extended-private-key", "extended-public-key",
-    "private-key", "BEGIN PRIVATE KEY", "BEGIN EC PRIVATE KEY",
-    "BEGIN RSA PRIVATE KEY", "BEGIN OPENSSH PRIVATE KEY",
-    "ethereum-private-key", "bitcoin-private-key", "solana-keypair",
-    "secret-key", "secret-keys",
+    # ── Wallet / Key Material (consolidated, one term per concept) ─
+    "wallet.dat backup", "keystore-file", "keystore json",
+    "seed-phrase recovery", "mnemonic-code generator",
+    "bip39 wordlist", "bip32 derivation",
+    "xprv extended key", "xpub derivation",
+    "private-key pem", "BEGIN EC PRIVATE KEY",
+    "solana-keypair json", "ethereum keystore v3",
+    "secret-key env", "secret-keys rotation",
 
-    # ── Crypto Libraries & Frameworks ───────────────────────────
-    "secp256k1", "ed25519", "curve25519", "p256", "nistp256",
-    "libsodium", "nacl", "openssl", "boringssl",
-    "pycryptodome", "cryptography-io", "pycoin",
-    "bitcoinlib", "web3py", "web3js", "ethers-js",
-    "solana-web3", "anchor-framework",
-    "openzeppelin", "openzeppelin-contracts",
-    "forge-std", "foundry-test", "hardhat-deploy",
-    "eth-account", "eth-keys", "eth-hash",
-    "coincurve", "ecdsa", "eddsa", "schnorr",
-    "musig2", "frost-signature", "threshold-signature",
+    # ── Crypto Libraries (unique lib names, no generic wrappers) ──
+    "secp256k1 curve", "ed25519 verify", "curve25519 scalar",
+    "libsodium sealed", "nacl secretbox",
+    "boringssl fips", "openssl evp",
+    "pycryptodome rsa", "cryptography hazmat",
+    "bitcoinlib raw", "coincurve ecdsa",
+    "ecdsa recovery", "eddsa batch",
+    "schnorr signature", "musig2 aggregate",
+    "frost threshold", "threshold-signature mpc",
+    "eth-account sign", "eth-keys generate",
+    "web3py contract", "ethers-js provider",
+    "anchor-framework idl", "solana-program library",
+    "openzeppelin contracts", "foundry forge test",
 
-    # ── Encoding / Hashing ──────────────────────────────────────
-    "base58", "base58check", "base64", "base64url", "bech32",
-    "rlp-encoding", "rlp-decode", "abi-encode", "abi-decode",
-    "protobuf-encode", "der-encoding", "pem-encoding",
-    "keccak256", "sha3-256", "blake2b", "ripemd160",
-    "hash160", "scrypt", "argon2",
-    "eth-abi", "solidity-encode", "solidity-decode",
+    # ── Encoding / Hashing (one per algorithm) ────────────────────
+    "base58check encode", "bech32 address",
+    "rlp encode decode", "eth-abi encode",
+    "keccak256 hash", "blake2b keyed",
+    "ripemd160 hash", "scrypt kdf",
+    "argon2 password",
 
-    # ── Crypto Storage / Cloud ──────────────────────────────────
-    "gcs-bucket", "gcs-secret", "gcs-credentials",
-    "s3-bucket", "s3-leak", "aws-bucket",
-    "cloud-secrets", "cloud-kms", "gcp-kms",
-    "hashicorp-vault", "vault-secret", "vault-token",
-    "secrets-manager", "aws-secrets-manager", "gcp-secret-manager",
-    "azure-keyvault", "doppler-secrets", "infisical",
+    # ── Secret Managers / Vaults ──────────────────────────────────
+    "hashicorp vault seal", "vault transit engine",
+    "aws secrets manager rotation", "gcp secret manager access",
+    "azure keyvault sdk", "doppler secrets sync",
+    "infisical inject", "sops age encryption",
 
-    # ── DeFi / Smart Contracts ──────────────────────────────────
-    "reentrancy", "flash-loan-attack", "frontrun",
-    "mev-exploit", "sandwich-attack", "oracle-manipulation",
-    "rugpull", "honeypot", "drainer", "wallet-drainer",
-    "ice-phishing", "approval-phishing", "permit-phish",
-    "uniswap", "aave", "compound-finance", "curvefi",
-    "chainlink", "makerdao", "liquity", "sushi",
-    "pancakeswap", "balancer", "yearn",
+    # ── DeFi / Smart Contract Security ────────────────────────────
+    "reentrancy guard", "flash-loan exploit",
+    "frontrun sandwich", "mev bundle",
+    "oracle manipulation price", "rugpull detector",
+    "honeypot token scanner", "wallet-drainer signature",
+    "ice-phishing approval", "permit phishing signature",
+    "proxy upgrade vulnerability", "delegatecall exploit",
+    "selfdestruct opcode", "unchecked return value",
 
-    # ── Crypto Tooling / Explorers ──────────────────────────────
-    "etherscan-api", "bscscan-api", "polygonscan-api",
-    "block-explorer", "tx-hash", "block-hash",
-    "raw-transaction", "signed-tx", "unsigned-tx",
-    "metamask", "trustwallet", "phantom-wallet", "electrum",
-    "ledger", "trezor", "coldcard",
-    "gnosis-safe", "safe-wallet", "multisig-wallet",
+    # ── Blockchain Tooling ────────────────────────────────────────
+    "etherscan api key", "block explorer indexer",
+    "raw-transaction decode", "signed-tx broadcast",
+    "metamask snaps", "phantom wallet adapter",
+    "ledger application", "trezor firmware",
+    "safe multisig transaction", "gnosis-safe sdk",
+    "subgraph index", "covalent api", "moralis stream",
 
-    # ── General Crypto ──────────────────────────────────────────
-    "bitcoin", "ethereum", "solana", "polkadot", "cosmos",
-    "avalanche", "polygon", "arbitrum", "optimism",
-    "monero", "zcash", "litecoin", "ripple", "stellar",
-    "cardano", "algorand", "tezos", "near",
-    "defi", "nft", "web3", "dapp", "smart-contract",
-    "solidity", "vyper", "rust-bitcoin",
+    # ── Specialized Crypto ────────────────────────────────────────
+    "monero ring signature", "zcash sapling",
+    "grin mimblewimble", "dash masternode",
+    "cosmos ibc", "polkadot substrate",
+    "near protocol account", "aptos move module",
+    "sui move smart", "sei cosmwasm",
+    "erc20 token standard", "erc721 nft metadata",
+    "erc4337 account abstraction", "eip712 typed data",
+    "layer2 bridge contract", "rollup sequencer",
+    "zero-knowledge proof circuit", "zk snark groth16",
+    "lightning network invoice", "taproot script path",
 ]
 
 INFRA_TOPICS: List[str] = [
-    # ── Environment / Config Files ──────────────────────────────
-    ".env", ".env.example", ".env.production", ".env.local",
-    ".env.development", ".env.staging",
-    "dotenv", "env-vars", "environment-variables",
-    "config-yaml", "config-json", "config-toml",
-    "credentials.json", "credentials-file",
-    "service-account-json", "service-account-key",
-    "google-credentials", "gcp-credentials",
-    "aws-credentials", "aws-config",
+    # ── Environment / Config (selective, no .env overload) ────────
+    ".env production vault", ".env template example",
+    "dotenv flow vault", "env-vars injection",
+    "credentials json service", "service-account private-key",
+    "aws credentials profile", "gcp credentials json",
 
-    # ── API Keys / Tokens ───────────────────────────────────────
-    "api-key", "api-secret", "api-token",
-    "aws-access-key", "aws-secret-key", "aws-session-token",
-    "infura-key", "alchemy-key", "quicknode-key",
-    "chainstack", "moralis-api", "blocknative",
-    "stripe-secret-key", "stripe-api-key",
-    "twilio-auth-token", "sendgrid-api-key",
-    "github-token", "gitlab-token", "bitbucket-app-password",
-    "slack-webhook", "discord-webhook", "telegram-bot-token",
-    "openai-api-key", "anthropic-api-key", "cohere-api-key",
-    "huggingface-token",
+    # ── API Keys / Secrets ────────────────────────────────────────
+    "api-key rotation", "api-secret management",
+    "aws access key id secret", "aws session token sts",
+    "infura project secret", "alchemy api key auth",
+    "stripe secret key test", "stripe webhook signing",
+    "twilio auth token sms", "sendgrid api key mail",
+    "github token fine grained", "gitlab personal access token",
+    "slack webhook url secret", "discord webhook token",
+    "telegram bot token api", "openai api key organization",
+    "anthropic api key claude", "huggingface access token",
+    "google api key oauth", "firebase service account",
 
-    # ── Terraform / IaC ─────────────────────────────────────────
-    "terraform.tfstate", "terraform.tfvars",
-    "terraform-backend", "terraform-variables",
-    "pulumi-state", "pulumi-config",
-    "cloudformation-template", "arm-template",
-    "cdk-output", "cdk-context",
+    # ── IaC (one per tool) ────────────────────────────────────────
+    "terraform state encryption", "terraform sensitive variable",
+    "pulumi secret provider", "pulumi stack config",
+    "cloudformation template parameters", "bicep param secure",
+    "cdk context json", "crossplane composition",
 
-    # ── Kubernetes ──────────────────────────────────────────────
-    "kubeconfig", "kube-config", "kubectl-config",
-    "k8s-secret", "kubernetes-secret",
-    "configmap", "helm-values", "helm-secrets",
-    "kustomize", "kustomization",
+    # ── Kubernetes ────────────────────────────────────────────────
+    "kubeconfig cluster user", "k8s secret opaque",
+    "kubernetes secret tls", "helm values secrets",
+    "sealed-secrets controller", "external-secrets operator",
+    "configmap literal", "kustomize secret generator",
+    "istio service mesh", "linkerd proxy inject",
 
-    # ── Docker ──────────────────────────────────────────────────
-    "docker-compose", "docker-secret", "docker-swarm-secret",
-    "docker-config", "docker-credentials",
-    "Dockerfile", "docker-build",
+    # ── Docker / Containers ───────────────────────────────────────
+    "docker compose env file", "docker secret create",
+    "docker build arg secret", "Dockerfile arg env",
+    "container registry credential", "ecr get login",
+    "ghcr docker login", "dockerhub access token",
 
-    # ── CI / CD ─────────────────────────────────────────────────
-    "Jenkinsfile", "jenkins-credentials",
-    "github-actions", "github-workflow",
-    "gitlab-ci", "gitlab-ci-yml",
-    "circleci-config", "travis-yml",
-    "argocd", "fluxcd",
-    "bitbucket-pipelines",
+    # ── CI / CD ───────────────────────────────────────────────────
+    "github actions secret context", "github workflow environment",
+    "gitlab ci variables masked", "jenkins credential binding",
+    "circleci context environment", "argocd vault plugin",
+    "fluxcd sops decryption", "tekton pipeline secret",
+    "drone ci secrets", "buildkite agent hook",
 
-    # ── Ansible / Configuration Management ──────────────────────
-    "ansible-vault", "ansible-secrets",
-    "group_vars", "host_vars",
-    "chef-secret", "puppet-eyaml",
-    "salt-pillar",
+    # ── Configuration Management ──────────────────────────────────
+    "ansible vault encrypt string", "ansible lookup hashi vault",
+    "group_vars vault encrypted", "host_vars secrets",
+    "puppet hiera eyaml", "chef data bag secret",
+    "salt pillar gpg renderer", "nixops secret key",
 
-    # ── Database ────────────────────────────────────────────────
-    "connection-string", "mongodb-uri", "mongo-url",
-    "redis-password", "redis-url",
-    "postgresql-password", "postgres-url",
-    "mysql-password", "mysql-credentials",
-    "database-url", "database-password", "database-credentials",
-    "pgpass", "my-cnf",
+    # ── Database Credentials ──────────────────────────────────────
+    "mongodb connection uri atlas", "redis auth requirepass",
+    "postgresql pgpass connection", "mysql my cnf password",
+    "sqlite encryption key", "dynamodb access key",
+    "elasticsearch xpack security", "cassandra credentials",
+    "neo4j auth bolt", "influxdb admin token",
+    "database url heroku postgres", "connection string sql server",
 
-    # ── SSH / SSL / Certs ───────────────────────────────────────
-    "id_rsa", "id_ed25519", "id_ecdsa",
-    "ssh-private-key", "ssh-config",
-    "authorized_keys", "known_hosts",
-    "ssl-certificate", "ssl-private-key", "ssl-key",
-    "openvpn-config", "wireguard-config",
-    "gpg-private-key", "pgp-private-key",
+    # ── SSH / SSL / Certs / PKI ───────────────────────────────────
+    "ssh private key pem ed25519", "ssh config identity file",
+    "authorized_keys command restrict", "ssl certificate private key pem",
+    "letsencrypt account key", "acme challenge dns",
+    "wireguard private key config", "openvpn tls auth key",
+    "gpg private key export", "pgp secret key armor",
+    "pkcs12 keystore password", "jks truststore password",
 
-    # ── Password / Secret Managers ──────────────────────────────
-    "password-store", "bitwarden", "lastpass",
-    "1password", "keepass",
-    "aws-secrets-manager", "gcp-secret-manager",
+    # ── Observability / Monitoring ────────────────────────────────
+    "prometheus alertmanager config", "grafana datasource yaml",
+    "elasticsearch kibana password", "datadog api key app",
+    "newrelic license key", "sentry dsn auth token",
+    "pagerduty integration key", "opsgenie api key",
+    "logstash pipeline config", "fluentd secret parameter",
+    "loki s3 credentials", "tempo backend config",
 
-    # ── Cloud Provider ──────────────────────────────────────────
-    "google-cloud", "google-cloud-platform",
-    "aws", "azure", "heroku", "digitalocean",
-    "linode", "vultr",
+    # ── IAM / Auth ────────────────────────────────────────────────
+    "aws iam role assume", "gcp service account impersonation",
+    "azure ad service principal secret", "okta api token",
+    "auth0 management api", "keycloak admin password",
+    "oauth2 client secret", "oidc client registration",
+    "saml signing certificate", "ldap bind password",
+    "kerberos keytab file", "freeipa admin password",
 
-    # ── General Infra ───────────────────────────────────────────
-    "nginx-conf", "apache-conf", "haproxy-cfg",
-    "systemd-service", "cron-job",
-    "logrotate-conf", "rsyslog-conf",
+    # ── Serverless / Edge ─────────────────────────────────────────
+    "aws lambda environment variables", "gcp cloud function env",
+    "azure function app settings", "cloudflare worker secret",
+    "vercel environment variable", "netlify env build",
+    "deno deploy env", "fly io secrets",
+    "supabase service role key", "firebase functions config",
 ]
 
 GENERAL_TOPICS: List[str] = [
-    "secret", "secrets", "credential", "credentials",
-    "token", "tokens", "password", "passwords",
-    "private", "confidential", "sensitive",
-    "keystore", "keychain", "keyring",
-    "jwt-secret", "jwt-token", "oauth2",
-    "webhook-secret", "webhook-url",
-    "auth", "authentication", "authorization",
-    "backup", "backups", "dump", "dumps",
-    "database-dump", "sql-dump", "mongodump",
-    "leak", "leaks", "exposed", "exposure",
-    "pentest", "penetration-test", "vulnerability-assessment",
-    "exploit", "exploit-development", "cve",
-    "bug-bounty", "responsible-disclosure",
-    "forensic", "forensics", "incident-response",
-    "malware-analysis", "reverse-engineering",
-    "security-audit", "security-scan", "sast", "dast",
-    "code-review", "static-analysis",
-    "supply-chain", "dependency-confusion",
-    "misconfiguration", "hardcoded",
+    # ── Mobile Security ───────────────────────────────────────────
+    "android keystore extraction", "ios keychain dump",
+    "apk decompile smali", "ipa decrypt frida",
+    "android manifest permission", "ios provisioning profile",
+    "mobile application penetration", "react native sensitive",
+    "flutter secure storage", "expo secrets env",
+
+    # ── Firmware / Embedded / IoT ─────────────────────────────────
+    "firmware extraction binwalk", "uboot environment variables",
+    "device tree blob", "squashfs rootfs password",
+    "iot firmware analysis", "esp32 firmware dump",
+    "arm trusted firmware", "tpm attestation key",
+    "secure boot key enrollment", "uefi variable nvram",
+    "router configuration backup", "openwrt shadow hash",
+    "mikrotik backup password", "cisco config enable secret",
+
+    # ── Automotive / CAN Bus ──────────────────────────────────────
+    "obd2 can bus", "can bus reverse engineering",
+    "uds diagnostic security", "automotive ecu firmware",
+    "tesla api token", "elm327 obd",
+
+    # ── OSINT / Recon ─────────────────────────────────────────────
+    "shodan api key", "censys api secret",
+    "zoomeye api token", "fofa api key",
+    "grey noise api", "securitytrails api",
+    "virustotal api key", "urlscan api",
+    "alienvault otx api", "threatcrowd api",
+    "spiderfoot scan", "theharvester email",
+    "amass enum passive", "subfinder config",
+    "httpx probe", "nuclei template critical",
+    "gau get all urls", "wayback machine url",
+
+    # ── Phishing / Social Engineering ─────────────────────────────
+    "evilginx phishlet", "gophish campaign",
+    "modlishka reverse proxy", "muraena phishing",
+    "credential harvester payload", "typosquatting domain",
+    "homograph attack domain", "clone phishing toolkit",
+
+    # ── Persistence / C2 / Red Team ───────────────────────────────
+    "sliver c2 implant", "havoc c2 teamserver",
+    "mythic agent apfell", "cobalt strike beacon",
+    "metasploit resource script", "empire stager powershell",
+    "covenant grunt listener", "brute ratel badger",
+    "bloodhound sharphound", "mimikatz sekurlsa",
+    "kerberoast hashcat", "asreproast ticket",
+
+    # ── Exfiltration / Data Theft ─────────────────────────────────
+    "rclone config password", "megatools login",
+    "gdrive service account upload", "dropbox access token upload",
+    "s3 sync exfil", "dns exfiltration tunnel",
+    "icmp tunnel data", "webshell backdoor php",
+    "reverse shell python", "bind shell netcat",
+
+    # ── Forensics / Incident Response ─────────────────────────────
+    "volatility memory plugin", "rekall profile",
+    "plaso log2timeline", "sleuthkit autopsy",
+    "yara rule detection", "sigma rule detection",
+    "velociraptor artifact", "grr rapid response",
+    "osquery fleet config", "wazuh agent ossec",
+
+    # ── Vulnerabilities / Exploits ────────────────────────────────
+    "exploitdb searchsploit", "metasploit module exploit",
+    "cve poc exploit", "nvd cpe match",
+    "github advisory", "snyk vulnerability database",
+    "owasp zap context", "burp suite extension",
+    "sqlmap tamper script", "nmap nse script",
+
+    # ── Malware / Reverse Engineering ─────────────────────────────
+    "malware sandbox cape", "cuckoo sandbox analysis",
+    "ghidra script python", "ida pro plugin python",
+    "radare2 r2pipe", "binary ninja plugin",
+    "x64dbg plugin", "ollydbg script",
+    "pe studio analysis", "dnspy decompiler",
+    "jadx decompile apk", "apktool decode",
+    "dex2jar convert", "procyon decompiler",
+
+    # ── Scanner / Pipeline Tools ──────────────────────────────────
+    "trufflehog verified", "gitleaks detect config",
+    "gitguardian ggshield", "detect-secrets baseline",
+    "whispers config", "credential digger",
+    "semgrep rule secrets", "checkov skip check",
+    "tfsec ignore", "trivy scan image",
+    "dependency check nvd", "npm audit fix",
+    "pip audit vulnerability", "bundler audit gem",
+    "cargo audit advisory", "govulncheck module",
+
+    # ── Supply Chain / Build ──────────────────────────────────────
+    "software bill of materials spdx", "cyclonedx sbom",
+    "sigstore cosign sign", "slsa provenance attestation",
+    "in-toto layout", "salsa supply chain",
+    "dependency confusion attack", "package hijack npm",
+    "typosquatting pypi", "malicious docker image",
+    "artifact repository jfrog", "sonatype nexus repository",
 ]
 
-# Combined list for default mode
+# Combined list for default mode  (dict.fromkeys removes exact dupes)
 ALL_TOPICS: List[str] = list(dict.fromkeys(
     CRYPTO_TOPICS + INFRA_TOPICS + GENERAL_TOPICS
 ))
@@ -668,8 +753,10 @@ class OutputWriter:
         self.skip_probes = skip_probes
         self._lock = threading.Lock()
         self._food_seen: Set[str] = set()
+        self._repo_ids_seen: Set[str] = set()  # "source:owner/repo" normalized
         self.total_written = 0
         self.total_skipped = 0
+        self.total_duplicate_repos = 0  # same repo, different keyword
         self.total_seen = 0
         self.engine_counts: Dict[str, int] = {}
         self._resume_loaded = 0
@@ -751,18 +838,26 @@ class OutputWriter:
               source: str, food_line: str) -> bool:
         """Write a line to output and food file. Returns True on success."""
         line = self._mkline(url, owner, repo, topic, source)
+        # Normalized repo identity key: "source:owner/repo" (lowercase)
+        repo_id = f"{source}:{owner.lower()}/{repo.lower()}"
 
         with self._lock:
             self.total_seen += 1
-            # Dedup check
+            # Dedup check: exact food_line or output line
             if not self.no_dedup:
                 if food_line in self._food_seen or line in self._food_seen:
                     self.total_skipped += 1
                     return False
 
-            # Dedup: also check by food_line (git URL) to avoid duplicates
+            # Dedup check: same repo from a different keyword
+            if not self.no_dedup and repo_id in self._repo_ids_seen:
+                self.total_duplicate_repos += 1
+                return False
+
+            # Register repo ID and food lines
             if not self.no_dedup:
                 self._food_seen.add(food_line)
+                self._repo_ids_seen.add(repo_id)
             self._food_seen.add(line)
 
             # Write output line (fsync for durability on Android/Termux)
@@ -847,6 +942,7 @@ def scrape_github(out: OutputWriter, token_rotator: TokenRotator,
         if not resp.get("items"):
             break
 
+        written_before = out.total_written
         for item in resp.get("items", []):
             if out.total_written >= target_count:
                 break
@@ -856,8 +952,8 @@ def scrape_github(out: OutputWriter, token_rotator: TokenRotator,
             food = f"https://github.com/{owner_login}/{repo_name}.git"
             out.write(html_url, owner_login, repo_name, topic, "github", food)
 
-        count = len(resp.get("items", []))
-        cprint(f"   github page {page}: +{count} | Total: {out.total_written}/{target_count}", color=C_GREEN)
+        new_written = out.total_written - written_before
+        cprint(f"   github page {page}: +{new_written} | Total: {out.total_written}/{target_count}", color=C_GREEN)
         time.sleep(1.5 + random.uniform(0, 1.0))
 
     # --deep: also search code
@@ -931,6 +1027,7 @@ def scrape_gitlab(out: OutputWriter, token_rotator: TokenRotator,
             cprint(f"   gitlab unexpected response type: {type(items).__name__}", color=C_RED)
             break
 
+        written_before = out.total_written
         for item in items:
             if out.total_written >= target_count:
                 break
@@ -944,7 +1041,8 @@ def scrape_gitlab(out: OutputWriter, token_rotator: TokenRotator,
             food = f"https://gitlab.com/{ns}.git"
             out.write(web_url, owner, repo_name, topic, "gitlab", food)
 
-        cprint(f"   gitlab page {page}: +{len(items)} | Total: {out.total_written}/{target_count}", color=C_GREEN)
+        new_written = out.total_written - written_before
+        cprint(f"   gitlab page {page}: +{new_written} | Total: {out.total_written}/{target_count}", color=C_GREEN)
         time.sleep(1.5 + random.uniform(0, 1.0))
 
 
@@ -981,7 +1079,7 @@ def scrape_huggingface(out: OutputWriter, token_rotator: TokenRotator,
             if not items or not isinstance(items, list):
                 continue
 
-            found = 0
+            written_before = out.total_written
             for item in items:
                 if out.total_written >= target_count:
                     break
@@ -993,10 +1091,10 @@ def scrape_huggingface(out: OutputWriter, token_rotator: TokenRotator,
                 repo_name = parts[-1]
                 hf_url = f"https://huggingface.co/{item_id}"
                 out.write(hf_url, owner, repo_name, topic, "huggingface", f"hf:{item_id}")
-                found += 1
 
-            if found > 0:
-                cprint(f"   huggingface '{q}' {kind}: +{found} | Total: {out.total_written}/{target_count}", color=C_GREEN)
+            new_written = out.total_written - written_before
+            if new_written > 0:
+                cprint(f"   huggingface '{q}' {kind}: +{new_written} | Total: {out.total_written}/{target_count}", color=C_GREEN)
             time.sleep(0.8)
 
 
@@ -1021,6 +1119,7 @@ def scrape_docker(out: OutputWriter, topic: str, target_count: int,
         if not resp or not resp.get("results"):
             break
 
+        written_before = out.total_written
         for r in resp.get("results", []):
             if out.total_written >= target_count:
                 break
@@ -1037,8 +1136,8 @@ def scrape_docker(out: OutputWriter, topic: str, target_count: int,
             docker_url = f"https://hub.docker.com/r/{name}"
             out.write(docker_url, owner, repo_name, topic, "docker", f"docker:{name}:latest")
 
-        count = len(resp.get("results", []))
-        cprint(f"   docker page {page}: +{count} | Total: {out.total_written}/{target_count}", color=C_GREEN)
+        new_written = out.total_written - written_before
+        cprint(f"   docker page {page}: +{new_written} | Total: {out.total_written}/{target_count}", color=C_GREEN)
         time.sleep(1.5 + random.uniform(0, 1.0))
 
 
@@ -1084,6 +1183,7 @@ def scrape_bitbucket(out: OutputWriter, topic: str, target_count: int,
             if not resp or not resp.get("values"):
                 break
 
+            written_before = out.total_written
             for item in resp.get("values", []):
                 if out.total_written >= target_count:
                     break
@@ -1100,8 +1200,8 @@ def scrape_bitbucket(out: OutputWriter, topic: str, target_count: int,
                 food = f"https://bitbucket.org/{full_name}.git"
                 out.write(html_url, owner, repo_name, topic, "bitbucket", food)
 
-            count = len(resp.get("values", []))
-            cprint(f"   bitbucket API page {page}: +{count} | Total: {out.total_written}/{target_count}", color=C_GREEN)
+            new_written = out.total_written - written_before
+            cprint(f"   bitbucket API page {page}: +{new_written} | Total: {out.total_written}/{target_count}", color=C_GREEN)
             time.sleep(1.5 + random.uniform(0, 1.0))
 
     # Workspace probe (only write confirmed-live repos)
@@ -1193,6 +1293,7 @@ def scrape_postman(out: OutputWriter, topic: str, target_count: int,
         if not resp or not resp.get("collections"):
             break
 
+        written_before = out.total_written
         for col in resp.get("collections", []):
             if out.total_written >= target_count:
                 break
@@ -1203,8 +1304,8 @@ def scrape_postman(out: OutputWriter, topic: str, target_count: int,
             col_url = f"https://www.postman.com/collections/{uid}"
             out.write(col_url, "postman", col_name, topic, "postman", f"postman:{uid}")
 
-        count = len(resp.get("collections", []))
-        cprint(f"   postman page {page}: +{count} | Total: {out.total_written}/{target_count}", color=C_GREEN)
+        new_written = out.total_written - written_before
+        cprint(f"   postman page {page}: +{new_written} | Total: {out.total_written}/{target_count}", color=C_GREEN)
         time.sleep(1.5 + random.uniform(0, 1.0))
 
 
@@ -1846,6 +1947,7 @@ def run(args) -> None:
     cprint("=" * 60, color=C_BCYN, bold=True)
     cprint(f"Total targets discovered: {out.total_written} / {target}", color=C_BGRN, bold=True)
     cprint(f"Total duplicates skipped: {out.total_skipped}", color=C_YELLOW)
+    cprint(f"  (same-repo cross-keyword: {out.total_duplicate_repos})", color=C_YELLOW, dim=True)
     for k in active_engines:
         cnt = out.engine_counts.get(k, 0)
         cprint(f"  {k} : {cnt}", color=C_CYAN)

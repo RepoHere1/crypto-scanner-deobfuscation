@@ -1,0 +1,13 @@
+#!/data/data/com.termux/files/usr/bin/bash
+# kalshi-combo -- KALSHI-COMBO daemon (creds from .env)
+set -a; source "$HOME/.env"; set +a
+cd "$HOME" || exit 1
+
+if [ "$1" = "--bg" ]; then
+  shift; PIDF="$HOME/kalshi-combo.pid"
+  [ -f "$PIDF" ] && kill -0 "$(cat "$PIDF")" 2>/dev/null && echo "already running" && exit 1
+  nohup python3 -u the_ease.py --daemon "$@" >> "$HOME/kalshi-combo.log" 2>&1 &
+  echo $! > "$PIDF"; echo "pid=$!"
+  exit 0
+fi
+exec python3 -u the_ease.py --daemon "$@"

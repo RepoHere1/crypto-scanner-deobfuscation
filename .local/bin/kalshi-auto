@@ -1,6 +1,1 @@
-#!/data/data/com.termux/files/usr/bin/bash
-# kalshi-auto — THE SIX: show open positions + run continuously
-export KALSHI_API_KEY_ID='dc817127-84ab-4451-bf34-c794c9dcfe98'
-export KALSHI_PRIVATE_KEY_PATH="$HOME/.kalshi/private_key.pem"
-cd "$HOME" || exit 1
-exec python3 the_six.py --show-open --loop 60 "$@"
+/data/data/com.termux/files/home/.local/bin/kalshi-combo

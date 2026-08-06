@@ -93,6 +93,9 @@ class KalshiClient:
     @classmethod
     def from_env(cls, **kwargs: Any) -> "KalshiClient":
         """Create client from environment variables."""
+        import os
+        kwargs.setdefault("api_key_id", os.environ.get("KALSHI_API_KEY_ID", ""))
+        kwargs.setdefault("private_key_path", os.environ.get("KALSHI_PRIVATE_KEY_PATH", ""))
         return cls(**kwargs)
 
     # --- Auth ---

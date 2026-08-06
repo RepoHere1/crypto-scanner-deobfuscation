@@ -1,0 +1,105 @@
+#!/data/data/com.termux/files/usr/bin/bash
+# kalshi-daemon — background launcher + auto-restart watchdog for kalshi-auto
+#
+# Usage:
+#   kalshi-daemon              # start dry-run daemon in background
+#   kalshi-daemon --live       # start LIVE daemon in background
+#   kalshi-daemon status       # check if daemon is running
+#   kalshi-daemon stop         # stop the daemon
+#   kalshi-daemon log          # tail the daemon log
+
+set -e
+
+LOG_FILE="$HOME/kalshi-daemon.log"
+PID_FILE="$HOME/kalshi-daemon.pid"
+RESTART_COUNT_FILE="$HOME/kalshi-daemon.restarts"
+
+cd "$HOME"
+
+# ── status ──────────────────────────────────────────────────────
+if [ "${1:-}" = "status" ]; then
+    if [ -f "$PID_FILE" ]; then
+        pid=$(cat "$PID_FILE")
+        if kill -0 "$pid" 2>/dev/null; then
+            restarts=$(cat "$RESTART_COUNT_FILE" 2>/dev/null || echo 0)
+            echo "✅ kalshi-daemon RUNNING (pid=$pid, restarts=$restarts)"
+            echo "   Log: $LOG_FILE"
+            exit 0
+        else
+            echo "⚠️  PID file exists ($pid) but process is dead.  Stale."
+            rm -f "$PID_FILE"
+        fi
+    fi
+    echo "❌ kalshi-daemon NOT running"
+    exit 1
+fi
+
+# ── stop ────────────────────────────────────────────────────────
+if [ "${1:-}" = "stop" ]; then
+    if [ -f "$PID_FILE" ]; then
+        pid=$(cat "$PID_FILE")
+        if kill -0 "$pid" 2>/dev/null; then
+            echo "Stopping kalshi-daemon (pid=$pid)..."
+            kill "$pid" 2>/dev/null || true
+            sleep 1
+            kill -9 "$pid" 2>/dev/null || true
+            rm -f "$PID_FILE"
+            echo "✅ Stopped."
+        else
+            rm -f "$PID_FILE"
+            echo "Stale PID cleaned up."
+        fi
+    else
+        echo "No PID file — daemon not running."
+    fi
+    exit 0
+fi
+
+# ── log ─────────────────────────────────────────────────────────
+if [ "${1:-}" = "log" ]; then
+    exec tail -f "$LOG_FILE"
+fi
+
+# ── start (default) ─────────────────────────────────────────────
+if [ -f "$PID_FILE" ]; then
+    pid=$(cat "$PID_FILE")
+    if kill -0 "$pid" 2>/dev/null; then
+        echo "⚠️  kalshi-daemon already running (pid=$pid)"
+        echo "   Use 'kalshi-daemon stop' first."
+        exit 1
+    fi
+    rm -f "$PID_FILE"
+fi
+
+# Increment restart counter
+restarts=$(cat "$RESTART_COUNT_FILE" 2>/dev/null || echo 0)
+echo $((restarts + 1)) > "$RESTART_COUNT_FILE"
+
+# Launch daemon in background with auto-restart
+(
+    while true; do
+        echo "=== kalshi-daemon starting at $(date) ===" >> "$LOG_FILE"
+        PYTHONUNBUFFERED=1 python3 -u the_ease.py --daemon "$@" >> "$LOG_FILE" 2>&1
+        exit_code=$?
+        echo "=== kalshi-daemon exited (code=$exit_code) at $(date) ===" >> "$LOG_FILE"
+        if [ $exit_code -eq 0 ]; then
+            echo "=== Normal exit — restarting in 10s ===" >> "$LOG_FILE"
+            sleep 10
+        else
+            echo "=== Crash (code=$exit_code) — restarting in 30s ===" >> "$LOG_FILE"
+            sleep 30
+        fi
+    done
+) &
+
+daemon_pid=$!
+echo $daemon_pid > "$PID_FILE"
+
+echo "✅ kalshi-daemon started (pid=$daemon_pid)"
+echo "   Log: $LOG_FILE"
+echo "   Use 'kalshi-daemon status' to check"
+echo "   Use 'kalshi-daemon log' to tail the log"
+echo "   Use 'kalshi-daemon stop' to stop"
+
+# Disown so it survives terminal close
+disown $daemon_pid 2>/dev/null || true
