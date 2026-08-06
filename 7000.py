@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """
 7000.py v3.0 — Multi-engine secret-surface discovery scraper
-Searches GitHub, GitLab, HuggingFace, Docker Hub, Bitbucket, Postman, GCS, S3
-for repos/projects likely to contain secrets, keys, credentials, and
-crypto material. Outputs to paste_box.txt for downstream TruffleHog scanning.
+Searches GitHub, GitLab, HuggingFace, Docker Hub, Bitbucket, Postman,
+and cloud storage (GCS, S3, Azure Blob, DigitalOcean Spaces)
+for repos/projects/buckets likely to contain secrets, keys, credentials,
+and crypto material. Outputs to paste_box.txt for downstream scanning.
 
 Major improvements in v3.0:
   • Engines run in parallel via ThreadPoolExecutor (4-6x faster)
@@ -347,7 +348,7 @@ TOPIC_TIERS = {
 }
 
 ALL_ENGINES = ["github", "gitlab", "huggingface", "docker",
-               "gcs", "s3", "bitbucket", "postman"]
+               "gcs", "s3", "azure", "spaces", "bitbucket", "postman"]
 
 KNOWN_BB_WORKSPACES = [
     # ── Crypto ──────────────────────────────────────────────────
@@ -1199,78 +1200,469 @@ def scrape_postman(out: OutputWriter, topic: str, target_count: int,
 
 
 # =============================================================================
-# CLOUD BUCKET PROBING  (GCS / S3 — only 200 counts as live)
+# CLOUD BUCKET PROBING — multi-provider, multi-region, content-aware
 # =============================================================================
 
-def probe_cloud_buckets(out: OutputWriter, provider: str, target_count: int,
-                        bucket_probe_cap: int,
-                        throttle: Optional[ResourceThrottle] = None):
-    patterns = [
+# Provider configurations: label, endpoints, listing path, food prefix
+CLOUD_PROVIDERS: Dict[str, Dict[str, Any]] = {
+    "s3": {
+        "label": "AWS S3",
+        "endpoints": [
+            "https://{name}.s3.amazonaws.com",
+            "https://{name}.s3.us-east-1.amazonaws.com",
+            "https://{name}.s3.us-east-2.amazonaws.com",
+            "https://{name}.s3.us-west-1.amazonaws.com",
+            "https://{name}.s3.us-west-2.amazonaws.com",
+            "https://{name}.s3.eu-west-1.amazonaws.com",
+            "https://{name}.s3.eu-west-2.amazonaws.com",
+            "https://{name}.s3.eu-central-1.amazonaws.com",
+            "https://{name}.s3.ap-southeast-1.amazonaws.com",
+            "https://{name}.s3.ap-southeast-2.amazonaws.com",
+            "https://{name}.s3.ap-northeast-1.amazonaws.com",
+            "https://{name}.s3.ap-south-1.amazonaws.com",
+            "https://{name}.s3.sa-east-1.amazonaws.com",
+        ],
+        "listing_path": "?prefix=&max-keys=1000",
+        "listing_namespace": "http://s3.amazonaws.com/doc/2006-03-01/",
+        "food_prefix": "s3://",
+    },
+    "gcs": {
+        "label": "Google Cloud Storage",
+        "endpoints": [
+            "https://storage.googleapis.com/{name}",
+            "https://{name}.storage.googleapis.com",
+        ],
+        "listing_path": "?max-results=1000",
+        "listing_namespace": "http://doc.s3.amazonaws.com/2006-03-01",
+        "food_prefix": "gs://",
+    },
+    "azure": {
+        "label": "Azure Blob Storage",
+        "endpoints": [
+            "https://{name}.blob.core.windows.net",
+        ],
+        "listing_path": "?restype=container&comp=list&maxresults=1000",
+        "listing_namespace": "",
+        "food_prefix": "azure://",
+    },
+    "spaces": {
+        "label": "DigitalOcean Spaces",
+        "endpoints": [
+            "https://{name}.nyc3.digitaloceanspaces.com",
+            "https://{name}.sfo2.digitaloceanspaces.com",
+            "https://{name}.sfo3.digitaloceanspaces.com",
+            "https://{name}.ams3.digitaloceanspaces.com",
+            "https://{name}.sgp1.digitaloceanspaces.com",
+            "https://{name}.fra1.digitaloceanspaces.com",
+        ],
+        "listing_path": "?prefix=&max-keys=1000",
+        "listing_namespace": "http://s3.amazonaws.com/doc/2006-03-01/",
+        "food_prefix": "do://",
+    },
+}
+
+# ── Smart bucket name seed list ──────────────────────────────────
+# These are common bucket-name patterns observed in real-world leaks:
+# terraform state, cloudformation, elasticbeanstalk, backups, CI artifacts, etc.
+BUCKET_SEEDS: List[str] = [
+    # ── Infrastructure-as-Code state ─────────────────────────────
+    "terraform-state", "terraform-tfstate", "tfstate", "tfstate-backend",
+    "terraform-backend", "terraform", "tfvars",
+    "cloudformation-templates", "cf-templates", "cfn-templates",
+    "cdk-bootstrap", "cdk-assets", "cdktoolkit",
+    "pulumi-state", "pulumi-backend",
+    # ── AWS service buckets ──────────────────────────────────────
+    "elasticbeanstalk", "beanstalk", "eb-deploy", "eb-app",
+    "cloudtrail", "cloudtrail-logs", "aws-logs", "aws-log",
+    "cloudfront-logs", "cloudfront", "cf-logs",
+    "serverless-deploy", "serverless-state", "sls-deploy", "sls-state",
+    "codepipeline", "codebuild", "codedeploy",
+    "s3-access-logs", "elb-access-logs", "alb-access-logs",
+    "aws-config", "config-bucket", "aws-inventory",
+    "guardduty", "macie", "securityhub",
+    # ── Backup / Archive ─────────────────────────────────────────
+    "backup", "backups", "db-backup", "database-backup",
+    "sql-backup", "sql-dump", "mongodb-backup", "postgres-backup",
+    "mysql-backup", "redis-backup", "elasticsearch-backup",
+    "snapshots", "snapshot", "ebs-snapshots", "rds-snapshots",
+    "archive", "archives", "old-data", "cold-storage",
+    "disaster-recovery", "dr-backup", "dr-replica",
+    # ── Storage / Assets ─────────────────────────────────────────
+    "assets", "media", "uploads", "downloads",
+    "static", "static-assets", "static-files", "static-media",
+    "cdn", "cdn-assets", "cdn-static", "cdn-media",
+    "public", "public-assets", "public-files",
+    "user-uploads", "user-files", "user-data",
+    "app-data", "app-storage", "app-assets",
+    "content", "content-store", "content-delivery",
+    # ── Config / Secrets ─────────────────────────────────────────
+    "config", "configs", "configuration", "app-config",
+    "env-config", "env-files", "dotenv", "env-vars",
+    "credentials", "creds", "secrets", "secret-config",
+    "vault", "vault-data", "vault-backend", "vault-storage",
+    "key-store", "keystore", "cert-store", "certs",
+    "ssl-certs", "tls-certs", "certificates",
+    "service-accounts", "sa-keys", "iam-keys",
+    # ── CI/CD Artifacts ──────────────────────────────────────────
+    "jenkins", "jenkins-artifacts", "jenkins-data",
+    "gitlab-artifacts", "gitlab-ci", "gitlab-registry",
+    "github-artifacts", "github-actions",
+    "circleci", "circleci-artifacts", "circleci-cache",
+    "travis-ci", "travis-artifacts",
+    "build-artifacts", "build-output", "build-cache",
+    "docker-registry", "docker-images", "container-registry",
+    "helm-charts", "helm-repo", "chartmuseum",
+    "packages", "releases", "artifacts", "dist",
+    # ── Logs / Monitoring ────────────────────────────────────────
+    "logs", "app-logs", "access-logs", "error-logs",
+    "syslog", "event-logs", "audit-logs",
+    "analytics", "metrics", "monitoring",
+    "elasticsearch", "kibana", "grafana", "prometheus",
+    "splunk", "datadog", "newrelic",
+    # ── Databases ────────────────────────────────────────────────
+    "database", "db-store", "data-store", "datastore",
+    "db-snapshots", "db-dumps", "db-exports",
+    "data-lake", "data-warehouse", "datalake",
+    "athena-results", "athena-query", "redshift", "redshift-spectrum",
+    "glue", "glue-scripts", "glue-data",
+    "emr", "emr-logs", "emr-data",
+    # ── Development / Staging ────────────────────────────────────
+    "dev", "development", "staging", "test", "testing",
+    "qa", "uat", "sandbox", "demo",
+    "dev-assets", "dev-data", "dev-config",
+    "staging-assets", "staging-data",
+    "test-data", "test-fixtures", "test-assets",
+    # ── Corporate / Enterprise ───────────────────────────────────
+    "internal", "internal-assets", "internal-data",
+    "corp", "corporate", "enterprise",
+    "hr", "hr-data", "employee-data",
+    "finance", "financial", "billing", "invoices",
+    "payroll", "accounting", "tax",
+    "legal", "contracts", "documents",
+    "customer-data", "client-data", "partner-data",
+    "onboarding", "offboarding",
+    # ── Source Code ──────────────────────────────────────────────
+    "source-code", "code-repo", "git-repo", "repo-mirror",
+    "releases", "software-releases", "binaries",
+    "mobile-app", "app-builds", "ipa", "apk",
+    "website", "webapp", "frontend", "backend",
+]
+
+# ── Files to probe on publicly listable buckets ──────────────────
+SECRET_FILES: List[str] = [
+    ".env", ".env.production", ".env.staging", ".env.local",
+    ".env.development", ".env.backup", ".env.example",
+    "credentials.json", "credentials.yml", "credentials.yaml",
+    "config.json", "config.yml", "config.yaml", "config.toml",
+    "settings.json", "settings.yml", "settings.py",
+    "terraform.tfstate", "terraform.tfstate.backup",
+    "terraform.tfvars", "terraform.tfvars.json",
+    "secrets.yml", "secrets.yaml", "secrets.json",
+    "service-account.json", "service-account-key.json",
+    "gcp-credentials.json", "google-credentials.json",
+    "aws-credentials", "aws-config", "credentials.csv",
+    "kubeconfig", "kube-config", "admin.conf",
+    "id_rsa", "id_ed25519", "id_ecdsa", "id_dsa",
+    "ssh-private-key", "ssh-key", "authorized_keys",
+    "docker-compose.yml", "docker-compose.yaml",
+    "docker-config.json", "config.json",
+    "backup.sql", "dump.sql", "database.sql",
+    "wp-config.php", "wp-config.bak", "wp-config-sample.php",
+    ".htpasswd", ".htaccess",
+    ".npmrc", ".pypirc", ".git-credentials", ".gitconfig",
+    "jenkins-credentials.xml",
+    "ansible-vault.yml", "ansible-vault.yaml",
+    "vault-token", "vault-secret",
+    ".bash_history", ".zsh_history", ".mysql_history",
+    "private.key", "private.pem", "key.pem",
+    "cert.pem", "certificate.pem", "fullchain.pem",
+    "server.key", "server.crt",
+    ".s3cfg", ".aws/credentials", ".boto",
+    "packer-vars.json", "packer.json",
+    "Makefile.env", ".makerc",
+    "gradle.properties", "local.properties",
+]
+
+
+def _generate_bucket_candidates(bucket_probe_cap: int) -> List[str]:
+    """Generate candidate bucket names from topics, seeds, and patterns.
+
+    Combines three strategies:
+    1. Topic keywords × suffix patterns (e.g. wallet-backup, wallet-secrets)
+    2. Built-in seed list combined with topic keywords (e.g. terraform-state-wallet)
+    3. Standalone built-in seeds that are likely targets on their own
+    """
+    candidates: Set[str] = set()
+
+    suffix_patterns = [
         "{0}", "{0}-secrets", "{0}-secret", "{0}-keys", "{0}-key",
         "{0}-private", "{0}-backup", "{0}-backups", "{0}-dump",
         "{0}-dumps", "{0}-data", "{0}-config", "{0}-env", "{0}-envs",
         "{0}-credentials", "{0}-creds", "{0}-leaks", "{0}-leak",
         "{0}-production", "{0}-prod", "{0}-staging", "{0}-database",
         "{0}-db", "{0}-wallet", "{0}-crypto", "{0}-api",
-        "{0}-tokens", "{0}-token",
+        "{0}-tokens", "{0}-token", "{0}-storage", "{0}-store",
+        "{0}-files", "{0}-assets", "{0}-logs",
         "secrets-{0}", "keys-{0}", "private-{0}",
         "backup-{0}", "leaked-{0}", "dump-{0}", "creds-{0}",
+        "dev-{0}", "prod-{0}", "staging-{0}", "test-{0}",
     ]
 
-    # Use the active topics list from the caller context
-    cand_set: Set[str] = set()
+    # Pre-extract short keywords (3+ chars, not digits-only)
+    short_words: List[str] = []
     for topic in ALL_TOPICS:
         for w in re.split(r'[^a-z0-9]+', topic.lower()):
-            if len(w) < 3 or w.isdigit():
-                continue
-            for p in patterns:
-                if len(cand_set) >= bucket_probe_cap:
-                    break
-                n = p.format(w)
-                cand_set.add(n)
-            if len(cand_set) >= bucket_probe_cap:
-                break
-        if len(cand_set) >= bucket_probe_cap:
+            w = w.strip("-.")
+            if len(w) >= 3 and not w.isdigit() and w not in short_words:
+                short_words.append(w)
+
+    # Also pull words from known Bitbucket workspaces (real org names)
+    for ws in KNOWN_BB_WORKSPACES:
+        w = ws.lower().strip("-.")
+        if len(w) >= 3 and w not in short_words:
+            short_words.append(w)
+
+    # Strategy 1: topic keywords × patterns
+    for w in short_words:
+        if len(candidates) >= bucket_probe_cap:
             break
+        for p in suffix_patterns:
+            if len(candidates) >= bucket_probe_cap:
+                break
+            n = p.format(w)
+            if 3 <= len(n) <= 63:  # S3/GCS bucket name length limits
+                candidates.add(n)
 
-    candidates = list(cand_set)
-    cprint(f"[{provider.upper()}] probing {len(candidates)} candidate bucket names...", color=C_YELLOW)
+    # Strategy 2: seed × keyword combinations
+    for seed in BUCKET_SEEDS:
+        if len(candidates) >= bucket_probe_cap:
+            break
+        for w in short_words[:40]:  # cap keyword cross-product
+            if len(candidates) >= bucket_probe_cap:
+                break
+            for combo in (f"{seed}-{w}", f"{w}-{seed}"):
+                if 3 <= len(combo) <= 63:
+                    candidates.add(combo)
 
-    live_200: List[str] = []
-    exists_403: List[str] = []
+    # Strategy 3: standalone seeds with common suffixes
+    for seed in BUCKET_SEEDS:
+        if len(candidates) >= bucket_probe_cap:
+            break
+        candidates.add(seed)
+        for suffix in ("-dev", "-staging", "-prod", "-test", "-qa",
+                       "-us", "-eu", "-ap", "-01", "-1", "-backup", "-old"):
+            combo = f"{seed}{suffix}"
+            if len(combo) <= 63:
+                candidates.add(combo)
 
-    def _check(name: str) -> Tuple[str, int]:
+    return list(candidates)[:bucket_probe_cap]
+
+
+def _try_list_bucket(url: str, provider_cfg: Dict[str, Any],
+                     timeout: int = 15) -> List[str]:
+    """Attempt to list objects in a public bucket. Returns list of object keys."""
+    list_url = url.rstrip("/") + provider_cfg["listing_path"]
+    try:
+        req = urllib.request.Request(list_url, method="GET")
+        req.add_header("User-Agent", "Mozilla/5.0")
+        with urllib.request.urlopen(req, timeout=timeout, context=SSL_CONTEXT) as resp:
+            body = resp.read().decode("utf-8", errors="replace")
+            # Parse XML for S3-compatible and Azure listing formats
+            keys: List[str] = []
+            # S3/GCS/DO format: <Key>...</Key> or <Contents><Key>...</Key></Contents>
+            for m in re.finditer(r'<Key>([^<]+)</Key>', body):
+                keys.append(m.group(1))
+            # Azure format: <Name>...</Name> inside <Blob>
+            for m in re.finditer(r'<Name>([^<]+)</Name>', body):
+                k = m.group(1)
+                if k not in keys:
+                    keys.append(k)
+            return keys
+    except Exception:
+        return []
+
+
+def _probe_secret_files(base_url: str, keys: List[str],
+                        timeout: int = 8) -> List[str]:
+    """Among listing results, identify secret-bearing file paths.
+
+    Matches against SECRET_FILES patterns (exact filename, partial path match).
+    Also heuristically identifies .env, credentials, backup, config, and key files.
+    """
+    found: List[str] = []
+    key_set = set(keys)
+
+    # Direct matches against known secret filenames
+    for sf in SECRET_FILES:
+        if sf in key_set:
+            found.append(sf)
+        # Also try with leading path components
+        for k in keys:
+            if k.endswith("/" + sf) or k == sf:
+                if sf not in found:
+                    found.append(sf)
+
+    # Heuristic pattern matches on full key listing
+    secret_patterns = [
+        (r'(?:^|/)\.env', '.env file'),
+        (r'(?:^|/)credentials', 'credentials file'),
+        (r'(?:^|/)backup.*\.sql', 'SQL backup'),
+        (r'(?:^|/)id_rsa', 'SSH private key'),
+        (r'(?:^|/)id_ed25519', 'SSH private key'),
+        (r'(?:^|/)terraform\.tfstate', 'Terraform state'),
+        (r'(?:^|/)kubeconfig', 'Kubernetes config'),
+        (r'(?:^|/)\.docker/config\.json', 'Docker registry auth'),
+        (r'(?:^|/)\.npmrc', 'NPM config'),
+        (r'(?:^|/)\.pypirc', 'PyPI config'),
+        (r'(?:^|/)\.git-credentials', 'Git credentials'),
+        (r'(?:^|/)wp-config\.php', 'WordPress config'),
+        (r'(?:^|/)private\.(?:key|pem)', 'Private key'),
+        (r'(?:^|/)server\.(?:key|crt)', 'Server cert/key'),
+        (r'\.pem$', 'PEM file'),
+        (r'\.pfx$', 'PKCS#12 cert'),
+        (r'\.p12$', 'PKCS#12 cert'),
+        (r'\.jks$', 'Java keystore'),
+        (r'\.kdbx?$', 'KeePass database'),
+    ]
+    for pattern, label in secret_patterns:
+        for k in keys:
+            if re.search(pattern, k, re.IGNORECASE):
+                found.append(f"{k} ({label})")
+                break
+
+    return list(dict.fromkeys(found))  # dedup preserving order
+
+
+def probe_cloud_buckets(out: OutputWriter, provider: str, target_count: int,
+                        bucket_probe_cap: int,
+                        throttle: Optional[ResourceThrottle] = None):
+    """Multi-provider, multi-region, content-aware cloud bucket probing.
+
+    For each provider (s3/gcs/azure/spaces):
+      1. Generates smart candidate names from topics + built-in wordlist
+      2. Probes multiple regional endpoints per name
+      3. On HTTP 200: tries to list bucket contents
+      4. On listable buckets: scans for secret-bearing files
+      5. Reports live buckets (200), private buckets (403), and discovered secrets
+    """
+
+    provider_cfg = CLOUD_PROVIDERS.get(provider)
+    if not provider_cfg:
+        cprint(f"[{provider}] unknown cloud provider, skipping", color=C_RED)
+        return
+
+    label = provider_cfg["label"]
+    endpoints = provider_cfg["endpoints"]
+    food_prefix = provider_cfg["food_prefix"]
+
+    # ── Generate candidates ──────────────────────────────────────
+    candidates = _generate_bucket_candidates(bucket_probe_cap)
+    cprint(f"\n[{label}] generated {len(candidates)} candidate names", color=C_YELLOW)
+    cprint(f"[{label}] probing across {len(endpoints)} regional endpoint(s)...", color=C_YELLOW)
+
+    # ── Probe all names × all endpoints ──────────────────────────
+    # Track: name -> best endpoint URL, name -> list of file findings
+    live_buckets: Dict[str, str] = {}      # name -> best URL
+    private_buckets: Dict[str, int] = {}   # name -> first 403 count
+    bucket_secrets: Dict[str, List[str]] = {}  # name -> discovered secret files
+    probed_count = 0
+    found_200 = 0
+    found_403 = 0
+
+    def _check_single(name: str) -> Tuple[str, Optional[str], int, Optional[List[str]]]:
+        """Check one name across all endpoints. Returns (name, url_or_None, best_status, secrets_or_None)."""
+        nonlocal probed_count
+        probed_count += 1
         if throttle:
             throttle.wait_if_hot()
-        if provider == "gcs":
-            url = f"https://storage.googleapis.com/{name}"
-        else:
-            url = f"https://{name}.s3.amazonaws.com"
-        status = http_head(url, headers={"User-Agent": "Mozilla/5.0"})
-        return name, status
 
-    max_workers = min(40, max(5, int(90 * 0.4)))  # throttle-aware workers
-    with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        futures = {executor.submit(_check, c): c for c in candidates}
-        for future in as_completed(futures):
-            name, status = future.result()
+        best_url = None
+        best_status = 0
+
+        for ep_template in endpoints:
+            url = ep_template.format(name=name)
+            status = http_head(url, headers={"User-Agent": "Mozilla/5.0"})
+
             if status == 200:
-                live_200.append(name)
+                best_url = url
+                best_status = 200
+                break  # Found it, no need to check other regions
             elif status == 403:
-                exists_403.append(name)
+                if best_status == 0:
+                    best_status = 403
+            elif status in (301, 302, 307):
+                # Redirect — bucket exists but in a different region
+                if best_status == 0:
+                    best_status = status
 
-    cprint(f"[{provider.upper()}] live (200): {len(live_200)}, private (403): {len(exists_403)}",
-           color=C_BGRN, bold=True)
-    for name in live_200:
+            # Small delay between region probes to avoid rate limiting
+            time.sleep(0.05)
+
+        if best_status == 200 and best_url:
+            # Try to list contents
+            keys = _try_list_bucket(best_url, provider_cfg)
+            secrets = None
+            if keys:
+                secrets = _probe_secret_files(best_url, keys)
+                if secrets:
+                    cprint(f"   🔓 {name}: listable ({len(keys)} objects, {len(secrets)} secret indicators)",
+                           color=C_BGRN)
+                else:
+                    cprint(f"   📂 {name}: listable ({len(keys)} objects, no secrets found)",
+                           color=C_GREEN)
+            return name, best_url, best_status, secrets
+        else:
+            return name, None, best_status, None  # 403, redirect, or not found
+
+    # Use a moderate worker count to avoid overwhelming endpoints
+    max_w = min(30, max(8, bucket_probe_cap // 50))
+    total_checks = len(candidates) * len(endpoints)
+
+    with ThreadPoolExecutor(max_workers=max_w) as executor:
+        futures = {executor.submit(_check_single, c): c for c in candidates}
+        for future in as_completed(futures):
+            name, url, status, secrets = future.result()
+            if status == 200 and url:
+                live_buckets[name] = url
+                found_200 += 1
+                if secrets:
+                    bucket_secrets[name] = secrets
+            elif status == 403:
+                found_403 += 1
+                private_buckets[name] = 403
+            elif status in (301, 302, 307):
+                found_403 += 1  # redirect = exists but inaccessible
+                private_buckets[name] = status
+
+    # ── Summary ──────────────────────────────────────────────────
+    cprint(f"\n[{label}] RESULTS:", color=C_BGRN, bold=True)
+    cprint(f"  Live (200):      {len(live_buckets)}", color=C_GREEN)
+    cprint(f"  Private (403):   {found_403}", color=C_YELLOW)
+    cprint(f"  Listable:        {len(bucket_secrets)}", color=C_BGRN)
+    secret_file_count = sum(len(v) for v in bucket_secrets.values())
+    if secret_file_count:
+        cprint(f"  Secret indicators: {secret_file_count}", color=C_BRED, bold=True)
+
+    # ── Write results ────────────────────────────────────────────
+    written = 0
+    for name, url in live_buckets.items():
         if out.total_written >= target_count:
             break
-        if provider == "gcs":
-            web_url = f"https://storage.googleapis.com/{name}"
-            food = f"gs://{name}"
-        else:
-            web_url = f"https://{name}.s3.amazonaws.com"
-            food = f"s3://{name}"
-        out.write(web_url, "", name, "bucket-probe", provider, food)
+
+        # Build rich topic tag
+        tags = ["bucket-probe"]
+        if name in bucket_secrets:
+            for sf in bucket_secrets[name][:3]:  # top 3 indicators
+                # Sanitize: remove path, keep filename + label
+                short = sf.split("/")[-1] if "/" in sf else sf
+                short = short[:40]
+                tags.append(f"has:{short}")
+        topic = ";".join(tags)
+
+        out.write(url, "", name, topic, provider, f"{food_prefix}{name}")
+        written += 1
+
+    cprint(f"[{label}] wrote {written} entries to output", color=C_GREEN)
 
 
 # =============================================================================
@@ -1356,7 +1748,7 @@ def run(args) -> None:
 
     # ── Engine dispatch (parallel) ──────────────────────────────
     # Cloud engines handled separately (already parallel internally)
-    cloud_engines = {"gcs", "s3"}
+    cloud_engines = {"gcs", "s3", "azure", "spaces"}
     api_engines = [e for e in active_engines if e not in cloud_engines]
 
     # Shared global target — any engine can fill it
