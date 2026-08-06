@@ -506,8 +506,37 @@ def print_ease_summary(tickets: list[ComboTicket]):
 # ---------------------------------------------------------------------------
 
 def place_ease_tickets(tickets: list[ComboTicket], client) -> dict:
-    """Place all combo tickets on Kalshi.  1 contract per leg at ask price."""
+    """Place all combo tickets on Kalshi.  1 contract per leg at ask price.
+    Enforces: max $5/day, $1/combo, max 5 combos/day."""
     summary: dict = {"placed": 0, "failed": 0, "total_cost": 0.0, "orders": []}
+
+    # ── Daily budget gate ──────────────────────────────────────────────
+    combo_count = len(tickets)
+    projected = round(sum(t.total_cost for t in tickets), 2)
+    spent_today = daily_spent_today()
+    remaining = budget_remaining_today()
+
+    if combo_count > MAX_COMBOS_PER_DAY:
+        print(f"\n  {YE}💰 COMBO CAP — {combo_count} tickets requested, "
+              f"only {MAX_COMBOS_PER_DAY} allowed per day. Skipping.{R}")
+        return summary
+
+    if spent_today >= MAX_DAILY_SPEND:
+        print(f"\n  {YE}💰 DAILY BUDGET EXHAUSTED — "
+              f"${spent_today:.2f} of ${MAX_DAILY_SPEND:.2f} already spent today. "
+              f"Try again tomorrow.{R}")
+        return summary
+
+    if spent_today + projected > MAX_DAILY_SPEND:
+        print(f"\n  {YE}💰 BUDGET CAP — {combo_count} combos = ${projected:.2f} "
+              f"would exceed ${MAX_DAILY_SPEND:.2f} daily limit "
+              f"(${spent_today:.2f} already spent, ${remaining:.2f} left). "
+              f"Skipping.{R}")
+        return summary
+
+    print(f"\n  {GR}💰 BUDGET OK{R} — ${spent_today:.2f} spent today, "
+          f"placing ${projected:.2f} (${MAX_DAILY_SPEND - spent_today - projected:.2f} left after)")
+    # ───────────────────────────────────────────────────────────────────
     for ticket in tickets:
         for leg in ticket.legs:
             ticker = leg["ticker"]
@@ -569,6 +598,29 @@ def load_bankroll() -> dict:
 def save_bankroll(state: dict) -> None:
     with open(BANKROLL_FILE, "w") as f:
         json.dump(state, f, indent=2, default=str)
+
+
+# ── Daily budget ──────────────────────────────────────────────────────────
+MAX_DAILY_SPEND = 5.00       # hard cap per day
+COST_PER_COMBO = 1.00        # each combo ticket costs exactly $1
+MAX_COMBOS_PER_DAY = 5       # max combo tickets per day
+
+
+def daily_spent_today() -> float:
+    """Return total dollars already spent today from the run state."""
+    state = load_ease_state()
+    today = date.today().isoformat()
+    today_runs = state.get("runs", {}).get(today, {})
+    if isinstance(today_runs, list):
+        return round(sum(r.get("spent", 0.0) for r in today_runs if isinstance(r, dict)), 2)
+    if isinstance(today_runs, dict):
+        return round(today_runs.get("spent", 0.0), 2)
+    return 0.0
+
+
+def budget_remaining_today() -> float:
+    """Dollars left in today's $5 budget."""
+    return round(MAX_DAILY_SPEND - daily_spent_today(), 2)
 
 
 def charge_bankroll(amount: float) -> dict:
