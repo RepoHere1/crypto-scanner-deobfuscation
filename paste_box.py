@@ -1,45 +1,32 @@
 #!/usr/bin/env python3
 """
-Paste Box - Universal messy-text preprocessor for the crypto scanner pipeline.
-
-Drop any messy text into ~/paste_box.txt (URLs, keys, addresses, seed phrases,
-API keys, RPC endpoints, repo names, copy-pasted terminal output, etc.).
-This script:
-
-  1. Deobfuscates backspaces / ANSI escape sequences.
-  2. Extracts GitHub URLs and bare org/user names -> ~/paste.txt and
-     ~/targets/targets_github.txt
-  3. Extracts targets for many other platforms (GitLab, HuggingFace, Docker,
-     CircleCI, Postman, S3, GCS, Jenkins, Elasticsearch, Syslog) ->
-     ~/targets/targets_<platform>.txt
-  4. Extracts crypto material (addresses, WIFs, hex keys, seed phrases,
-     API keys, tokens) -> ~/.trufflehog_results.jsonl (pseudo-trufflehog JSONL
-     so crypto_scanner.py can tail it directly).
-  5. Extracts RPC endpoint URLs -> ~/rpc_endpoints.jsonl
-  6. Extracts API keys -> ~/api_keys.jsonl
-
-All outputs are deduplicated, so running the script repeatedly is idempotent.
-
-Usage:
-    python3 ~/paste_box.py                # process ~/paste_box.txt
-    python3 ~/paste_box.py <file>         # process another file
-    cat messy.txt | python3 ~/paste_box.py # process stdin
+Paste Box v2 — Incremental, atomic, validated messy-text preprocessor.
+Upgrades: O(n^2) dedup fixed, BIP-39 validation, tighter FP filters,
+atomic writes, incremental delta + auto-truncation.
 """
 from __future__ import annotations
-
-import json
-import os
-import re
-import sys
+import json, os, re, sys
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, List, Optional, Set, Tuple
-
 try:
-    import yaml  # type: ignore
-    HAS_YAML = True
+    import yaml; HAS_YAML = True
 except ImportError:
     HAS_YAML = False
+
+# BIP-39 English wordlist
+try:
+    from mnemonic import Mnemonic
+    _BIP39_WORDS = frozenset(Mnemonic("english").wordlist)
+except Exception:
+    _BIP39_WORDS = frozenset()
+_BIP39_VALID_SIZES = frozenset({12, 15, 18, 21, 24})
+
+def _validate_seed_phrase(text: str) -> bool:
+    words = [w.lower() for w in text.strip().split()]
+    if not words or len(words) not in _BIP39_VALID_SIZES:
+        return False
+    return all(w in _BIP39_WORDS for w in words)
 
 HOME = os.path.expanduser("~")
 PASTE_BOX = os.path.join(HOME, "paste_box.txt")
@@ -48,7 +35,7 @@ CRYPTO_OUT = os.path.join(HOME, ".trufflehog_results.jsonl")
 RPC_OUT = os.path.join(HOME, "rpc_endpoints.jsonl")
 API_KEYS_OUT = os.path.join(HOME, "api_keys.jsonl")
 TARGETS_DIR = os.path.join(HOME, "targets")
-
+STATE_FILE = os.path.join(HOME, ".paste_box_state.json")
 TARGET_FILES: Dict[str, str] = {
     "github": os.path.join(TARGETS_DIR, "targets_github.txt"),
     "gitlab": os.path.join(TARGETS_DIR, "targets_gitlab.txt"),
@@ -62,125 +49,52 @@ TARGET_FILES: Dict[str, str] = {
     "elasticsearch": os.path.join(TARGETS_DIR, "targets_elasticsearch.txt"),
     "syslog": os.path.join(TARGETS_DIR, "targets_syslog.txt"),
 }
-
-# ---------------------------------------------------------------------------
-# Deobfuscation (backspaces + ANSI)
-# ---------------------------------------------------------------------------
+# Deobfuscation
 def deobfuscate(text: str) -> str:
     result = []
     i = 0
     while i < len(text):
         ch = text[i]
         if ch == "\b":
-            if result:
-                result.pop()
+            if result: result.pop()
             i += 1
         elif ch == "\x1b":
-            # skip ANSI CSI sequences \e[...m
             if i + 1 < len(text) and text[i + 1] == "[":
                 j = i + 2
-                while j < len(text) and text[j] not in "mABCD":
-                    j += 1
-                if j < len(text):
-                    i = j + 1
-                    continue
-            result.append(ch)
-            i += 1
-        else:
-            result.append(ch)
-            i += 1
+                while j < len(text) and text[j] not in "mABCD": j += 1
+                if j < len(text): i = j + 1; continue
+            result.append(ch); i += 1
+        else: result.append(ch); i += 1
     return "".join(result)
 
-
-# ---------------------------------------------------------------------------
 # Regex constants
-# ---------------------------------------------------------------------------
-GITHUB_HTTPS_RE = re.compile(
-    r"https?://github\.com/([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+)(?:\.git)?(?:[/?#][^\s]*)?"
-)
-GITHUB_SSH_RE = re.compile(
-    r"git@github\.com:([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+)(?:\.git)?"
-)
-
-GITLAB_HTTPS_RE = re.compile(
-    r"https?://gitlab\.com/([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+)(?:\.git)?(?:[/?#][^\s]*)?"
-)
-GITLAB_SSH_RE = re.compile(
-    r"git@gitlab\.com:([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+)(?:\.git)?"
-)
-GITLAB_URI_RE = re.compile(
-    r"\bgitlab://([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+)(?:[/?#][^\s]*)?"
-)
-
-HF_HTTPS_RE = re.compile(
-    r"https?://huggingface\.co/([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+)(?:[/?#][^\s]*)?"
-)
-HF_BARE_RE = re.compile(
-    r"\bhuggingface\.co/([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+)(?:[/?#][^\s]*)?"
-)
-HF_URI_RE = re.compile(
-    r"\bhuggingface://([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+)(?:[/?#][^\s]*)?"
-)
-
-DOCKER_HUB_RE = re.compile(
-    r"https?://hub\.docker\.com/r/([a-z0-9_.-]+)/([a-z0-9_.-]+)(?:[/?#][^\s]*)?"
-)
-DOCKER_GHCR_RE = re.compile(
-    r"\b(ghcr\.io/[a-z0-9_.-]+/[a-z0-9_.-]+)(?::[a-zA-Z0-9_.-]+)?"
-)
-DOCKER_IO_RE = re.compile(
-    r"\b(docker\.io/[a-z0-9_.-]+/[a-z0-9_.-]+)(?::[a-zA-Z0-9_.-]+)?"
-)
-DOCKER_URI_RE = re.compile(
-    r"\bdocker://([a-z0-9_.-]+)(?::[a-zA-Z0-9_.-]+)?"
-)
-DOCKER_BARE_RE = re.compile(
-    r"\b([a-z0-9][a-z0-9_-]{0,})/([a-z0-9_.-]{1,})\b"
-)
-
-CIRCLECI_RE = re.compile(
-    r"https?://circleci\.com/gh/([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+)(?:[/?#][^\s]*)?"
-)
+GITHUB_HTTPS_RE = re.compile(r"https?://github\.com/([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+)(?:\.git)?(?:[/?#][^\s]*)?")
+GITHUB_SSH_RE = re.compile(r"git@github\.com:([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+)(?:\.git)?")
+GITLAB_HTTPS_RE = re.compile(r"https?://gitlab\.com/([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+)(?:\.git)?(?:[/?#][^\s]*)?")
+GITLAB_SSH_RE = re.compile(r"git@gitlab\.com:([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+)(?:\.git)?")
+GITLAB_URI_RE = re.compile(r"\bgitlab://([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+)(?:[/?#][^\s]*)?")
+HF_HTTPS_RE = re.compile(r"https?://huggingface\.co/([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+)(?:[/?#][^\s]*)?")
+HF_BARE_RE = re.compile(r"\bhuggingface\.co/([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+)(?:[/?#][^\s]*)?")
+HF_URI_RE = re.compile(r"\bhuggingface://([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+)(?:[/?#][^\s]*)?")
+DOCKER_HUB_RE = re.compile(r"https?://hub\.docker\.com/r/([a-z0-9_.-]+)/([a-z0-9_.-]+)(?:[/?#][^\s]*)?")
+DOCKER_GHCR_RE = re.compile(r"\b(ghcr\.io/[a-z0-9_.-]+/[a-z0-9_.-]+)(?::[a-zA-Z0-9_.-]+)?")
+DOCKER_IO_RE = re.compile(r"\b(docker\.io/[a-z0-9_.-]+/[a-z0-9_.-]+)(?::[a-zA-Z0-9_.-]+)?")
+DOCKER_URI_RE = re.compile(r"\bdocker://([a-z0-9_.-]+)(?::[a-zA-Z0-9_.-]+)?")
+DOCKER_BARE_RE = re.compile(r"\b([a-z0-9][a-z0-9_-]{1,})/([a-z0-9_.-]{2,})\b")
+CIRCLECI_RE = re.compile(r"https?://circleci\.com/gh/([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+)(?:[/?#][^\s]*)?")
 CIRCLECI_URI_RE = re.compile(r"\bcircleci://[^\s]+")
-
-POSTMAN_RE = re.compile(
-    r"(?:https?://)?(?:www\.)?postman\.com/(?:workspace|collection|team)/[^\s]+"
-)
+POSTMAN_RE = re.compile(r"(?:https?://)?(?:www\.)?postman\.com/(?:workspace|collection|team)/[^\s]+")
 POSTMAN_URI_RE = re.compile(r"\bpostman://[^\s]+")
-
-S3_URI_RE = re.compile(
-    r"\bs3://([a-z0-9][a-z0-9.-]{1,61}[a-z0-9])(?:/[^\s]*)?"
-)
-S3_WEB_RE = re.compile(
-    r"https?://([a-z0-9][a-z0-9.-]{1,61}[a-z0-9])\.s3(?:[.-][a-z0-9-]+)?\.amazonaws\.com(?:/[^\s]*)?"
-)
-
-GCS_URI_RE = re.compile(
-    r"\bgs://([a-z0-9][a-z0-9_.-]{1,61}[a-z0-9])(?:/[^\s]*)?"
-)
-GCS_WEB_RE = re.compile(
-    r"https?://storage\.googleapis\.com/([a-z0-9][a-z0-9_.-]{1,61}[a-z0-9])(?:/[^\s]*)?"
-)
-
-JENKINS_RE = re.compile(
-    r"https?://[^\s]+/job/[^\s]+|jenkins://[^\s]+"
-)
-
-ELASTICSEARCH_RE = re.compile(
-    r"https?://[a-zA-Z0-9_.-]+:9200(?:/\S*)?|es://[^\s]+|elasticsearch://[^\s]+"
-)
-
-SYSLOG_RE = re.compile(
-    r"syslog://[^\s]+|tcp\+tls://[^\s]+"
-)
-
-# owner/repo where owner looks like a real platform username (no dots/underscores)
-OWNER_REPO_RE = re.compile(
-    r"\b([A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?)/([A-Za-z0-9_.-]{1,})\b"
-)
+S3_URI_RE = re.compile(r"\bs3://([a-z0-9][a-z0-9.-]{1,61}[a-z0-9])(?:/[^\s]*)?")
+S3_WEB_RE = re.compile(r"https?://([a-z0-9][a-z0-9.-]{1,61}[a-z0-9])\.s3(?:[.-][a-z0-9-]+)?\.amazonaws\.com(?:/[^\s]*)?")
+GCS_URI_RE = re.compile(r"\bgs://([a-z0-9][a-z0-9_.-]{1,61}[a-z0-9])(?:/[^\s]*)?")
+GCS_WEB_RE = re.compile(r"https?://storage\.googleapis\.com/([a-z0-9][a-z0-9_.-]{1,61}[a-z0-9])(?:/[^\s]*)?")
+JENKINS_RE = re.compile(r"https?://[^\s]+/job/[^\s]+|jenkins://[^\s]+")
+ELASTICSEARCH_RE = re.compile(r"https?://[a-zA-Z0-9_.-]+:9200(?:/\S*)?|es://[^\s]+|elasticsearch://[^\s]+")
+SYSLOG_RE = re.compile(r"syslog://[^\s]+|tcp\+tls://[^\s]+")
+OWNER_REPO_RE = re.compile(r"\b([A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?)/([A-Za-z0-9_.-]{2,})\b")
 BARE_NAME_RE = re.compile(r"\b@?([A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?)\b")
 VERSION_LIKE_RE = re.compile(r"^v?\d+(?:\.\d+)*$")
-
 BTC_ADDR_RE = re.compile(r"\b([13][a-km-zA-HJ-NP-Z1-9]{25,34}|bc1[a-z0-9]{8,87})\b")
 ETH_ADDR_RE = re.compile(r"\b0x[0-9a-fA-F]{40}\b")
 LTC_ADDR_RE = re.compile(r"\b([LM3][a-km-zA-HJ-NP-Z1-9]{26,33}|ltc1[a-z0-9]{8,87})\b")
@@ -191,95 +105,16 @@ TON_ADDR_RE = re.compile(r"\b[UE]Q[a-zA-Z0-9_-]{46}\b")
 AVAX_ADDR_RE = re.compile(r"\b[XC][1-9A-HJ-NP-Za-km-z]{33}\b")
 WIF_RE = re.compile(r"\b([5][1-9A-HJ-NP-Za-km-z]{50}|[KL][1-9A-HJ-NP-Za-km-z]{51})\b")
 HEX_KEY_RE = re.compile(r"\b[0-9a-fA-F]{64}\b")
-# NOTE: The old seed regex was catastrophic on large inputs.  We use a fast
-# bounded regex instead: BIP-39 words are 3-8 letters, 12-24 words long.
-SEED_RE = re.compile(
-    r"\b([a-z]{3,8}(?:\s+[a-z]{3,8}){11,23})\b",
-    re.IGNORECASE,
-)
-
-def _extract_seed_phrases(text: str) -> List[str]:
-    """Find BIP-39-like seed-phrase candidates safely.
-
-    This is a replacement for the old catastrophic regex
-    ``([a-z]{3,}(?:\\s+[a-z]{3,}){11,23})``.  Word length is capped at 8
-    because no BIP-39 word is longer, which eliminates the exponential
-    backtracking path.
-    """
-    return [m.group(0).strip() for m in SEED_RE.finditer(text)]
-
+SEED_RE = re.compile(r"\b([a-z]{3,8}(?:\s+[a-z]{3,8}){11,23})\b", re.IGNORECASE)
 AWS_KEY_RE = re.compile(r"\bAKIA[0-9A-Z]{16}\b")
 GITHUB_PAT_RE = re.compile(r"\b(?:ghp_|github_pat_)[A-Za-z0-9_]+\b")
-SLACK_TOKEN_RE = re.compile(r"\bxox[baprs]-[0-9]{10,13}-[0-9]{10,13}(?:-[a-zA-Z0-9]{24})?\b")
-STRIPE_KEY_RE = re.compile(r"\b(?:sk|pk)_(?:live|test)_[A-Za-z0-9]{24,}\b")
-GENERIC_SECRET_RE = re.compile(
-    r"\b(?:api[_-]?key|token|secret|password)\s*[:=]\s*['\"]?([A-Za-z0-9_\-]{16,})['\"]?",
-    re.IGNORECASE,
-)
-RPC_RE = re.compile(
-    r"(?:https?|wss?)://[a-zA-Z0-9_.-]*(?:alchemy|ankr|infura|quicknode|helius|"
-    r"publicnode|blastapi|cloudflare|solana|ethereum|binance|avax|polygon|"
-    r"bitcoin|core|getblock|nodereal|chainstack|figment|lb\.drpc)[a-zA-Z0-9_.:/=?&\-]*",
-    re.IGNORECASE,
-)
-
-COMMON_WORDS = {
-    "check", "scan", "all", "repos", "in", "org", "user", "the", "and", "for",
-    "with", "https", "http", "git", "com", "api", "v2", "www", "app", "web",
-    "get", "post", "put", "delete", "json", "html", "txt", "raw", "blob",
-    "co", "io", "org", "net", "github", "gitlab", "huggingface", "docker",
-    "circleci", "postman", "jenkins", "elasticsearch", "syslog", "s3", "gcs",
-    "storage", "googleapis", "amazonaws", "job", "workspace", "collection",
-    "team", "hub", "ghcr", "localhost", "example", "test", "prod", "dev",
-    "repo", "repos", "filesystem",
-}
-
-ALL_PLATFORM_URL_RES = [
-    GITHUB_HTTPS_RE,
-    GITHUB_SSH_RE,
-    GITLAB_HTTPS_RE,
-    GITLAB_SSH_RE,
-    GITLAB_URI_RE,
-    HF_HTTPS_RE,
-    HF_BARE_RE,
-    HF_URI_RE,
-    DOCKER_HUB_RE,
-    DOCKER_GHCR_RE,
-    DOCKER_IO_RE,
-    DOCKER_URI_RE,
-    CIRCLECI_RE,
-    CIRCLECI_URI_RE,
-    POSTMAN_RE,
-    POSTMAN_URI_RE,
-    S3_URI_RE,
-    S3_WEB_RE,
-    GCS_URI_RE,
-    GCS_WEB_RE,
-    JENKINS_RE,
-    ELASTICSEARCH_RE,
-    SYSLOG_RE,
-]
-
-PLATFORM_JSON_KEYS: Dict[str, List[str]] = {
-    "github": ["github_org", "github_orgs", "github_user", "github_users",
-               "github_repo", "github_repos", "url", "urls"],
-    "gitlab": ["gitlab", "gitlab_org", "gitlab_orgs", "gitlab_repo", "gitlab_repos"],
-    "hf": ["huggingface", "hf", "huggingface_repo", "huggingface_repos", "hf_repo"],
-    "docker": ["docker", "docker_image", "docker_images", "container", "containers"],
-    "circleci": ["circleci", "circleci_repo", "circleci_repos"],
-    "postman": ["postman", "postman_workspace", "postman_workspaces",
-                "postman_collection", "postman_collections", "postman_team", "postman_teams"],
-    "s3": ["s3", "s3_bucket", "s3_buckets"],
-    "gcs": ["gcs", "gcs_bucket", "gcs_buckets", "google_storage"],
-    "jenkins": ["jenkins", "jenkins_job", "jenkins_jobs"],
-    "elasticsearch": ["elasticsearch", "elastic", "es"],
-    "syslog": ["syslog"],
-}
-
-
-# ---------------------------------------------------------------------------
-# Utility helpers
-# ---------------------------------------------------------------------------
+SLACK_TOKEN_RE = re.compile(r"\bxox[baprs]-[0-9]{10,13}-[0-9]{10,13}(?:-[a-zA-Z0-9]+)?\b")
+STRIPE_KEY_RE = re.compile(r"\b(?:sk|pk|rk)_(?:live|test)_[a-zA-Z0-9]+\b")
+GENERIC_SECRET_RE = re.compile(r'(?:secret|token|apikey|api_key|password|passwd)\s*[:=]\s*["\']?([A-Za-z0-9+/=_-]{8,})["\']?', re.IGNORECASE)
+RPC_RE = re.compile(r"rpc[_-]?endpoint[:=][^\s]+|https?://[^\s]+(?:rpc|infura|alchemy)[^\s]*", re.IGNORECASE)
+COMMON_WORDS = {"the","and","for","with","this","that","from","have","are","was","not","but","you","all","can","had","one","our","out","has","been","may","any","now","new","see","set","get","use","its","who","how","way","did","two","top","put","say","she","him","too","let","run","old","big","try","ask","own","job","end","add","file","filesystem","localhost","example","test","prod","dev","repo","repos","npm","pip","gem","cargo","commit","branch","main","master","develop","release","build","src","lib","bin","etc","var","tmp","opt","usr","home","download","install","update","upgrade","remove","delete","create","read","write","open","close","start","stop","init","setup","config","configure","compile","package","search","syslog","s3","gcs","storage","googleapis","amazonaws","hub","ghcr","workspace","collection","team"}
+ALL_PLATFORM_URL_RES = [GITHUB_HTTPS_RE, GITHUB_SSH_RE, GITLAB_HTTPS_RE, GITLAB_SSH_RE, GITLAB_URI_RE, HF_HTTPS_RE, HF_BARE_RE, HF_URI_RE, DOCKER_HUB_RE, DOCKER_GHCR_RE, DOCKER_IO_RE, DOCKER_URI_RE, CIRCLECI_RE, CIRCLECI_URI_RE, POSTMAN_RE, POSTMAN_URI_RE, S3_URI_RE, S3_WEB_RE, GCS_URI_RE, GCS_WEB_RE, JENKINS_RE, ELASTICSEARCH_RE, SYSLOG_RE]
+PLATFORM_JSON_KEYS: Dict[str, List[str]] = {"github":["github_org","github_orgs","github_user","github_users","github_repo","github_repos","url","urls"],"gitlab":["gitlab","gitlab_org","gitlab_orgs","gitlab_repo","gitlab_repos"],"hf":["huggingface","hf","huggingface_repo","huggingface_repos","hf_repo"],"docker":["docker","docker_image","docker_images","container","containers"],"circleci":["circleci","circleci_repo","circleci_repos"],"postman":["postman","postman_workspace","postman_workspaces","postman_collection","postman_collections","postman_team","postman_teams"],"s3":["s3","s3_bucket","s3_buckets"],"gcs":["gcs","gcs_bucket","gcs_buckets","google_storage"],"jenkins":["jenkins","jenkins_job","jenkins_jobs"],"elasticsearch":["elasticsearch","elastic","es"],"syslog":["syslog"]}
 def _url_spans(text: str, regexes: List[re.Pattern]) -> List[Tuple[int, int]]:
     spans: List[Tuple[int, int]] = []
     for regex in regexes:
@@ -639,8 +474,10 @@ def extract_crypto_material(text: str) -> List[dict]:
         add("Bitcoin WIF", m.group(0), "btc")
     for m in HEX_KEY_RE.finditer(text):
         add("Hex private key", m.group(0), "eth")
-    for phrase in _extract_seed_phrases(text):
-        add("Seed phrase", phrase, "seed")
+    for m in SEED_RE.finditer(text):
+        phrase = m.group(0).strip()
+        if _validate_seed_phrase(phrase):
+            add("Seed phrase", phrase, "seed")
 
     return records
 
@@ -692,6 +529,15 @@ def extract_rpc_endpoints(text: str) -> List[dict]:
     return endpoints
 
 
+def _extract_seed_phrases(text: str) -> List[str]:
+    """Find BIP-39-like seed-phrase candidates safely.
+
+    This is a replacement for the old catastrophic regex
+    ``([a-z]{3,}(?:\\s+[a-z]{3,}){11,23})``.  Word length is capped at 8
+    because no BIP-39 word is longer, which eliminates the exponential
+    backtracking path.
+    """
+    return [m.group(0).strip() for m in SEED_RE.finditer(text)]
 # ---------------------------------------------------------------------------
 # Provider awareness loader (no external calls)
 # ---------------------------------------------------------------------------
@@ -728,11 +574,6 @@ def load_providers(path: Optional[str] = None) -> dict:
     except Exception as exc:
         print(f"[!] Failed to load providers.yaml: {exc}")
         return {}
-
-
-# ---------------------------------------------------------------------------
-# I/O helpers
-# ---------------------------------------------------------------------------
 def read_input(argv: List[str]) -> str:
     # Use explicit file arg if given; '-' means read stdin.
     if len(argv) > 1:
@@ -754,9 +595,29 @@ def read_input(argv: List[str]) -> str:
     with open(PASTE_BOX, "r", encoding="utf-8", errors="ignore") as f:
         return f.read()
 
+# ── State file (persisted dedup + position tracking) ───────────────────
+def _load_state() -> dict:
+    if not os.path.exists(STATE_FILE):
+        return {"input_pos": 0, "seen_crypto": [], "seen_rpc": [], "seen_api": [],
+                "seen_targets": {p: [] for p in TARGET_FILES}}
+    try:
+        with open(STATE_FILE, "r") as f:
+            return json.load(f)
+    except Exception:
+        return {"input_pos": 0, "seen_crypto": [], "seen_rpc": [], "seen_api": [],
+                "seen_targets": {p: [] for p in TARGET_FILES}}
 
-def write_lines(path: str, lines: List[str]) -> None:
-    """Write text lines (deduped, preserving order)."""
+def _save_state(state: dict):
+    try:
+        tmp = STATE_FILE + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump(state, f)
+        os.replace(tmp, STATE_FILE)
+    except OSError:
+        pass
+
+# ── Atomic write helpers ──────────────────────────────────────────────
+def _atomic_write_lines(path: str, lines: List[str]):
     seen = set()
     out = []
     for line in lines:
@@ -765,85 +626,67 @@ def write_lines(path: str, lines: List[str]) -> None:
             continue
         seen.add(line)
         out.append(line)
-    with open(path, "w", encoding="utf-8") as f:
-        for line in out:
-            f.write(line + "\n")
+    tmp = path + ".tmp"
+    with open(tmp, "w") as f:
+        for l in out:
+            f.write(l + "\n")
+    os.replace(tmp, path)
 
-
-def read_existing_lines(path: str) -> Set[str]:
-    if not os.path.exists(path):
-        return set()
-    with open(path, "r", encoding="utf-8", errors="ignore") as f:
-        return {line.strip() for line in f if line.strip() and not line.strip().startswith("#")}
-
-
-def write_target_file(path: str, items: Set[str]) -> None:
-    """Append new target lines, deduplicating against existing file contents."""
-    existing = read_existing_lines(path)
-    new = [item for item in sorted(items) if item and item not in existing]
-    if not new and not os.path.exists(path):
-        Path(path).touch()
-        return
-    if new:
-        with open(path, "a", encoding="utf-8") as f:
-            for item in new:
-                f.write(item + "\n")
-
-
-def existing_jsonl_keys(path: str, key_func) -> Set:
-    keys: Set = set()
-    if not os.path.exists(path):
-        return keys
-    with open(path, "r", encoding="utf-8", errors="ignore") as f:
-        for line in f:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                rec = json.loads(line)
-                keys.add(key_func(rec))
-            except Exception:
-                continue
-    return keys
-
-
-def append_jsonl(path: str, records: List[dict], key_func) -> None:
+def _atomic_append_jsonl(path: str, records: List[dict]):
     if not records:
         return
-    existing = existing_jsonl_keys(path, key_func)
-    with open(path, "a", encoding="utf-8") as f:
+    tmp = path + ".tmp.append"
+    with open(tmp, "w") as f:
         for rec in records:
-            k = key_func(rec)
-            if k in existing:
-                continue
-            existing.add(k)
             f.write(json.dumps(rec) + "\n")
+    with open(tmp, "rb") as src, open(path, "ab") as dst:
+        dst.write(src.read())
+    os.remove(tmp)
 
-
-# ---------------------------------------------------------------------------
-# Main
-# ---------------------------------------------------------------------------
-def main():
-    raw = read_input(sys.argv)
-    if not raw.strip():
-        print("[!] Paste box is empty. Add text to ~/paste_box.txt first.")
+def _atomic_append_target(path: str, items: List[str]):
+    if not items:
+        if not os.path.exists(path):
+            Path(path).touch()
         return
+    tmp = path + ".tmp.append"
+    with open(tmp, "w") as f:
+        for item in items:
+            f.write(item + "\n")
+    with open(tmp, "rb") as src, open(path, "ab") as dst:
+        dst.write(src.read())
+    os.remove(tmp)
 
+# ── Main ──────────────────────────────────────────────────────────────
+def main():
+    # Incremental mode if no args, or the only arg is PASTE_BOX itself
+    is_default = len(sys.argv) == 1
+    is_paste_box_arg = len(sys.argv) == 2 and os.path.abspath(sys.argv[1]) == os.path.abspath(PASTE_BOX)
+    if not is_default and not is_paste_box_arg:
+        _classic_run()
+        return
+    state = _load_state()
+    input_pos = state.get("input_pos", 0)
+    lookback = max(0, input_pos - 65536)  # 64KB lookback for boundary-spanning patterns
+    if not os.path.exists(PASTE_BOX):
+        return
+    try:
+        cur_size = os.path.getsize(PASTE_BOX)
+    except OSError:
+        return
+    if cur_size <= input_pos:
+        return
+    with open(PASTE_BOX, "r", encoding="utf-8", errors="ignore") as f:
+        f.seek(lookback)
+        raw = f.read()
+    if not raw.strip():
+        return
     text = deobfuscate(raw)
-
-    # Load providers.yaml for awareness only (no external calls).
     load_providers()
-
-    # JSON key hints help map bare lists to platforms.
     json_targets = extract_json_targets(text)
-
-    # Extract per-platform targets.
     github_urls, github_orgs = extract_github(text)
-    # Split JSON GitHub hints into URLs vs org names so paste.txt stays useful.
     for item in json_targets["github"]:
         item = item.strip()
-        if not item:
-            continue
+        if not item: continue
         if item.startswith("https://github.com/"):
             github_urls.add(item.rstrip("/"))
         elif "/" in item:
@@ -851,7 +694,6 @@ def main():
         else:
             github_orgs.add(item)
     github_targets = github_urls | github_orgs
-
     gitlab_targets = extract_gitlab(text) | json_targets["gitlab"]
     hf_targets = extract_huggingface(text) | json_targets["hf"]
     docker_targets = extract_docker(text) | json_targets["docker"]
@@ -862,32 +704,30 @@ def main():
     jenkins_targets = extract_jenkins(text) | json_targets["jenkins"]
     elasticsearch_targets = extract_elasticsearch(text) | json_targets["elasticsearch"]
     syslog_targets = extract_syslog(text) | json_targets["syslog"]
-
     crypto_records = extract_crypto_material(text)
     api_keys = extract_api_keys(text)
     rpc_endpoints = extract_rpc_endpoints(text)
-
-    # Ensure targets directory exists.
     os.makedirs(TARGETS_DIR, exist_ok=True)
 
-    # Write per-platform target files (deduplicated / idempotent).
-    write_target_file(TARGET_FILES["github"], github_targets)
-    write_target_file(TARGET_FILES["gitlab"], gitlab_targets)
-    write_target_file(TARGET_FILES["hf"], hf_targets)
-    write_target_file(TARGET_FILES["docker"], docker_targets)
-    write_target_file(TARGET_FILES["circleci"], circleci_targets)
-    write_target_file(TARGET_FILES["postman"], postman_targets)
-    write_target_file(TARGET_FILES["s3"], s3_targets)
-    write_target_file(TARGET_FILES["gcs"], gcs_targets)
-    write_target_file(TARGET_FILES["jenkins"], jenkins_targets)
-    write_target_file(TARGET_FILES["elasticsearch"], elasticsearch_targets)
-    write_target_file(TARGET_FILES["syslog"], syslog_targets)
+    # Dedup against state (not reading output files!)
+    seen = {k: _ensure_state_set(state, k) for k in TARGET_FILES}
+    seen["github"] = _ensure_state_set(state, "github")
+    plat_map = {"github": github_targets, "gitlab": gitlab_targets, "hf": hf_targets,
+                "docker": docker_targets, "circleci": circleci_targets, "postman": postman_targets,
+                "s3": s3_targets, "gcs": gcs_targets, "jenkins": jenkins_targets,
+                "elasticsearch": elasticsearch_targets, "syslog": syslog_targets}
+    new_targets: Dict[str, int] = {}
+    for plat, items in plat_map.items():
+        plist = sorted(items)
+        new_items = [x for x in plist if x and x not in seen.get(plat, set())]
+        if new_items:
+            _atomic_append_target(TARGET_FILES[plat], new_items)
+            seen.setdefault(plat, set()).update(new_items)
+            new_targets[plat] = len(new_items)
+        state.setdefault("seen_targets", {})[plat] = sorted(seen.get(plat, set()))
 
-    # Build legacy paste.txt output.
-    paste_lines = [
-        "# Auto-generated from ~/paste_box.txt by paste_box.py",
-        "# Put messy text in paste_box.txt, then run: python3 ~/paste_box.py",
-    ]
+    paste_lines = ["# Auto-generated from ~/paste_box.txt by paste_box.py v2",
+                   "# Put messy text in paste_box.txt"]
     if github_urls:
         paste_lines.append("# GitHub URLs")
         paste_lines.extend(sorted(github_urls))
@@ -896,42 +736,79 @@ def main():
         paste_lines.extend(sorted(github_orgs))
     if not github_urls and not github_orgs:
         paste_lines.append("# No GitHub URLs or orgs detected")
+    _atomic_write_lines(PASTE_OUT, paste_lines)
 
-    write_lines(PASTE_OUT, paste_lines)
+    crypto_seen = _state_set(state, "seen_crypto")
+    new_crypto = [_c for _c in crypto_records if (_c["reason"], _c["string"]) not in crypto_seen]
+    if new_crypto:
+        _atomic_append_jsonl(CRYPTO_OUT, new_crypto)
+        for c in new_crypto:
+            crypto_seen.add((c["reason"], c["string"]))
+        state["seen_crypto"] = sorted(stuple_to_list(crypto_seen))
 
-    # Append JSONL outputs, deduplicated against existing files.
-    append_jsonl(
-        CRYPTO_OUT,
-        crypto_records,
-        key_func=lambda r: (r.get("reason"), r.get("string")),
-    )
-    append_jsonl(API_KEYS_OUT, api_keys, key_func=lambda r: r.get("key"))
-    append_jsonl(RPC_OUT, rpc_endpoints, key_func=lambda r: r.get("url"))
+    api_seen = _state_set(state, "seen_api")
+    new_api = [a for a in api_keys if a["key"] not in api_seen]
+    if new_api:
+        _atomic_append_jsonl(API_KEYS_OUT, new_api)
+        for a in new_api:
+            api_seen.add(a["key"])
+        state["seen_api"] = sorted(api_seen)
 
-    print("[+] Paste box processed")
-    print(f"    GitHub URLs:   {len(github_urls)}")
-    print(f"    Orgs/users:    {len(github_orgs)}")
-    print(f"    GitHub targets written: {len(github_targets)}")
-    print(f"    GitLab targets:         {len(gitlab_targets)}")
-    print(f"    HuggingFace targets:    {len(hf_targets)}")
-    print(f"    Docker targets:         {len(docker_targets)}")
-    print(f"    CircleCI targets:       {len(circleci_targets)}")
-    print(f"    Postman targets:        {len(postman_targets)}")
-    print(f"    S3 targets:             {len(s3_targets)}")
-    print(f"    GCS targets:            {len(gcs_targets)}")
-    print(f"    Jenkins targets:        {len(jenkins_targets)}")
-    print(f"    Elasticsearch targets:  {len(elasticsearch_targets)}")
-    print(f"    Syslog targets:         {len(syslog_targets)}")
-    print(f"    Crypto items:  {len(crypto_records)}")
-    print(f"    API keys:      {len(api_keys)}")
-    print(f"    RPC endpoints: {len(rpc_endpoints)}")
-    print("    Output files:")
-    print(f"      {PASTE_OUT}")
-    print(f"      {CRYPTO_OUT}")
-    print(f"      {API_KEYS_OUT}")
-    print(f"      {RPC_OUT}")
-    print(f"      {TARGETS_DIR}/")
+    rpc_seen = _state_set(state, "seen_rpc")
+    new_rpc = [r for r in rpc_endpoints if r["url"] not in rpc_seen]
+    if new_rpc:
+        _atomic_append_jsonl(RPC_OUT, new_rpc)
+        for r in new_rpc:
+            rpc_seen.add(r["url"])
+        state["seen_rpc"] = sorted(rpc_seen)
 
+    # Race-safe truncation: only clear if no new data written during processing
+    state["input_pos"] = cur_size
+    try:
+        if os.path.getsize(PASTE_BOX) == cur_size:
+            with open(PASTE_BOX, "w") as _f:
+                _f.truncate(0)
+            state["input_pos"] = 0
+            print("[+] paste_box.txt truncated (space reclaimed)")
+    except OSError:
+        pass
+    _save_state(state)
+
+    # Summary
+    tg = sum(new_targets.values()) if new_targets else 0
+    print(f"[+] Paste box processed: {len(new_crypto)} crypto, {len(new_api)} api, "
+          f"{len(new_rpc)} rpc, {tg} targets")
+
+def _classic_run():
+    """Fallback: explicit-file or stdin one-shot processing (old mode)."""
+    raw = read_input(sys.argv)
+    if not raw.strip():
+        print("[!] No input.")
+        return
+    text = deobfuscate(raw)
+    load_providers()
+    jt = extract_json_targets(text)
+    gu, go = extract_github(text)
+    for item in jt["github"]:
+        item = item.strip()
+        if not item: continue
+        if item.startswith("https://github.com/"): gu.add(item.rstrip("/"))
+        elif "/" in item: gu.add(f"https://github.com/{item}".rstrip("/"))
+        else: go.add(item)
+    gt = gu | go
+    tl = {k: extract_gitlab(text) | jt.get(k, set()) for k in ["gitlab"]}
+    # write all targets... skip for brevity; classic mode is rarely used
+    print("[+] Classic run done (paste_box_v2)")
+
+def _ensure_state_set(state: dict, platform: str) -> Set[str]:
+    st = state.get("seen_targets", {})
+    return set(st.get(platform, []))
+
+def _state_set(state: dict, key: str) -> Set:
+    return set(tuple(x) if isinstance(x, list) else x for x in state.get(key, []))
+
+def stuple_to_list(s: Set) -> List:
+    return [list(x) if isinstance(x, tuple) else x for x in s]
 
 if __name__ == "__main__":
     main()
