@@ -130,6 +130,15 @@ COMBO_PREFIXES = (
     "KXMULTIGAMECOMBO",
 )
 
+# Sport-specific game durations in hours (for halftime gate estimation)
+SPORT_DURATIONS: dict[str, float] = {
+    "NBA": 2.5, "MLB": 3.0, "NFL": 3.25, "NHL": 2.75,
+    "SOCCER": 2.0, "EPL": 2.0, "UFC": 1.5, "TENNIS": 2.5,
+    "GOLF": 5.0, "F1": 2.0, "WNBA": 2.0, "NCAAF": 3.5,
+    "NCAAB": 2.0, "MMA": 1.5, "CRICKET": 6.0, "BOXING": 1.5,
+    "MOTORSPORT": 2.5,
+}
+
 
 def _extract_category(event_ticker: str) -> str:
     """Extract sport category from Kalshi event_ticker."""
@@ -150,6 +159,9 @@ def _parse_game(m: dict, index: int) -> Game | None:
     try:
         raw_title = m.get("title", "?")
         title = raw_title[:55] + ("…" if len(raw_title) > 55 else "")
+        # Capture real 24h volume from API — try multiple possible field names
+        vol_raw = m.get("volume") or m.get("volume_24h") or m.get("last_price_volume") or 0
+        volume = float(vol_raw)
         return Game(
             ticker=m.get("ticker", "?"),
             title=title,
@@ -159,6 +171,7 @@ def _parse_game(m: dict, index: int) -> Game | None:
             yes_ask=float(m.get("yes_ask_dollars", m.get("yes_ask", 0))),
             no_bid=float(m.get("no_bid_dollars", m.get("no_bid", 0))),
             no_ask=float(m.get("no_ask_dollars", m.get("no_ask", 0))),
+            volume=volume,
         )
     except (ValueError, TypeError):
         return None
@@ -193,13 +206,37 @@ def discover_by_category() -> tuple[str, list[Game], dict[str, int], bool]:
             by_cat[cat].append(m)
 
     counts = {cat: len(ms) for cat, ms in by_cat.items()}
-    ranked = sorted(by_cat.items(), key=lambda x: -len(x[1]))
 
-    if not ranked:
+    if not by_cat:
         print("[WARN] No individual sports markets found (all are combo bundles?).")
         return "", [], counts, False
 
-    best_cat, best_markets = ranked[0]
+    # ── Quality-score each category (tight games × volume × count) ──────────
+    cat_scores: dict[str, float] = {}
+    for cat, ms in by_cat.items():
+        tight = 0
+        total_vol = 0.0
+        for m in ms:
+            ya = float(m.get("yes_ask_dollars", m.get("yes_ask", 0.5)) or 0.5)
+            na = float(m.get("no_ask_dollars", m.get("no_ask", 0.5)) or 0.5)
+            gap = abs(ya - na)
+            if gap < 0.15:
+                tight += 1
+            vol = float(m.get("volume") or m.get("volume_24h") or m.get("last_price_volume") or 0)
+            total_vol += vol
+        score = (tight * 3.0) + total_vol + (len(ms) * 0.5)
+        cat_scores[cat] = score
+
+    ranked = sorted(cat_scores.items(), key=lambda x: -x[1])
+    if not ranked:
+        print("[WARN] No categories to score.")
+        return "", [], counts, False
+
+    best_cat, best_score = ranked[0]
+    best_markets = by_cat[best_cat]
+
+    print(f"  {DIM}Category scores:{R} " + ", ".join(
+        f"{c}={s:.1f}{' ◀' if c == best_cat else ''}" for c, s in ranked[:6]))
 
     if len(best_markets) < 4:
         print(f"[WARN] Top category '{best_cat}' has only {len(best_markets)} games.  Need ≥4.")
@@ -212,10 +249,8 @@ def discover_by_category() -> tuple[str, list[Game], dict[str, int], bool]:
         if g:
             games.append(g)
 
-    def _vol_key(g: Game) -> float:
-        return g.yes_ask
-
-    games.sort(key=lambda g: (-_vol_key(g), g.close_time))
+    # Sort by REAL volume descending, then by close time
+    games.sort(key=lambda g: (-g.volume, g.close_time))
     games = games[:10]
 
     if len(games) < 4:
@@ -280,14 +315,17 @@ class ComboTicket:
 
 
 class TheEase:
-    """THE-EASE with SmartPicker: 5 combo tickets, data-driven underdog selection.
+    """THE-EASE with SmartPicker: 5 combo tickets, diversified favorites, dynamic sizing.
 
     Uses live market signals (underdog edge, liquidity, price direction)
     instead of simple odds-gap ranking to pick which games get the underdog leg.
-    Each combo costs $1.00 total, split equally across all N legs.
+    Each combo drops different favorites to diversify risk.
+    Bet sizes scale by SmartPicker score rank (top=$1.30, 5th=$0.70, total=$5.00).
     """
 
     PICK_LABELS = ["TOP-PICK", "2ND-PICK", "3RD-PICK", "4TH-PICK", "5TH-PICK"]
+    # Dynamic bet sizing by rank: total = $5.00
+    COMBO_COSTS = [1.30, 1.15, 1.00, 0.85, 0.70]
 
     def __init__(self, games: list[Game]):
         if len(games) < 4:
@@ -296,16 +334,36 @@ class TheEase:
         self.tickets: list[ComboTicket] = []
 
     def run(self) -> list[ComboTicket]:
-        n_legs = len(self.games)
+        n_games = len(self.games)
         picks = SmartPicker.pick_underdogs(self.games, n=5)
-        picked_games = {g for _, g, _ in picks}
+
+        # How many favorites to drop per combo for diversification
+        # ─ 10+ games: drop 2 per combo; 7-9: drop 1; <7: drop 0
+        if n_games >= 10:
+            drop_count = 2
+        elif n_games >= 7:
+            drop_count = 1
+        else:
+            drop_count = 0
 
         tickets = []
         for rank, underdog_game, score in picks:
             label = self.PICK_LABELS[rank - 1]
+            combo_cost = self.COMBO_COSTS[rank - 1]
+
+            # Determine which games to DROP from this combo (rotating window)
+            drop_start = (rank - 1) * drop_count
+            drop_indices = set()
+            for d in range(drop_count):
+                drop_idx = (drop_start + d) % n_games
+                drop_indices.add(drop_idx)
 
             legs = []
-            for g in self.games:
+            for i, g in enumerate(self.games):
+                # Skip dropped games (unless they're the underdog)
+                if i in drop_indices and g is not underdog_game:
+                    continue
+
                 if g is underdog_game:
                     side = g.underdog_side
                     price = g.underdog_price
@@ -330,13 +388,14 @@ class TheEase:
                     "close_time": g.close_time,
                 })
 
-            cost_per = round(1.00 / n_legs, 4)
+            n_legs = len(legs) if legs else 1
+            cost_per = round(combo_cost / n_legs, 4)
             tickets.append(ComboTicket(
                 number=rank,
                 closeness_rank=rank,
                 label=f"{label}  (score:{score:.2f})",
                 legs=legs,
-                total_cost=1.00,
+                total_cost=combo_cost,
                 cost_per_leg=cost_per,
             ))
 
@@ -344,23 +403,50 @@ class TheEase:
         return tickets
 
 
-# ── Timing gate: wait for first game halftime ─────────────────────────────
+# ── Price refresh: re-fetch live odds after the gate opens ──────────────────
 
-GAME_DURATION_H = 2.5
-HALFTIME_OFFSET_H = GAME_DURATION_H / 2
+def refresh_game_prices(games: list[Game], client) -> list[Game]:
+    """Re-query Kalshi for current bids/asks on each game's ticker.
+
+    Called after the halftime gate opens so orders use fresh prices.
+    Games are mutated in place; returns the same list.
+    Handles errors gracefully — keeps old price if a query fails.
+    """
+    refreshed = 0
+    for g in games:
+        try:
+            data = client.get(f"/markets/{g.ticker}")
+            m = data.get("market", data)
+            g.yes_bid = float(m.get("yes_bid_dollars", m.get("yes_bid", g.yes_bid)))
+            g.yes_ask = float(m.get("yes_ask_dollars", m.get("yes_ask", g.yes_ask)))
+            g.no_bid = float(m.get("no_bid_dollars", m.get("no_bid", g.no_bid)))
+            g.no_ask = float(m.get("no_ask_dollars", m.get("no_ask", g.no_ask)))
+            refreshed += 1
+        except Exception:
+            pass
+    if refreshed:
+        print(f"  {CY}🔄 PRICES REFRESHED{R} — {refreshed}/{len(games)} markets updated")
+    return games
 
 
-def halftime_gate(games: list[Game]) -> tuple[bool, str]:
+# ── Timing gate: wait for first game halftime (sport-specific) ──────────────
+
+DEFAULT_GAME_DURATION_H = 2.5
+
+
+def halftime_gate(games: list[Game], category: str = "") -> tuple[bool, str]:
     """Check if the earliest-starting game is past halftime.
 
-    Estimate: game ends at close_time, duration ~2.5h:
-      start ≈ close_time - 2.5h
-      halftime ≈ close_time - 1.25h
+    Uses sport-specific game duration from SPORT_DURATIONS (falls back to 2.5h).
+    Estimate: start ≈ close_time - duration, halftime ≈ close_time - duration/2.
 
     Returns (ready_bool, status_message).
     """
     if not games:
         return False, "No games to check"
+
+    duration_h = SPORT_DURATIONS.get(category, DEFAULT_GAME_DURATION_H)
+    halftime_offset_h = duration_h / 2
 
     now = datetime.now(timezone.utc)
     earliest_ct: datetime | None = None
@@ -379,7 +465,7 @@ def halftime_gate(games: list[Game]) -> tuple[bool, str]:
     if earliest_ct is None:
         return False, "Cannot parse close times — gate open"
 
-    halftime = earliest_ct - timedelta(hours=HALFTIME_OFFSET_H)
+    halftime = earliest_ct - timedelta(hours=halftime_offset_h)
 
     halftime_pst = halftime - timedelta(hours=7)  # UTC → PST (UTC-7)
     if now >= halftime:
@@ -578,19 +664,43 @@ def place_ease_tickets(tickets: list[ComboTicket], client) -> dict:
 
 BANKROLL_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".ease_bankroll.json")
 
+BANKROLL_DEFAULTS = {
+    "balance": 100.00,
+    "started_at": "",
+    "total_spent": 0.0,
+    "total_won": 0.0,
+    "total_lost": 0.0,
+    "net_pnl": 0.0,
+    "total_settled": 0,
+    "last_settled_date": "",
+    "daily_drawdown": 0.0,
+    "drawdown_date": "",
+    "trading_halted": False,
+    "halted_at": "",
+}
+
+
+def _fresh_bankroll() -> dict:
+    """Return a new bankroll dict with defaults."""
+    br = dict(BANKROLL_DEFAULTS)
+    br["started_at"] = datetime.now(timezone.utc).isoformat()
+    return br
+
 
 def load_bankroll() -> dict:
     if not os.path.exists(BANKROLL_FILE):
-        now = datetime.now(timezone.utc).isoformat()
-        br = {"balance": 100.00, "started_at": now, "total_spent": 0.0}
+        br = _fresh_bankroll()
         save_bankroll(br)
         return br
     try:
         with open(BANKROLL_FILE) as f:
-            return json.load(f)
+            br = json.load(f)
+        # Backfill any missing default keys
+        for k, v in BANKROLL_DEFAULTS.items():
+            br.setdefault(k, v)
+        return br
     except Exception:
-        now = datetime.now(timezone.utc).isoformat()
-        br = {"balance": 100.00, "started_at": now, "total_spent": 0.0}
+        br = _fresh_bankroll()
         save_bankroll(br)
         return br
 
@@ -602,8 +712,9 @@ def save_bankroll(state: dict) -> None:
 
 # ── Daily budget ──────────────────────────────────────────────────────────
 MAX_DAILY_SPEND = 5.00       # hard cap per day
-COST_PER_COMBO = 1.00        # each combo ticket costs exactly $1
+COST_PER_COMBO = 1.00        # base reference only (dynamic sizing used)
 MAX_COMBOS_PER_DAY = 5       # max combo tickets per day
+MAX_DAILY_DRAWDOWN = 8.00    # circuit breaker: halt trading if daily loss ≥ $8
 
 
 def daily_spent_today() -> float:
@@ -623,10 +734,62 @@ def budget_remaining_today() -> float:
     return round(MAX_DAILY_SPEND - daily_spent_today(), 2)
 
 
+def _reset_daily_drawdown(br: dict) -> dict:
+    """Reset daily drawdown counter if the date has changed."""
+    today = date.today().isoformat()
+    if br.get("drawdown_date") != today:
+        br["daily_drawdown"] = 0.0
+        br["drawdown_date"] = today
+        br["trading_halted"] = False
+        br["halted_at"] = ""
+    return br
+
+
+def check_drawdown() -> tuple[bool, str]:
+    """Circuit breaker: returns (tripped, reason).
+
+    Trips when daily realized loss reaches MAX_DAILY_DRAWDOWN ($8).
+    Resets automatically at midnight.
+    """
+    br = load_bankroll()
+    br = _reset_daily_drawdown(br)
+    save_bankroll(br)
+
+    if br.get("trading_halted"):
+        return True, f"TRADING HALTED — ${br['daily_drawdown']:.2f} lost today (≥${MAX_DAILY_DRAWDOWN:.2f} limit)"
+
+    if br.get("daily_drawdown", 0) >= MAX_DAILY_DRAWDOWN:
+        br["trading_halted"] = True
+        br["halted_at"] = datetime.now(timezone.utc).isoformat()
+        save_bankroll(br)
+        return True, f"DAILY DRAWDOWN LIMIT HIT — ${br['daily_drawdown']:.2f} ≥ ${MAX_DAILY_DRAWDOWN:.2f}"
+
+    return False, ""
+
+
 def charge_bankroll(amount: float) -> dict:
     br = load_bankroll()
+    br = _reset_daily_drawdown(br)
     br["balance"] = round(br["balance"] - amount, 2)
     br["total_spent"] = round(br.get("total_spent", 0) + amount, 2)
+    br["daily_drawdown"] = round(br.get("daily_drawdown", 0) + amount, 2)
+    save_bankroll(br)
+    return br
+
+
+def credit_bankroll(amount: float) -> dict:
+    """Credit winnings back to bankroll (positive amount = profit)."""
+    br = load_bankroll()
+    br = _reset_daily_drawdown(br)
+    br["balance"] = round(br["balance"] + amount, 2)
+    if amount > 0:
+        br["total_won"] = round(br.get("total_won", 0) + amount, 2)
+    else:
+        br["total_lost"] = round(br.get("total_lost", 0) + abs(amount), 2)
+    br["net_pnl"] = round(br.get("total_won", 0) - br.get("total_lost", 0), 2)
+    br["total_settled"] = br.get("total_settled", 0) + 1
+    # Reduce daily drawdown by winnings (don't go below 0)
+    br["daily_drawdown"] = max(0.0, round(br.get("daily_drawdown", 0) - amount, 2))
     save_bankroll(br)
     return br
 
@@ -781,6 +944,113 @@ def today_already_ran() -> bool:
     return today in state.get("runs", {})
 
 
+# ── Settlement: reconcile closed positions with P&L ────────────────────────
+
+def settle_positions(client, date_str: str | None = None) -> dict:
+    """Query Kalshi for settled positions, match to recorded runs, credit P&L.
+
+    Args:
+        client: authenticated KalshiClient
+        date_str: ISO date to settle (default: today)
+
+    Returns:
+        {"settled_days": int, "total_pnl": float, "details": [...]}
+    """
+    if date_str is None:
+        date_str = date.today().isoformat()
+
+    state = load_ease_state()
+    br = load_bankroll()
+    runs = state.get("runs", {})
+
+    # Find all unsettled days
+    unsettled_days = []
+    for day, run_info in runs.items():
+        if isinstance(run_info, dict) and run_info.get("live") and not run_info.get("settled_pnl"):
+            unsettled_days.append(day)
+
+    if not unsettled_days:
+        print(f"  {CY}📋 SETTLEMENT{R} — no unsettled live runs found.")
+        return {"settled_days": 0, "total_pnl": 0.0, "details": []}
+
+    # Query Kalshi for all positions (settled + open)
+    try:
+        data = client.get("/portfolio/positions")
+        all_positions = data.get("market_positions", [])
+    except Exception as e:
+        print(f"  {RD}[FAIL]{R} Cannot query Kalshi positions: {e}")
+        return {"settled_days": 0, "total_pnl": 0.0, "details": [], "error": str(e)}
+
+    # Build a lookup of settled positions by ticker
+    settled_positions: dict[str, float] = {}
+    for p in all_positions:
+        ticker = p.get("ticker", "")
+        pos = float(p.get("position_fp", 0) or 0)
+        if abs(pos) < 0.001:
+            # Zero position = settled/closed
+            pnl_raw = p.get("total_pnl_dollars") or p.get("realized_pnl") or p.get("pnl") or 0
+            try:
+                settled_positions[ticker] = float(pnl_raw)
+            except (ValueError, TypeError):
+                settled_positions[ticker] = 0.0
+
+    if not settled_positions:
+        print(f"  {CY}📋 SETTLEMENT{R} — no fully-settled positions on Kalshi yet.")
+        return {"settled_days": 0, "total_pnl": 0.0, "details": []}
+
+    total_pnl = 0.0
+    details = []
+    settled_days = 0
+
+    for day in sorted(unsettled_days):
+        run = runs[day]
+        underdogs = run.get("underdogs", [])
+        if not underdogs:
+            continue
+
+        day_pnl = 0.0
+        matched = 0
+        for ticker in underdogs:
+            if ticker in settled_positions:
+                pnl = settled_positions[ticker]
+                day_pnl += pnl
+                matched += 1
+
+        if matched > 0:
+            run["settled_pnl"] = round(day_pnl, 2)
+            run["settled_at"] = datetime.now(timezone.utc).isoformat()
+            run["settled_count"] = matched
+            credit_bankroll(day_pnl)
+            total_pnl += day_pnl
+            settled_days += 1
+            pnl_color = GR if day_pnl >= 0 else RD
+            details.append({
+                "day": day,
+                "category": run.get("category", "?"),
+                "pnl": round(day_pnl, 2),
+                "matched": matched,
+                "combos": run.get("combos", 0),
+            })
+            print(f"  {pnl_color}${day_pnl:+.2f}{R}  {day}  {run.get('category','?')}  "
+                  f"({matched} settled)  {DIM}{run.get('combos',0)} combos{R}")
+
+    if settled_days == 0:
+        print(f"  {CY}📋 SETTLEMENT{R} — no positions matched for unsettled days.")
+    else:
+        save_ease_state(state)
+        br2 = load_bankroll()
+        pnl_color = GR if total_pnl >= 0 else RD
+        print(f"\n  {B}{'─'*50}{R}")
+        print(f"  {B}SETTLEMENT COMPLETE{R} — {settled_days} day(s) settled")
+        print(f"  {B}Net P&L:{R} {pnl_color}${total_pnl:+.2f}{R}")
+        print(f"  {B}Bankroll:{R} ${br2['balance']:,.2f}  |  "
+              f"{B}Total won:{R} ${br2.get('total_won',0):,.2f}  |  "
+              f"{B}Total lost:{R} ${br2.get('total_lost',0):,.2f}")
+        print(f"  {B}{'─'*50}{R}")
+
+    return {"settled_days": settled_days, "total_pnl": round(total_pnl, 2), "details": details}
+
+
 # ── Show open positions / balance ─────────────────────────────────────────
 
 def show_open() -> None:
@@ -834,6 +1104,7 @@ def show_open() -> None:
 
 def run_once(live: bool, skip_gate: bool,
              category: str, games: list[Game], counts: dict[str, int],
+             no_refresh: bool = False,
              ) -> int:
     """Generate combos, print them, optionally place orders.  Returns 0 on success."""
     print_category_summary(counts, category)
@@ -845,7 +1116,7 @@ def run_once(live: bool, skip_gate: bool,
 
     # Timing gate
     if not skip_gate:
-        ready, msg = halftime_gate(games)
+        ready, msg = halftime_gate(games, category)
         if not ready:
             print(f"\n  {YE}⏸  GATE CLOSED{R} — {msg}")
             return 2  # signal: gate not open yet
@@ -855,7 +1126,22 @@ def run_once(live: bool, skip_gate: bool,
         ready = True
         print(f"\n  {YE}⏩  GATE SKIPPED{R}")
 
-    # Generate combos
+    # ── Drawdown check before any trading ────────────────────────────────
+    if live and ready:
+        tripped, reason = check_drawdown()
+        if tripped:
+            print(f"\n  {RD}🛑 CIRCUIT BREAKER{R} — {reason}")
+            print(f"  {DIM}Trading halted for today. Resets at midnight.{R}")
+            return 3
+
+    # ── Refresh prices if live and gate is open ──────────────────────────
+    client = None
+    if live and ready and not no_refresh:
+        from kalshi_tap.client import KalshiClient
+        client = KalshiClient.from_env()
+        refresh_game_prices(games, client)
+
+    # Generate combos (with fresh prices if refreshed)
     ease = TheEase(games)
     tickets = ease.run()
 
@@ -866,8 +1152,9 @@ def run_once(live: bool, skip_gate: bool,
 
     # Place orders if live
     if live and ready:
-        from kalshi_tap.client import KalshiClient
-        client = KalshiClient.from_env()
+        if client is None:
+            from kalshi_tap.client import KalshiClient
+            client = KalshiClient.from_env()
         print(f"\n  {RD}{'='*70}{R}")
         print(f"  {B}{WH}PLACING ORDERS{R} — 5 combos, 1 contract per leg at ask")
         print(f"  {RD}{'='*70}{R}\n")
@@ -966,7 +1253,7 @@ def daemon_loop(live: bool, poll_secs: int = 60) -> int:
                 time.sleep(poll_secs)
                 continue
 
-            ready, msg = halftime_gate(games)
+            ready, msg = halftime_gate(games, category)
             ts = datetime.now().strftime('%H:%M:%S')
 
             if ready:
@@ -1003,10 +1290,14 @@ def main():
                         help="Show running total across all days")
     parser.add_argument("--show-open", action="store_true",
                         help="Display Kalshi balance and open positions")
+    parser.add_argument("--settle", action="store_true",
+                        help="Settle closed positions: check P&L, credit bankroll, then exit")
     parser.add_argument("--loop", type=int, default=0, metavar="SECS",
                         help="Poll every SECS seconds until gate opens, then exit")
     parser.add_argument("--now", action="store_true",
                         help="Skip the halftime gate — run immediately")
+    parser.add_argument("--no-refresh", action="store_true",
+                        help="Skip live price refresh before placing orders (use cached prices)")
     parser.add_argument("--poll", type=int, default=60, metavar="SECS",
                         help="Polling interval for daemon/loop mode (default: 60s)")
     args = parser.parse_args()
@@ -1014,6 +1305,13 @@ def main():
     # --history
     if args.history:
         print_running_total()
+        return 0
+
+    # --settle
+    if args.settle:
+        from kalshi_tap.client import KalshiClient
+        client = KalshiClient.from_env()
+        settle_positions(client)
         return 0
 
     # --show-open
@@ -1036,10 +1334,10 @@ def main():
         print(f"  {DIM}Data source: live Kalshi production API.{R}")
         return 1
 
-    # Timing gate
+    # Timing gate (sport-specific)
     ready = True
     if not args.now:
-        ready, msg = halftime_gate(games)
+        ready, msg = halftime_gate(games, category)
         if not ready:
             print(f"\n  {YE}⏸  GATE CLOSED{R} — {msg}")
             if args.loop <= 0:
@@ -1049,6 +1347,21 @@ def main():
             print(f"\n  {GR}▶  GATE OPEN{R} — {msg}")
     else:
         print(f"\n  {YE}⏩  GATE SKIPPED{R} (--now flag)")
+
+    # ── Drawdown check before any trading ────────────────────────────
+    if live and ready:
+        tripped, reason = check_drawdown()
+        if tripped:
+            print(f"\n  {RD}🛑 CIRCUIT BREAKER{R} — {reason}")
+            print(f"  {DIM}Trading halted for today. Resets at midnight.{R}")
+            return 3
+
+    # ── Refresh prices if live and gate is open ──────────────────────
+    client = None
+    if live and ready and not args.no_refresh:
+        from kalshi_tap.client import KalshiClient
+        client = KalshiClient.from_env()
+        refresh_game_prices(games, client)
 
     # Generate combos
     ease = TheEase(games)
@@ -1061,8 +1374,9 @@ def main():
 
     # Place orders if live and gate open
     if live and ready:
-        from kalshi_tap.client import KalshiClient
-        client = KalshiClient.from_env()
+        if client is None:
+            from kalshi_tap.client import KalshiClient
+            client = KalshiClient.from_env()
         print(f"\n  {RD}{'='*70}{R}")
         print(f"  {B}{WH}PLACING ORDERS{R} — 5 combos, 1 contract per leg at ask")
         print(f"  {RD}{'='*70}{R}\n")
@@ -1094,10 +1408,20 @@ def main():
                 print(f"  {YE}[{ts}]{R} Only {len(games2)} games — retrying…")
                 continue
 
-            ready2, msg2 = halftime_gate(games2)
+            ready2, msg2 = halftime_gate(games2, category2)
             ts = datetime.now().strftime('%H:%M:%S')
             if ready2:
                 print(f"\n  {GR}▶  GATE OPEN{R} at {ts} — {msg2}")
+                # Drawdown + refresh in loop mode too
+                tripped2, reason2 = check_drawdown()
+                if tripped2:
+                    print(f"\n  {RD}🛑 CIRCUIT BREAKER{R} — {reason2}")
+                    break
+                cl2 = None
+                if live and not args.no_refresh:
+                    from kalshi_tap.client import KalshiClient
+                    cl2 = KalshiClient.from_env()
+                    refresh_game_prices(games2, cl2)
                 ease2 = TheEase(games2)
                 tickets2 = ease2.run()
                 print_category_summary(counts2, category2)
@@ -1107,9 +1431,10 @@ def main():
                 print_ease_summary(tickets2)
 
                 if live:
-                    from kalshi_tap.client import KalshiClient
-                    client = KalshiClient.from_env()
-                    result2 = place_ease_tickets(tickets2, client)
+                    if cl2 is None:
+                        from kalshi_tap.client import KalshiClient
+                        cl2 = KalshiClient.from_env()
+                    result2 = place_ease_tickets(tickets2, cl2)
                     total2 = result2["total_cost"]
                     br2 = charge_bankroll(total2)
                     bc2 = GR if br2["balance"] >= 50 else YE if br2["balance"] >= 20 else RD
@@ -1135,7 +1460,7 @@ def main():
                 category, games, counts, got_data = discover_by_category()
                 ready = True
                 if not args.now:
-                    ready, msg = halftime_gate(games)
+                    ready, msg = halftime_gate(games, category)
                 live = args.live and got_data
             else:
                 print(f"  {YE}[{ts}]{R} {msg2}  |  {category2} ({len(games2)} games)")
@@ -1163,12 +1488,19 @@ def main():
                 continue
             ready = True
             if not args.now:
-                ready, msg = halftime_gate(games)
+                ready, msg = halftime_gate(games, category)
                 if not ready:
                     print(f"  {YE}⏸  GATE CLOSED{R} — {msg}")
-                    # Fall into polling loop above pattern
-                    # Actually, re-enter by continuing the outer "while True"
                     continue
+            tripped3, reason3 = check_drawdown()
+            if tripped3:
+                print(f"\n  {RD}🛑 CIRCUIT BREAKER{R} — {reason3}")
+                continue
+            cl3 = None
+            if live and ready and not args.no_refresh:
+                from kalshi_tap.client import KalshiClient
+                cl3 = KalshiClient.from_env()
+                refresh_game_prices(games, cl3)
             ease = TheEase(games)
             tickets = ease.run()
             print_game_slate(games, category, live)
@@ -1176,9 +1508,10 @@ def main():
                 print_ticket(t)
             print_ease_summary(tickets)
             if live and ready:
-                from kalshi_tap.client import KalshiClient
-                client = KalshiClient.from_env()
-                result = place_ease_tickets(tickets, client)
+                if cl3 is None:
+                    from kalshi_tap.client import KalshiClient
+                    cl3 = KalshiClient.from_env()
+                result = place_ease_tickets(tickets, cl3)
                 total = result["total_cost"]
                 br = charge_bankroll(total)
                 bc = GR if br["balance"] >= 50 else YE if br["balance"] >= 20 else RD
