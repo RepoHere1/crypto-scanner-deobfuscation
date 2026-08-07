@@ -1,0 +1,3 @@
+#!/data/data/com.termux/files/usr/bin/bash
+# runit logger for keepalive service
+exec svlogd -tt /data/data/com.termux/files/home/.termux/sv/keepalive/log/main/

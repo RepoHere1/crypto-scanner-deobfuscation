@@ -1,0 +1,33 @@
+#!/data/data/com.termux/files/usr/bin/bash
+# runit service: Termux keep-alive daemon
+# Supervised by runsv — auto-restarts within 1 second if killed
+# Lives in Termux's service brain, survives all shell session closes
+
+exec 2>&1
+
+NOTIF_ID=42069
+
+echo "[keepalive] runit service starting..."
+
+# CPU wakelock
+termux-wake-lock 2>/dev/null || true
+
+# Foreground notification — Android treats this as a foreground service
+termux-notification \
+    --id "$NOTIF_ID" \
+    --ongoing \
+    --priority max \
+    --title "Termux Active" \
+    --content "Runit-supervised — will not be killed" \
+    --alert-once \
+    --button1 "Open Termux" \
+    --button1-action "am start -n com.termux/com.termux.app.TermuxActivity" \
+    2>/dev/null || true
+
+echo "[keepalive] notification posted, wakelock held"
+
+# Sit forever. runsv restarts us within 1s if we die.
+while true; do
+    sleep 3600
+    termux-wake-lock 2>/dev/null || true
+done

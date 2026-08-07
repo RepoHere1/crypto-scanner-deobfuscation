@@ -82,6 +82,11 @@ export KALSHI_PRIVATE_KEY_PATH="$HOME/.kalshi/private_key.pem"
 # Termux when you switch apps / sessions. Background stack uses setsid + watchdog.
 # Open windows/sessions are NOT closed by stack scripts (no pkill of interactive TTYs).
 if [[ $- == *i* ]]; then
+  # runit supervision: auto-starts keepalive daemon, auto-restarts if killed
+  if ! pgrep -f "runsvdir /data/data/com.termux/files/usr/var/service" >/dev/null 2>&1; then
+    nohup runsvdir /data/data/com.termux/files/usr/var/service > /dev/null 2>&1 &
+    disown 2>/dev/null
+  fi
   command -v termux-wake-lock >/dev/null 2>&1 && termux-wake-lock >/dev/null 2>&1 || true
   # Re-assert wake lock quietly every interactive shell start
   ( command -v termux-wake-lock >/dev/null 2>&1 && termux-wake-lock ) >/dev/null 2>&1 &

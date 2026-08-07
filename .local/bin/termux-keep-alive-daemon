@@ -1,0 +1,64 @@
+#!/data/data/com.termux/files/usr/bin/bash
+# Permanent Termux keep-alive daemon.
+#   - Acquires CPU wakelock
+#   - Shows persistent foreground notification (Android won't kill foreground services)
+#   - Respawning watchdog — if Android kills it anyway, boot script brings it back
+#
+# Install: this script is sourced from ~/.bashrc and launched by Termux:Boot
+# One-time manual step: Android Settings → Apps → Termux → Battery → Unrestricted
+
+set -e
+
+NOTIF_ID=42069
+
+acquire() {
+    # CPU wakelock
+    termux-wake-lock 2>/dev/null || true
+
+    # Persistent foreground notification — THIS is what stops Android killings
+    termux-notification \
+        --id "$NOTIF_ID" \
+        --ongoing \
+        --priority max \
+        --title "Termux Active" \
+        --content "Sessions protected — wakelock held" \
+        --alert-once \
+        --button1 "Open Termux" \
+        --button1-action "am start -n com.termux/com.termux.app.TermuxActivity" \
+        2>/dev/null || true
+}
+
+release() {
+    termux-notification-remove "$NOTIF_ID" 2>/dev/null || true
+    termux-wake-unlock 2>/dev/null || true
+}
+
+# If called with --stop, release everything
+if [ "${1:-}" = "--stop" ]; then
+    release
+    echo "[keepalive] released"
+    exit 0
+fi
+
+# If called with --status, report
+if [ "${1:-}" = "--status" ]; then
+    if pgrep -f "termux-keep-alive-daemon" | grep -qv "$$"; then
+        echo "[keepalive] RUNNING (pid $(pgrep -f termux-keep-alive-daemon | head -1))"
+    else
+        echo "[keepalive] STOPPED"
+    fi
+    exit 0
+fi
+
+# Acquire and hold
+acquire
+echo "[keepalive] acquired — notification visible, wakelock held"
+
+# Sit forever so the notification stays alive
+# If this process dies, Android may kill the notification too,
+# so Termux:Boot restarts it on reboot
+while true; do
+    sleep 3600
+    # Re-acquire in case something dropped it
+    termux-wake-lock 2>/dev/null || true
+done
