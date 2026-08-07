@@ -1549,6 +1549,7 @@ VAULT_DB = HOME / "wallets_forever.db"
 def _vault_conn():
     import sqlite3
     c = sqlite3.connect(str(VAULT_DB), timeout=10)
+    # Create table if not exists (fresh install)
     c.execute("""CREATE TABLE IF NOT EXISTS wallets (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         key_type TEXT NOT NULL,
@@ -1560,6 +1561,16 @@ def _vault_conn():
         proof_verified INTEGER DEFAULT 0,
         imported_at TEXT NOT NULL
     )""")
+    # Migrate old schema — add missing columns if they don't exist
+    for col, coldef in [
+        ("balance", "REAL DEFAULT 0"),
+        ("balance_checked_at", "TEXT"),
+        ("proof_verified", "INTEGER DEFAULT 0"),
+    ]:
+        try:
+            c.execute(f"ALTER TABLE wallets ADD COLUMN {col} {coldef}")
+        except sqlite3.OperationalError:
+            pass  # column already exists
     c.execute("""CREATE UNIQUE INDEX IF NOT EXISTS idx_wallets_key
         ON wallets(key_type, key_value)""")
     c.commit()
