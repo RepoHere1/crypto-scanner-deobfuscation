@@ -14,8 +14,9 @@ Major improvements in v3.0:
   • Rate-limit detection with proper Retry-After / X-RateLimit-Reset backoff
   • CPU/RAM throttle with configurable ceilings (default 90%)
   • Only confirmed-live bucket and Bitbucket probe results written to food
-  • Expanded 370+ diversified keyword list covering crypto, infra, DevOps, cloud, DBs,
-    mobile, firmware, IoT, automotive, OSINT, red-team, forensics, supply-chain
+  • Expanded 400+ diversified keyword list covering crypto, infra, DevOps, cloud, DBs,
+    mobile, firmware, IoT, automotive, OSINT, red-team, forensics, supply-chain,
+    dark-web, onion services, Tor relays, darknet markets, anonymous P2P
   • JSONL output option, pipe-escaping for the default format
   • consecutive_empty bailout raised to 15, tied to total (not net-new) results
   • Token rotator with configurable per-platform budgets and header-based resets
@@ -32,6 +33,7 @@ Usage:
     python 7000.py --max-cpu 85 --max-ram 85   # throttle ceilings
     python 7000.py --topics crypto             # only crypto tier
     python 7000.py --topics infra              # only infra/devops tier
+    python 7000.py --topics darkweb            # only dark-web / onion tier
     python 7000.py --topics all                # all tiers (default)
 """
 from __future__ import annotations
@@ -419,16 +421,49 @@ GENERAL_TOPICS: List[str] = [
     "typosquatting pypi", "malicious docker image",
     "artifact repository jfrog", "sonatype nexus repository",
 ]
+DARKWEB_TOPICS: List[str] = [
+    # ── Onion Service Deployment / Keys ───────────────────────────
+    "tor hidden service private key", "onion service v3 address",
+    "torrc hidden service dir", "onionbalance config instance",
+    "stem controller onion service", "onion service nginx proxy",
+    "onion-service docker compose tor", "onionshare web server config",
+
+    # ── Darknet Market Infrastructure ──────────────────────────────
+    "darknet market escrow multisig", "marketplace pgp verification",
+    "bitcoin tumbler mixer service", "monero darknet payment gateway",
+    "darknet forum database schema", "vendor pgp key management",
+
+    # ── Tor Relays / Bridges / Anti-censorship ─────────────────────
+    "tor relay operator configuration", "obfs4 bridge server torrc",
+    "snowflake proxy standalone", "meek transport bridge tor",
+    "bridgedb distributor config", "conjure station phantom",
+
+    # ── Dark Web Recon / OSINT / Crawling ──────────────────────────
+    "onion crawler scrapy middleware", "tor headless browser selenium",
+    "onion service fingerprint scan", "darknet osint reconnaissance",
+    "onion scan hidden service probe", "tor exit relay bad onion",
+
+    # ── Anonymous Messaging / P2P over Tor ─────────────────────────
+    "ricochet refresh protocol", "briar tor plugin android",
+    "cwtch server binding", "session loki service node",
+    "tox dht bootstrap", "retroshare tor hidden",
+
+    # ── Dark Web Tooling / Frameworks ──────────────────────────────
+    "dnp py darknet python", "tor stem library authenticate",
+    "socks5h tor proxy chain", "privacy badger onion list",
+    "https everywhere onion upgrade", "orjail tor namespaces",
+]
 
 # Combined list for default mode  (dict.fromkeys removes exact dupes)
 ALL_TOPICS: List[str] = list(dict.fromkeys(
-    CRYPTO_TOPICS + INFRA_TOPICS + GENERAL_TOPICS
+    CRYPTO_TOPICS + INFRA_TOPICS + GENERAL_TOPICS + DARKWEB_TOPICS
 ))
 
 TOPIC_TIERS = {
     "crypto":  CRYPTO_TOPICS,
     "infra":   INFRA_TOPICS,
     "general": GENERAL_TOPICS,
+    "darkweb": DARKWEB_TOPICS,
     "all":     ALL_TOPICS,
 }
 
@@ -1776,6 +1811,288 @@ def probe_cloud_buckets(out: OutputWriter, provider: str, target_count: int,
 
 
 # =============================================================================
+# DARKNET DEEP-SEARCH HELPERS  (onion code search, org probes, workspace probes)
+# =============================================================================
+
+def _github_onion_deep_search(out: OutputWriter, token_rotator: TokenRotator,
+                               target_count: int,
+                               throttle: Optional[ResourceThrottle] = None):
+    """Search GitHub code for .onion addresses and hidden service private keys."""
+    onion_patterns = [
+        (ONION_V3_REGEX, "onion-v3-address"),
+        (ONION_KEY_REGEX, "hs-ed25519-secret"),
+        (ONION_TORRC_REGEX, "torrc-hidden-service"),
+        (r'BEGIN\s+(RSA|EC|OPENSSH)\s+PRIVATE\s+KEY', "private-key-pem"),
+        (r'[13][a-km-zA-HJ-NP-Z1-9]{25,34}', "bitcoin-address"),
+        (r'0x[a-fA-F0-9]{64}', "ethereum-private-key"),
+        (r'L[1-9A-HJ-NP-Za-km-z]{51,52}', "litecoin-wif"),
+    ]
+    for pattern, label in onion_patterns:
+        if out.total_written >= target_count:
+            break
+        cprint(f"   github onion-deep: searching code for {label}...", color=C_BLUE, dim=True)
+        try:
+            q = urllib.parse.quote(pattern)
+            url = (f"https://api.github.com/search/code?q={q}"
+                   f"&sort=indexed&order=desc&per_page=30")
+            headers = {
+                "Accept": "application/vnd.github+json",
+                "X-GitHub-Api-Version": "2022-11-28",
+                "User-Agent": "Mozilla/5.0",
+            }
+            token = token_rotator.get()
+            if token:
+                headers["Authorization"] = f"Bearer {token}"
+            resp = http_request(url, headers=headers, timeout=45, throttle=throttle)
+            if not resp or resp.get("_error") or not resp.get("items"):
+                continue
+            for item in resp.get("items", []):
+                if out.total_written >= target_count:
+                    break
+                repo_info = item.get("repository", {})
+                html_url = repo_info.get("html_url", "")
+                owner_login = repo_info.get("owner", {}).get("login", "")
+                repo_name = repo_info.get("name", "")
+                if html_url and owner_login and repo_name:
+                    food = f"https://github.com/{owner_login}/{repo_name}.git"
+                    out.write(html_url, owner_login, repo_name,
+                              f"onion-deep:{label}", "github", food)
+            time.sleep(1.5)
+        except Exception:
+            continue
+
+
+def _gitlab_onion_deep_search(out: OutputWriter, token_rotator: TokenRotator,
+                               target_count: int,
+                               throttle: Optional[ResourceThrottle] = None):
+    """Search GitLab for .onion patterns in blobs."""
+    if out.total_written >= target_count:
+        return
+    cprint("   gitlab onion-deep: searching blobs for .onion...", color=C_BLUE, dim=True)
+    try:
+        q = urllib.parse.quote(".onion")
+        url = f"https://gitlab.com/api/v4/search?scope=blobs&search={q}&per_page=30"
+        headers = {
+            "Accept": "application/json",
+            "User-Agent": "Mozilla/5.0",
+        }
+        token = token_rotator.get()
+        if token:
+            headers["PRIVATE-TOKEN"] = token
+        resp = http_request(url, headers=headers, timeout=30, throttle=throttle)
+        if not resp or not isinstance(resp, list):
+            return
+        for item in resp:
+            if out.total_written >= target_count:
+                break
+            proj = item.get("project", {})
+            path = proj.get("path_with_namespace", "")
+            if not path or "/" not in path:
+                continue
+            parts = path.split("/")
+            web_url = f"https://gitlab.com/{path}"
+            out.write(web_url, parts[0], parts[-1],
+                      "onion-deep:onion-blob", "gitlab", f"https://gitlab.com/{path}.git")
+    except Exception:
+        pass
+
+
+def _probe_github_orgs(out: OutputWriter, token_rotator: TokenRotator,
+                       target_count: int,
+                       throttle: Optional[ResourceThrottle] = None):
+    """Fetch repo listings for known high-signal GitHub orgs."""
+    cprint("   github org-probe: scanning known orgs...", color=C_BLUE, dim=True)
+    for org in GITHUB_KNOWN_ORGS:
+        if out.total_written >= target_count:
+            break
+        try:
+            url = (f"https://api.github.com/orgs/{org}/repos"
+                   f"?sort=updated&direction=desc&per_page=30&type=sources")
+            headers = {
+                "Accept": "application/vnd.github+json",
+                "X-GitHub-Api-Version": "2022-11-28",
+                "User-Agent": "Mozilla/5.0",
+            }
+            token = token_rotator.get()
+            if token:
+                headers["Authorization"] = f"Bearer {token}"
+            resp = http_request(url, headers=headers, timeout=30, throttle=throttle)
+            if not resp or resp.get("_error") or not isinstance(resp, list):
+                continue
+            for repo in resp:
+                if out.total_written >= target_count:
+                    break
+                html_url = repo.get("html_url", "")
+                owner_login = repo.get("owner", {}).get("login", "")
+                repo_name = repo.get("name", "")
+                if html_url and owner_login and repo_name:
+                    food = f"https://github.com/{owner_login}/{repo_name}.git"
+                    out.write(html_url, owner_login, repo_name,
+                              f"org-probe:{org}", "github", food)
+            time.sleep(0.5)
+        except Exception:
+            continue
+
+
+def _probe_bitbucket_workspace(out: OutputWriter, workspace: str,
+                               target_count: int,
+                               bb_user: str, bb_pass: str,
+                               bb_api_token: str,
+                               throttle: Optional[ResourceThrottle] = None):
+    """Fetch repos for a specific Bitbucket workspace."""
+    if out.total_written >= target_count:
+        return
+    # Build auth
+    auth_type = "none"
+    cred = ""
+    if bb_api_token and not re.search(r'your_|xxxx|YOUR_', bb_api_token, re.IGNORECASE):
+        cred = bb_api_token
+        auth_type = "Bearer"
+    elif bb_user and bb_pass and "your_" not in bb_user.lower() and "your_" not in bb_pass.lower():
+        cred_bytes = f"{bb_user}:{bb_pass}".encode("utf-8")
+        cred = base64.b64encode(cred_bytes).decode("ascii")
+        auth_type = "Basic"
+    if auth_type == "none":
+        return
+    try:
+        url = f"https://api.bitbucket.org/2.0/repositories/{workspace}?pagelen=30"
+        headers = {
+            "Accept": "application/json",
+            "User-Agent": "Mozilla/5.0",
+        }
+        if auth_type == "Bearer":
+            headers["Authorization"] = f"Bearer {cred}"
+        else:
+            headers["Authorization"] = f"Basic {cred}"
+        resp = http_request(url, headers=headers, timeout=30, throttle=throttle)
+        if not resp or not resp.get("values"):
+            return
+        for item in resp.get("values", []):
+            if out.total_written >= target_count:
+                break
+            full_name = item.get("full_name", "")
+            if not full_name or "/" not in full_name:
+                continue
+            parts = full_name.split("/")
+            owner = parts[0]
+            repo_name = parts[-1]
+            html_url = item.get("links", {}).get("html", {}).get("href", "")
+            if html_url:
+                out.write(html_url, owner, repo_name,
+                          f"ws-probe:{workspace}", "bitbucket", f"bb:{full_name}")
+    except Exception:
+        pass
+
+
+# =============================================================================
+# ONION → CLEARNET CORRELATION  (find onion addresses leaked in clearnet repos)
+# =============================================================================
+
+def correlate_onion_clearnet(output_file: str = "paste_box.txt",
+                              correlation_file: str = "onion_correlations.jsonl"):
+    """Post-process 7000.py output: find repos where .onion addresses appear
+    alongside clearnet infrastructure, indicating a leak path.
+
+    Outputs walletx-compatible JSONL with:
+      - onion address (if found in repo metadata/content)
+      - clearnet repo URL where it was found
+      - source engine
+      - correlation confidence (high/medium/low)
+    """
+    if not os.path.exists(output_file):
+        cprint(f"[correlate] No output file: {output_file}", color=C_RED)
+        return []
+
+    onion_pattern = re.compile(ONION_V3_REGEX)
+    correlations = []
+    seen_onions: Set[str] = set()
+
+    cprint(f"[correlate] Scanning {output_file} for onion→clearnet leaks...", color=C_BCYN)
+
+    try:
+        with open(output_file, "r", encoding="utf-8", errors="ignore") as f:
+            for line_num, line in enumerate(f, 1):
+                line = line.strip()
+                if not line:
+                    continue
+
+                # Parse pipe-delimited format: url|owner|repo|topic|source|ts
+                parts = line.split("|")
+                if len(parts) < 5:
+                    # Try JSONL
+                    try:
+                        rec = json.loads(line)
+                        url = rec.get("url", "")
+                        owner = rec.get("owner", "")
+                        repo = rec.get("repo", "")
+                        topic = rec.get("topic", "")
+                        source = rec.get("source", "")
+                    except json.JSONDecodeError:
+                        continue
+                else:
+                    # Unescape pipes
+                    def _unescape(s: str) -> str:
+                        return s.replace("\\|", "|").replace("\\\\", "\\")
+                    url = _unescape(parts[0])
+                    owner = _unescape(parts[1])
+                    repo = _unescape(parts[2])
+                    topic = _unescape(parts[3])
+                    source = _unescape(parts[4])
+
+                # Check topic field for onion indicators
+                onion_match = onion_pattern.search(topic)
+                if not onion_match:
+                    onion_match = onion_pattern.search(repo)
+                if not onion_match:
+                    onion_match = onion_pattern.search(owner)
+
+                if onion_match:
+                    onion_addr = onion_match.group(0)
+                    # Determine confidence
+                    confidence = "low"
+                    if "onion" in topic.lower() or "hidden-service" in topic.lower():
+                        confidence = "high"
+                    elif "darknet" in topic.lower() or "tor" in topic.lower():
+                        confidence = "medium"
+                    elif source in ("github", "gitlab"):
+                        confidence = "medium"
+
+                    corr = {
+                        "onion": onion_addr,
+                        "clearnet_repo": url,
+                        "owner": owner,
+                        "repo": repo,
+                        "source": source,
+                        "topic": topic,
+                        "confidence": confidence,
+                        "discovered_at": datetime.now(timezone.utc).isoformat(),
+                    }
+                    correlations.append(corr)
+                    seen_onions.add(onion_addr)
+
+        # Write correlation file (walletx-compatible JSONL)
+        with open(correlation_file, "w", encoding="utf-8") as out_f:
+            for corr in correlations:
+                out_f.write(json.dumps(corr, ensure_ascii=False) + "\n")
+
+        cprint(f"[correlate] Found {len(correlations)} onion→clearnet leak paths "
+               f"({len(seen_onions)} unique .onion addresses)", color=C_BGRN)
+        cprint(f"[correlate] Output: {correlation_file} (walletx-compatible JSONL)", color=C_GREEN)
+
+        # High-confidence summary
+        high_conf = [c for c in correlations if c["confidence"] == "high"]
+        if high_conf:
+            cprint(f"[correlate] ⚠ {len(high_conf)} HIGH-confidence leaks:", color=C_BRED, bold=True)
+            for hc in high_conf[:10]:
+                cprint(f"   {hc['onion']} → {hc['clearnet_repo']}", color=C_BRED)
+
+    except Exception as e:
+        cprint(f"[correlate] Error: {e}", color=C_RED)
+
+    return correlations
+
+
+# =============================================================================
 # MAIN ORCHESTRATOR  (parallel engines, global target, resume, dry-run)
 # =============================================================================
 
@@ -1879,8 +2196,19 @@ def run(args) -> None:
 
             if engine == "github":
                 scrape_github(out, gh_rotator, topic, target, deep=args.deep, throttle=throttle)
+                # --deep: also search for .onion patterns and keys in code
+                if args.deep and out.total_written < target:
+                    _github_onion_deep_search(out, gh_rotator, target, throttle=throttle)
+                # Pre-seed known org repos (once only when darkweb tier active)
+                if not getattr(_run_engine, "_github_orgs_probed", False):
+                    _run_engine._github_orgs_probed = True
+                    if tier in ("all", "darkweb") and out.total_written < target:
+                        _probe_github_orgs(out, gh_rotator, target, throttle=throttle)
             elif engine == "gitlab":
                 scrape_gitlab(out, gl_rotator, topic, target, deep=args.deep, throttle=throttle)
+                # GitLab onion deep search
+                if args.deep and out.total_written < target:
+                    _gitlab_onion_deep_search(out, gl_rotator, target, throttle=throttle)
             elif engine == "huggingface":
                 scrape_huggingface(out, hf_rotator, topic, target, throttle=throttle)
             elif engine == "docker":
@@ -1902,6 +2230,33 @@ def run(args) -> None:
 
             # Short pause between topics
             time.sleep(0.3 + random.uniform(0, 0.3))
+
+        # ── Engine-specific darknet pre-seeds (run once per engine after topic loop) ─
+        if out.total_written < target:
+            if engine == "docker" and tier in ("all", "darkweb"):
+                for dq in DOCKER_DARKNET_QUERIES:
+                    if out.total_written >= target:
+                        break
+                    scrape_docker(out, dq, target, throttle=throttle)
+            elif engine == "huggingface" and tier in ("all", "darkweb"):
+                for hq in HF_DARKNET_QUERIES:
+                    if out.total_written >= target:
+                        break
+                    scrape_huggingface(out, hf_rotator, hq, target, throttle=throttle)
+            elif engine == "postman" and tier in ("all", "darkweb"):
+                for pq in POSTMAN_DARKNET_QUERIES:
+                    if out.total_written >= target:
+                        break
+                    scrape_postman(out, pq, target, tokens["postman_key"], throttle=throttle)
+            elif engine == "bitbucket" and tier in ("all", "darkweb"):
+                for ws in DARKNET_ORGS[:20]:  # cap at 20 workspace probes
+                    if out.total_written >= target:
+                        break
+                    _probe_bitbucket_workspace(out, ws, target,
+                                               tokens["bitbucket_user"],
+                                               tokens["bitbucket_pass"],
+                                               tokens["bitbucket_api_token"],
+                                               throttle=throttle)
 
         eng_done = out.engine_counts.get(engine, 0) - prev_engine_count
         cprint(f"[{engine}] done: +{eng_done} new (seen: {out.total_seen}, written: {out.total_written}/{target})", color=C_GREEN)
@@ -1972,7 +2327,7 @@ def main():
     ap.add_argument("--engines", "-e", type=str, default="",
                     help="Comma-separated engine list (default: all)")
     ap.add_argument("--topics", type=str, default="all",
-                    choices=["crypto", "infra", "general", "all"],
+                    choices=["crypto", "infra", "general", "darkweb", "all"],
                     help="Topic tier (default: all)")
     ap.add_argument("--bucket-probe-cap", type=int, default=3000,
                     help="Max GCS/S3 bucket name candidates to probe (default: 3000)")
