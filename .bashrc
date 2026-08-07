@@ -40,6 +40,7 @@ alias keepgo='python3 "$HOME/keepalive.py" --daemon'
 alias keepstatus='python3 "$HOME/keepalive.py" --status'
 alias keepstop='python3 "$HOME/keepalive.py" --stop'
 alias dashall='bash "$HOME/dashgo.sh"'
+alias dashscan='bash "$HOME/dashscan.sh"'
 
 alias walletall='python3 "$HOME/wallet_view.py" --once --all --cached'
 alias walletpage='python3 "$HOME/wallet_view.py" --once --cached --page'
@@ -66,8 +67,7 @@ alias kalsh='$HOME/bin/kalshi-tap'
 alias kalshtap='$HOME/bin/kalshi-tap'
 alias kashli='$HOME/bin/kalshi-tap'
 alias kashlitap='$HOME/bin/kalshi-tap'
-alias 'kslshi tap'='$HOME/bin/kalshi-tap'
-alias 'kalshi tap'='$HOME/bin/kalshi-tap'
+
 alias 'kslshi-tap'='$HOME/bin/kalshi-tap'
 
 # Kalshi API credentials
