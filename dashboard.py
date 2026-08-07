@@ -323,6 +323,11 @@ def read_pid_info(pid_file):
         info["alive"] = True
     except Exception:
         info["stale_file"] = True
+        # Auto-clean: delete the stale PID file so watchdog restarts fresh
+        try:
+            os.remove(pid_file)
+        except Exception:
+            pass
         return info
     try:
         raw = open(f"/proc/{pid}/cmdline", "rb").read().replace(b"\x00", b" ").decode(errors="ignore").strip()
