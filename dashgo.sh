@@ -4,11 +4,17 @@ set +e
 HOME_DIR="${HOME:-/data/data/com.termux/files/home}"
 cd "$HOME_DIR" || exit 1
 
-# ── Perpetual watchdog (master daemon — run once, all services stay alive forever) ──
-if ! pgrep -f "perpetual_watchdog.sh" >/dev/null 2>&1; then
-    setsid bash "$HOME_DIR/perpetual_watchdog.sh" >>"$HOME_DIR/perpetual_watchdog.log" 2>&1 < /dev/null &
-    echo "[dashgo] Perpetual watchdog spawned (PID $!) — all 8 services will be kept alive forever"
-fi
+# ── Perpetual watchdog (self-healing — dashgo keeps it alive forever) ──
+(
+  while true; do
+    if ! pgrep -f "perpetual_watchdog.sh" >/dev/null 2>&1; then
+      setsid bash "$HOME_DIR/perpetual_watchdog.sh" >>"$HOME_DIR/perpetual_watchdog.log" 2>&1 < /dev/null &
+      echo "[dashgo] 🦷 Perpetual watchdog respawned (PID $!)"
+    fi
+    sleep 5
+  done
+) &
+echo "[dashgo] Perpetual watchdog loop started — will auto-revive if watchdog ever dies"
 
 # Load keys quietly
 if [ -f "$HOME_DIR/.env" ]; then
