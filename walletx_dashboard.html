@@ -476,7 +476,7 @@ async function doVaultImport(){
  document.getElementById('vaultResult').style.display='block';
  document.getElementById('vaultResult').textContent='Detecting key types, deriving addresses, checking balances…';
  try{
-  let resp=await fetch('/api/vault/import',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({raw:text})});
+  let resp=await fetch('/api/vault/import',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({raw:txt})});
   let d=await resp.json();
   if(d.ok){
    document.getElementById('vaultResult').textContent=
