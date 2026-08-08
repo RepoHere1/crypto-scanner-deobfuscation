@@ -93,3 +93,5 @@ inbox/
 feed_smooth_run.out
 walletx_stream.log
 forensic_exports/
+ffod.jsonl
+ffod.txt

